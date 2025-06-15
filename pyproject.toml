@@ -1,0 +1,83 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "concurry"
+dynamic = ["version"]
+authors = [
+    { name = "Abhishek Divekar", email = "adivekar@utexas.edu" }
+]
+description = "A unified, delightful Python concurrency library"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Distributed Computing",
+]
+license-files = ["LICENSE"]
+keywords = ["concurrency", "parallel", "async", "threading", "multiprocessing", "ray"]
+dependencies = [
+    "tqdm>=4.60.0",
+]
+
+[project.optional-dependencies]
+ray = [
+    "ray>=2.0.0",
+    "cloudpickle>=2.0.0",
+]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov>=2.0",
+    "black>=21.0",
+    "flake8>=3.8",
+    "mypy>=0.900",
+]
+all = [
+    "ray>=2.0.0",
+    "cloudpickle>=2.0.0",
+]
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 110
+fix = true
+force-exclude = true
+
+[tool.ruff.lint]
+fixable = [
+    "I",    # Add all rules under isort linter: https://docs.astral.sh/ruff/rules/#isort-i
+    "W",    # Add all rules under whitespace: https://docs.astral.sh/ruff/rules/#warning-w
+    "E401", # multiple-imports-on-one-line: https://docs.astral.sh/ruff/rules/multiple-imports-on-one-line/
+    "E713", # not-in-test: https://docs.astral.sh/ruff/rules/not-in-test/
+    "E721", # type-comparison: https://docs.astral.sh/ruff/rules/type-comparison/
+    "E722", # bare-except: https://docs.astral.sh/ruff/rules/bare-except/
+    "F401", # unused-import: https://docs.astral.sh/ruff/rules/unused-import/
+    "F541", # f-string-missing-placeholders: https://docs.astral.sh/ruff/rules/f-string-missing-placeholders/
+    "F811", # redefined-while-unused: https://docs.astral.sh/ruff/rules/redefined-while-unused/
+    "F841", # unused-variable: https://docs.astral.sh/ruff/rules/unused-variable/
+]
+ignore = [
+    ## Ignored because it makes the code too verbose:
+    "E731", # lambda-assignment: https://docs.astral.sh/ruff/rules/lambda-assignment/
+    "E741", # ambiguous-variable-name: https://docs.astral.sh/ruff/rules/ambiguous-variable-name/
+
+    ## Ignored because it causes no harm (and is needed sometimes):
+    "F841",     # unused-variable: https://docs.astral.sh/ruff/rules/unused-variable/
+]

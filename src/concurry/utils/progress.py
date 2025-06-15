@@ -81,7 +81,7 @@ class ProgressBar:
                 if "desc" in kwargs:
                     progress_bar.set_description(kwargs["desc"])
                 if "unit" in kwargs:
-                    progress_bar.set_description(kwargs["unit"])
+                    progress_bar.set_unit(kwargs["unit"])
             self.__dict__.update(progress_bar.__dict__)
             return
 

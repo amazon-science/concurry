@@ -10,15 +10,13 @@ authors = [
 ]
 description = "A unified, delightful Python concurrency library"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -29,6 +27,7 @@ classifiers = [
 license-files = ["LICENSE"]
 keywords = ["concurrency", "parallel", "async", "threading", "multiprocessing", "ray"]
 dependencies = [
+    "autoenum>=1.0.0",
     "tqdm>=4.60.0",
 ]
 

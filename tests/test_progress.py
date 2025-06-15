@@ -3,7 +3,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from concurry.utils.progress import _IS_RAY_INSTALLED, ProgressBar, ray_context
+from concurry.utils.frameworks import _IS_RAY_INSTALLED, RayContext, ray_context
+from concurry.utils.progress import ProgressBar
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -72,7 +73,7 @@ def test_progress_bar_with_ray():
         return f"{ray_context()} {position}"
 
     results = ray.get([f.remote(i) for i in range(10)])
-    assert results == [f"task {i}" for i in range(10)]
+    assert results == [f"{RayContext.Task} {i}" for i in range(10)]
 
 
 def test_progress_bar_with_multiple_threads():
@@ -101,7 +102,7 @@ def test_progress_bar_with_ray_parallel():
         return f"{ray_context()} {position}"
 
     results = ray.get([f.remote(i) for i in range(10)])
-    assert results == [f"task {i}" for i in range(10)]
+    assert results == [f"{RayContext.Task} {i}" for i in range(10)]
 
 
 def test_progress_bar_styles():

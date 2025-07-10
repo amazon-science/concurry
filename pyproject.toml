@@ -27,8 +27,8 @@ classifiers = [
 license-files = ["LICENSE"]
 keywords = ["concurrency", "parallel", "async", "threading", "multiprocessing", "ray"]
 dependencies = [
-    "autoenum>=1.0.0",
     "tqdm>=4.60.0",
+    "morphic@ git+https://github.com/adivekar-utexas/morphic.git@mainline",
 ]
 
 [project.optional-dependencies]
@@ -50,6 +50,9 @@ all = [
 
 [tool.hatch.version]
 source = "vcs"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

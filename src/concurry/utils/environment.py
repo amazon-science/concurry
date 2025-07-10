@@ -1,8 +1,10 @@
-from typing import Optional, Tuple
 import os
+from typing import Optional, Tuple
+
 
 class EnvConfig:
     """Environment-based configuration with type conversion."""
+
     def __new__(cls, *args, **kwargs):
         raise TypeError(f"{cls.__name__} may not be instantiated")
 
@@ -32,7 +34,7 @@ class EnvConfig:
 
     @staticmethod
     def get_bool(
-        key: str, 
+        key: str,
         default: Optional[bool] = None,
         *,
         true_values: Tuple[str, ...] = ("true", "1", "yes", "on"),
@@ -43,7 +45,7 @@ class EnvConfig:
         if value is None:
             return default
         if str(value).lower() in true_values:
-            return True 
+            return True
         elif str(value).lower() in false_values:
             return False
         raise ValueError(f"Invalid value for {key}: {value}")

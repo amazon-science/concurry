@@ -10,7 +10,6 @@ import pytest
 from concurry.core.future import (
     AsyncioFuture,
     ConcurrentFuture,
-    ConcurryFuture,
     SyncFuture,
     wrap_future,
 )
@@ -22,7 +21,7 @@ class TestSyncFuture:
     def test_sync_future_with_result(self):
         """Test SyncFuture with a successful result."""
         future = SyncFuture(result=42)
-        
+
         assert future.result() == 42
         assert future.done()
         assert not future.cancelled()
@@ -33,10 +32,10 @@ class TestSyncFuture:
         """Test SyncFuture with an exception."""
         exc = ValueError("test error")
         future = SyncFuture(exception=exc)
-        
+
         with pytest.raises(ValueError, match="test error"):
             future.result()
-        
+
         assert future.done()
         assert not future.cancelled()
         assert future.exception() is exc
@@ -46,20 +45,21 @@ class TestSyncFuture:
         """Test SyncFuture callback functionality."""
         future = SyncFuture(result="test")
         callback_called = []
-        
+
         def callback(fut):
             callback_called.append(fut.result())
-        
+
         future.add_done_callback(callback)
         assert callback_called == ["test"]  # Called immediately since already done
 
     def test_sync_future_awaitable(self):
         """Test SyncFuture can be awaited."""
+
         async def test_await():
             future = SyncFuture(result="awaited")
             result = await future
             return result
-        
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -76,9 +76,9 @@ class TestConcurrentFuture:
         """Test ConcurrentFuture wrapping concurrent.futures.Future."""
         cf_future = concurrent.futures.Future()
         cf_future.set_result(123)
-        
+
         future = ConcurrentFuture(cf_future)
-        
+
         assert future.result() == 123
         assert future.done()
         assert not future.cancelled()
@@ -89,12 +89,12 @@ class TestConcurrentFuture:
         cf_future = concurrent.futures.Future()
         exc = RuntimeError("concurrent error")
         cf_future.set_exception(exc)
-        
+
         future = ConcurrentFuture(cf_future)
-        
+
         with pytest.raises(RuntimeError, match="concurrent error"):
             future.result()
-        
+
         assert future.done()
         assert not future.cancelled()
         assert future.exception() is exc
@@ -103,7 +103,7 @@ class TestConcurrentFuture:
         """Test ConcurrentFuture with timeout."""
         cf_future = concurrent.futures.Future()
         future = ConcurrentFuture(cf_future)
-        
+
         with pytest.raises(concurrent.futures.TimeoutError):
             future.result(timeout=0.1)
 
@@ -111,7 +111,7 @@ class TestConcurrentFuture:
         """Test ConcurrentFuture cancellation."""
         cf_future = concurrent.futures.Future()
         future = ConcurrentFuture(cf_future)
-        
+
         assert future.cancel()
         assert future.cancelled()
 
@@ -120,13 +120,13 @@ class TestConcurrentFuture:
         cf_future = concurrent.futures.Future()
         future = ConcurrentFuture(cf_future)
         callback_results = []
-        
+
         def callback(fut):
             callback_results.append("called")
-        
+
         future.add_done_callback(callback)
         cf_future.set_result("done")
-        
+
         # Give a moment for callback to be called
         time.sleep(0.01)
         assert callback_results == ["called"]
@@ -142,9 +142,9 @@ class TestAsyncioFuture:
         try:
             asyncio_future = loop.create_future()
             asyncio_future.set_result(99)
-            
+
             future = AsyncioFuture(asyncio_future)
-            
+
             assert future.result() == 99
             assert future.done()
             assert not future.cancelled()
@@ -160,12 +160,12 @@ class TestAsyncioFuture:
             asyncio_future = loop.create_future()
             exc = ValueError("asyncio error")
             asyncio_future.set_exception(exc)
-            
+
             future = AsyncioFuture(asyncio_future)
-            
+
             with pytest.raises(ValueError, match="asyncio error"):
                 future.result()
-            
+
             assert future.done()
             assert not future.cancelled()
             assert future.exception() is exc
@@ -179,7 +179,7 @@ class TestAsyncioFuture:
         try:
             asyncio_future = loop.create_future()
             future = AsyncioFuture(asyncio_future)
-            
+
             with pytest.raises(TimeoutError, match="Future did not complete within timeout"):
                 future.result(timeout=0.1)
         finally:
@@ -192,7 +192,7 @@ class TestAsyncioFuture:
         try:
             asyncio_future = loop.create_future()
             future = AsyncioFuture(asyncio_future)
-            
+
             assert future.cancel()
             assert future.cancelled()
         finally:
@@ -206,16 +206,16 @@ class TestAsyncioFuture:
             asyncio_future = loop.create_future()
             future = AsyncioFuture(asyncio_future)
             callback_results = []
-            
+
             def callback(fut):
                 callback_results.append(fut.result())
-            
+
             future.add_done_callback(callback)
             asyncio_future.set_result("asyncio_done")
-            
+
             # Give the event loop a chance to run the callback
             loop.run_until_complete(asyncio.sleep(0))
-            
+
             # The callback should be called
             assert callback_results == ["asyncio_done"]
         finally:
@@ -229,7 +229,7 @@ class TestWrapFuture:
         """Test wrap_future with SyncFuture returns the same instance."""
         original = SyncFuture(result=42)
         wrapped = wrap_future(original)
-        
+
         assert wrapped is original
         assert wrapped.result() == 42
 
@@ -237,9 +237,9 @@ class TestWrapFuture:
         """Test wrap_future with concurrent.futures.Future."""
         cf_future = concurrent.futures.Future()
         cf_future.set_result(123)
-        
+
         wrapped = wrap_future(cf_future)
-        
+
         assert isinstance(wrapped, ConcurrentFuture)
         assert wrapped.result() == 123
 
@@ -250,9 +250,9 @@ class TestWrapFuture:
         try:
             asyncio_future = loop.create_future()
             asyncio_future.set_result(99)
-            
+
             wrapped = wrap_future(asyncio_future)
-            
+
             assert isinstance(wrapped, AsyncioFuture)
             assert wrapped.result() == 99
         finally:
@@ -260,17 +260,18 @@ class TestWrapFuture:
 
     def test_wrap_future_with_asyncio_task(self):
         """Test wrap_future with asyncio.Task (which is also an asyncio future)."""
+
         async def dummy_coroutine():
             return "task_result"
-        
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
             task = loop.create_task(dummy_coroutine())
             loop.run_until_complete(task)  # Complete the task
-            
+
             wrapped = wrap_future(task)
-            
+
             assert isinstance(wrapped, AsyncioFuture)
             assert wrapped.result() == "task_result"
         finally:
@@ -279,14 +280,14 @@ class TestWrapFuture:
     def test_wrap_future_with_plain_value(self):
         """Test wrap_future with a plain value (fallback case)."""
         wrapped = wrap_future("hello")
-        
+
         assert isinstance(wrapped, SyncFuture)
         assert wrapped.result() == "hello"
 
     def test_wrap_future_with_none(self):
         """Test wrap_future with None value."""
         wrapped = wrap_future(None)
-        
+
         assert isinstance(wrapped, SyncFuture)
         assert wrapped.result() is None
 
@@ -294,7 +295,7 @@ class TestWrapFuture:
         """Test wrap_future with a complex object."""
         obj = {"key": "value", "list": [1, 2, 3]}
         wrapped = wrap_future(obj)
-        
+
         assert isinstance(wrapped, SyncFuture)
         assert wrapped.result() == obj
 
@@ -304,10 +305,10 @@ class TestWrapFuture:
         mock_obj = Mock()
         mock_obj.result = Mock(return_value="fake_result")
         mock_obj.done = Mock(return_value=True)
-        
+
         # This should NOT be treated as an asyncio future
         wrapped = wrap_future(mock_obj)
-        
+
         # Should fall back to SyncFuture with the mock object as the result
         assert isinstance(wrapped, SyncFuture)
         assert wrapped.result() is mock_obj
@@ -318,11 +319,12 @@ class TestAsyncAwait:
 
     def test_sync_future_await(self):
         """Test awaiting SyncFuture."""
+
         async def test_await():
             future = SyncFuture(result="awaited_sync")
             result = await future
             return result
-        
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -333,13 +335,14 @@ class TestAsyncAwait:
 
     def test_concurrent_future_await(self):
         """Test awaiting ConcurrentFuture."""
+
         async def test_await():
             cf_future = concurrent.futures.Future()
             cf_future.set_result("awaited_concurrent")
             future = ConcurrentFuture(cf_future)
             result = await future
             return result
-        
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -350,6 +353,7 @@ class TestAsyncAwait:
 
     def test_asyncio_future_await(self):
         """Test awaiting AsyncioFuture."""
+
         async def test_await():
             loop = asyncio.get_event_loop()
             asyncio_future = loop.create_future()
@@ -357,7 +361,7 @@ class TestAsyncAwait:
             future = AsyncioFuture(asyncio_future)
             result = await future
             return result
-        
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -373,20 +377,20 @@ class TestIntegration:
     def test_wrap_future_comprehensive(self):
         """Comprehensive test of wrap_future with all supported types."""
         # Test all the cases from the notebook
-        
+
         # SyncFuture
         sync_future = SyncFuture(result=42)
         wrapped_sync = wrap_future(sync_future)
         assert wrapped_sync is sync_future
         assert wrapped_sync.result() == 42
-        
+
         # concurrent.futures.Future
         cf_future = concurrent.futures.Future()
         cf_future.set_result(123)
         wrapped_concurrent = wrap_future(cf_future)
         assert isinstance(wrapped_concurrent, ConcurrentFuture)
         assert wrapped_concurrent.result() == 123
-        
+
         # asyncio.Future
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -398,7 +402,7 @@ class TestIntegration:
             assert wrapped_asyncio.result() == 99
         finally:
             loop.close()
-        
+
         # Plain value
         wrapped_value = wrap_future("hello")
         assert isinstance(wrapped_value, SyncFuture)
@@ -411,7 +415,7 @@ class TestIntegration:
         sync_future = SyncFuture(exception=sync_exc)
         with pytest.raises(ValueError, match="sync error"):
             sync_future.result()
-        
+
         # ConcurrentFuture with exception
         cf_future = concurrent.futures.Future()
         cf_exc = RuntimeError("concurrent error")
@@ -419,7 +423,7 @@ class TestIntegration:
         concurrent_future = ConcurrentFuture(cf_future)
         with pytest.raises(RuntimeError, match="concurrent error"):
             concurrent_future.result()
-        
+
         # AsyncioFuture with exception
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -431,4 +435,4 @@ class TestIntegration:
             with pytest.raises(ValueError, match="asyncio error"):
                 asyncio_wrapper.result()
         finally:
-            loop.close() 
+            loop.close()

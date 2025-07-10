@@ -1,47 +1,15 @@
 """Configuration classes for concurry executors."""
 
-from dataclasses import dataclass, fields
-from typing import Any, Dict, Optional, Type, TypeVar
+from typing import Optional
 
-from autoenum import AutoEnum, alias, auto
+from morphic.autoenum import AutoEnum, alias, auto
+from pydantic import confloat, conint, field_validator, model_validator
+
+from morphic.typed import Typed
 
 # Environment variable names for configuration
 ENV_MAX_THREADS = "CONCURRY_MAX_THREADS"
 ENV_MAX_PROCESSES = "CONCURRY_MAX_PROCESSES"
-
-T = TypeVar("T", bound="_Config")
-
-
-class _Config:
-    """Base class for all configuration classes with dict conversion support."""
-
-    @classmethod
-    def from_dict(cls: Type[T], data: Dict[str, Any]) -> T:
-        """Create config instance from dictionary with automatic type conversion."""
-        if not isinstance(data, dict):
-            raise TypeError(f"Expected dict, got {type(data)}")
-
-        # Get field information for this dataclass
-        field_info = {field.name: field for field in fields(cls)}
-        constructor_inputs = {}
-
-        for field_name, value in data.items():
-            if field_name not in field_info:
-                # Skip extra fields that don't exist in the dataclass
-                continue
-
-            field = field_info[field_name]
-
-            # Handle enum conversion
-            if hasattr(field.type, "__bases__") and AutoEnum in field.type.__bases__:
-                if isinstance(value, str):
-                    constructor_inputs[field_name] = field.type(value)
-                else:
-                    constructor_inputs[field_name] = value
-            else:
-                constructor_inputs[field_name] = value
-
-        return cls(**constructor_inputs)
 
 
 class ExecutionMode(AutoEnum):
@@ -64,8 +32,7 @@ class RateLimitAlgorithm(AutoEnum):
     LeakyBucket = alias("leaky")  # Smooth traffic shaping
 
 
-@dataclass
-class RateLimitConfig(_Config):
+class RateLimitConfig(Typed):
     """Comprehensive rate limiting configuration."""
 
     # Core rate limiting parameters
@@ -78,19 +45,31 @@ class RateLimitConfig(_Config):
     refill_rate: Optional[float] = None  # For token bucket - tokens per second
     leak_rate: Optional[float] = None  # For leaky bucket
 
-    def __post_init__(self):
-        """Validate and set defaults based on algorithm."""
-        if self.max_calls <= 0:
+    @field_validator('max_calls')
+    @classmethod
+    def validate_max_calls(cls, v):
+        if v <= 0:
             raise ValueError("max_calls must be positive")
-        if self.time_window <= 0:
-            raise ValueError("time_window must be positive")
+        return v
 
-        # Set sensible defaults based on algorithm
+    @field_validator('time_window')
+    @classmethod
+    def validate_time_window(cls, v):
+        if v <= 0:
+            raise ValueError("time_window must be positive")
+        return v
+
+    @model_validator(mode='after')
+    def set_defaults_by_algorithm(self):
+        """Set sensible defaults based on algorithm."""
         if self.algorithm == RateLimitAlgorithm.TokenBucket:
             if self.burst_capacity is None:
-                self.burst_capacity = self.max_calls  # Allow full window as burst
+                # Create a copy with the updated value since the model is frozen
+                return self.model_copy(update={'burst_capacity': self.max_calls})
             if self.refill_rate is None:
-                self.refill_rate = self.max_calls / self.time_window
+                # Create a copy with the updated value since the model is frozen
+                return self.model_copy(update={'refill_rate': self.max_calls / self.time_window})
+        return self
 
     @property
     def calls_per_second(self) -> float:
@@ -113,8 +92,7 @@ class RateLimitConfig(_Config):
         return cls(max_calls=max_calls, time_window=3600.0, **kwargs)
 
 
-@dataclass
-class RetryConfig(_Config):
+class RetryConfig(Typed):
     """Configuration for retry behavior."""
 
     max_retries: int
@@ -123,22 +101,34 @@ class RetryConfig(_Config):
     jitter: float = 0.5
     retryable_exceptions: tuple = (Exception,)
 
-    def __post_init__(self):
-        if self.max_retries < 0:
+    @field_validator('max_retries')
+    @classmethod
+    def validate_max_retries(cls, v):
+        if v < 0:
             raise ValueError("max_retries must be non-negative")
-        if self.initial_delay < 0:
+        return v
+
+    @field_validator('initial_delay')
+    @classmethod
+    def validate_initial_delay(cls, v):
+        if v < 0:
             raise ValueError("initial_delay must be positive")
-        if self.exponential_base <= 1:
+        return v
+
+    @field_validator('exponential_base')
+    @classmethod
+    def validate_exponential_base(cls, v):
+        if v <= 1:
             raise ValueError("exponential_base must be greater than 1")
+        return v
 
 
-@dataclass
-class ExecutorConfig(_Config):
+class ExecutorConfig(Typed):
     """Unified configuration for all execution modes."""
 
     # Core execution settings
     mode: ExecutionMode = ExecutionMode.Auto
-    max_workers: Optional[int] = None
+    max_workers: Optional[conint(ge=0)] = None
     timeout: Optional[float] = None
 
     # Rate limiting configuration
@@ -147,50 +137,52 @@ class ExecutorConfig(_Config):
     # Retry configuration
     retry_config: Optional[RetryConfig] = None
 
-    def __post_init__(self):
-        """Validate configuration and set defaults."""
-        # Convert string mode to ExecutionMode enum if needed
-        if isinstance(self.mode, str):
-            self.mode = ExecutionMode(self.mode)
-
-        if self.max_workers is not None and self.max_workers <= 0:
-            raise ValueError("max_workers must be positive")
-
-        # Set reasonable defaults based on mode
-        if self.max_workers is None:
-            self.max_workers = self._get_default_max_workers()
-
-        # Auto-convert dictionaries to config objects (handled by _Config.from_dict now)
-        if self.rate_limit is not None and isinstance(self.rate_limit, dict):
-            self.rate_limit = RateLimitConfig.from_dict(self.rate_limit)
-
-        if self.retry_config is not None and isinstance(self.retry_config, dict):
-            self.retry_config = RetryConfig.from_dict(self.retry_config)
-
-        if self.timeout is not None and self.timeout <= 0:
-            raise ValueError("timeout must be positive")
-
+    @field_validator('mode', mode='before')
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "ExecutorConfig":
-        """Create ExecutorConfig from dictionary with automatic nested config conversion."""
-        if not isinstance(data, dict):
-            raise TypeError(f"Expected dict, got {type(data)}")
+    def validate_mode(cls, v):
+        """Convert string mode to ExecutionMode enum if needed."""
+        if isinstance(v, str):
+            return ExecutionMode(v)
+        return v
 
-        # Make a copy to avoid mutating the original
-        data = data.copy()
+    @field_validator('rate_limit', mode='before')
+    @classmethod
+    def validate_rate_limit(cls, v):
+        """Auto-convert dictionaries to config objects."""
+        if v is not None and isinstance(v, dict):
+            return RateLimitConfig(**v)
+        return v
 
-        # Handle nested config conversion before calling parent
-        if "rate_limit" in data and isinstance(data["rate_limit"], dict):
-            data["rate_limit"] = RateLimitConfig.from_dict(data["rate_limit"])
+    @field_validator('retry_config', mode='before')
+    @classmethod
+    def validate_retry_config(cls, v):
+        """Auto-convert dictionaries to config objects."""
+        if v is not None and isinstance(v, dict):
+            return RetryConfig(**v)
+        return v
 
-        if "retry_config" in data and isinstance(data["retry_config"], dict):
-            data["retry_config"] = RetryConfig.from_dict(data["retry_config"])
+    @field_validator('max_workers')
+    @classmethod
+    def validate_max_workers(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError("max_workers must be positive")
+        return v
 
-        # Handle mode enum conversion
-        if "mode" in data and isinstance(data["mode"], str):
-            data["mode"] = ExecutionMode(data["mode"])
+    @field_validator('timeout')
+    @classmethod
+    def validate_timeout(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError("timeout must be positive")
+        return v
 
-        return cls(**data)
+    @model_validator(mode='after')
+    def set_default_max_workers(self):
+        """Set reasonable defaults based on mode."""
+        if self.max_workers is None:
+            default_workers = self._get_default_max_workers()
+            if default_workers is not None:
+                return self.model_copy(update={'max_workers': default_workers})
+        return self
 
     def _get_default_max_workers(self) -> Optional[int]:
         """Get sensible default for max_workers based on execution mode."""

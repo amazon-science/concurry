@@ -9,6 +9,7 @@ from concurry.core.config import (
     RateLimitConfig,
     RetryConfig,
 )
+from concurry.utils import BaseConfig
 
 
 class TestExecutorConfig:
@@ -266,3 +267,187 @@ class TestIntegration:
         assert config.max_workers == 16
         assert config.rate_limit.algorithm == RateLimitAlgorithm.LeakyBucket
         assert config.rate_limit.calls_per_second == 1000 / 3600
+
+
+class TestBaseConfig:
+    """Test the enhanced BaseConfig functionality."""
+
+    def test_to_dict_basic(self):
+        """Test basic to_dict functionality."""
+        config = RateLimitConfig.per_minute(100)
+        result = config.to_dict()
+        
+        expected = {
+            "max_calls": 100,
+            "time_window": 60.0,
+            "algorithm": "sliding",  # AutoEnum value
+            "burst_capacity": None,
+            "refill_rate": None,
+            "leak_rate": None
+        }
+        assert result == expected
+
+    def test_to_dict_exclude_none(self):
+        """Test to_dict with exclude_none=True."""
+        config = RateLimitConfig.per_minute(100)
+        result = config.to_dict(exclude_none=True)
+        
+        expected = {
+            "max_calls": 100,
+            "time_window": 60.0,
+            "algorithm": "sliding"
+        }
+        assert result == expected
+
+    def test_to_dict_exclude_defaults(self):
+        """Test to_dict with exclude_defaults=True."""
+        config = RetryConfig(max_retries=5)  # Only set non-default value
+        result = config.to_dict(exclude_defaults=True)
+        
+        # Should only include non-default values
+        assert "max_retries" in result
+        assert result["max_retries"] == 5
+        # Default values should be excluded
+        assert "initial_delay" not in result or result["initial_delay"] != 0.0
+
+    def test_to_dict_nested_objects(self):
+        """Test to_dict with nested config objects."""
+        config = ExecutorConfig(
+            mode=ExecutionMode.Threads,
+            max_workers=4,
+            rate_limit=RateLimitConfig.per_minute(100),
+            retry_config=RetryConfig(max_retries=3)
+        )
+        
+        result = config.to_dict()
+        
+        # Should have nested dictionaries
+        assert isinstance(result["rate_limit"], dict)
+        assert isinstance(result["retry_config"], dict)
+        assert result["rate_limit"]["max_calls"] == 100
+        assert result["retry_config"]["max_retries"] == 3
+
+    def test_copy_method(self):
+        """Test the copy method with changes."""
+        original = ExecutorConfig(
+            mode=ExecutionMode.Threads,
+            max_workers=4,
+            timeout=30.0
+        )
+        
+        # Create a copy with changes
+        modified = original.copy(max_workers=8, timeout=60.0)
+        
+        # Original should be unchanged
+        assert original.max_workers == 4
+        assert original.timeout == 30.0
+        
+        # Copy should have the changes
+        assert modified.max_workers == 8
+        assert modified.timeout == 60.0
+        assert modified.mode == ExecutionMode.Threads  # Unchanged field
+
+    def test_copy_with_nested_objects(self):
+        """Test copy method with nested config changes."""
+        original = ExecutorConfig(
+            mode=ExecutionMode.Threads,
+            max_workers=4,
+            rate_limit=RateLimitConfig.per_minute(100)
+        )
+        
+        # Create copy with nested changes
+        modified = original.copy(
+            max_workers=8,
+            rate_limit={"max_calls": 200, "time_window": 60.0, "algorithm": "token"}
+        )
+        
+        # Original should be unchanged
+        assert original.rate_limit.max_calls == 100
+        
+        # Copy should have new nested object
+        assert modified.rate_limit.max_calls == 200
+        assert modified.rate_limit.algorithm == RateLimitAlgorithm.TokenBucket
+
+    def test_from_dict_strict_mode(self):
+        """Test from_dict with strict=True."""
+        # Should work with valid fields
+        data = {"max_calls": 100, "time_window": 60.0}
+        config = RateLimitConfig.from_dict(data, strict=True)
+        assert config.max_calls == 100
+        
+        # Should fail with unknown fields
+        invalid_data = {"max_calls": 100, "time_window": 60.0, "unknown_field": "value"}
+        with pytest.raises(ValueError, match="Unknown field 'unknown_field'"):
+            RateLimitConfig.from_dict(invalid_data, strict=True)
+
+    def test_from_dict_non_strict_mode(self):
+        """Test from_dict with strict=False (default)."""
+        # Should ignore unknown fields
+        data = {"max_calls": 100, "time_window": 60.0, "unknown_field": "value"}
+        config = RateLimitConfig.from_dict(data)  # strict=False by default
+        assert config.max_calls == 100
+        assert config.time_window == 60.0
+
+    def test_enhanced_repr(self):
+        """Test the enhanced __repr__ method."""
+        config = RateLimitConfig.per_minute(100)
+        repr_str = repr(config)
+        
+        # Should include class name and all fields
+        assert "RateLimitConfig" in repr_str
+        assert "max_calls=100" in repr_str
+        assert "time_window=60.0" in repr_str
+        assert "algorithm=" in repr_str
+
+    def test_validation_called_automatically(self):
+        """Test that validation is called automatically during creation."""
+        # This should raise a validation error
+        with pytest.raises(ValueError, match="max_calls must be positive"):
+            RateLimitConfig(max_calls=0, time_window=60.0)
+
+    def test_type_conversion_edge_cases(self):
+        """Test edge cases in type conversion."""
+        # Test string to enum conversion
+        config = ExecutorConfig.from_dict({"mode": "threads", "max_workers": "4"})
+        assert config.mode == ExecutionMode.Threads
+        assert config.max_workers == 4  # String converted to int
+
+    def test_optional_field_handling(self):
+        """Test handling of Optional fields."""
+        # Should work with None values
+        config = ExecutorConfig.from_dict({
+            "mode": "auto",
+            "max_workers": None,
+            "timeout": None
+        })
+        assert config.max_workers is None
+        assert config.timeout is None
+
+    def test_deeply_nested_configs(self):
+        """Test deeply nested configuration structures."""
+        complex_config = ExecutorConfig.from_dict({
+            "mode": "threads",
+            "max_workers": 4,
+            "rate_limit": {
+                "max_calls": 100,
+                "time_window": 60.0,
+                "algorithm": "token",
+                "burst_capacity": 150
+            },
+            "retry_config": {
+                "max_retries": 3,
+                "initial_delay": 1.0,
+                "exponential_base": 2.0
+            }
+        })
+        
+        # All nested objects should be properly converted
+        assert isinstance(complex_config.rate_limit, RateLimitConfig)
+        assert isinstance(complex_config.retry_config, RetryConfig)
+        assert complex_config.rate_limit.algorithm == RateLimitAlgorithm.TokenBucket
+        assert complex_config.retry_config.max_retries == 3
+        
+        # to_dict should work on complex nested structures
+        result_dict = complex_config.to_dict()
+        assert isinstance(result_dict["rate_limit"], dict)
+        assert isinstance(result_dict["retry_config"], dict)

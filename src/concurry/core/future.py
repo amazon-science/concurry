@@ -1,13 +1,19 @@
 """Unified Future interface for concurry."""
 
 import asyncio
+import threading
 import time
+import uuid
 from abc import ABC, abstractmethod
 from concurrent.futures import Future as PyFuture
-from typing import Any, Callable, Optional
+from typing import Any, Callable, ClassVar, Dict, NoReturn, Optional
+
+from morphic import Typed
+
+from ..utils.frameworks import _IS_RAY_INSTALLED
 
 
-class ConcurryFuture(ABC):
+class BaseFuture(Typed, ABC):
     """
     Abstract base class providing a unified future interface.
 
@@ -29,6 +35,15 @@ class ConcurryFuture(ABC):
 
     4. **Control**: Gives precise control over future behavior, especially for edge cases and error conditions. For example, custom timeout handling can be implemented differently from framework defaults.
     """
+
+    FUTURE_UUID_PREFIX: ClassVar[str]
+
+    uuid: str
+
+    @classmethod
+    def pre_initialize(cls, data: Dict) -> NoReturn:
+        """Pre-initialize the future."""
+        data["uuid"] = f"{cls.FUTURE_UUID_PREFIX}{str(uuid.uuid4())}"
 
     @abstractmethod
     def result(self, timeout: Optional[float] = None) -> Any:
@@ -102,8 +117,10 @@ class ConcurryFuture(ABC):
         return self.result()
 
 
-class SyncFuture(ConcurryFuture):
+class SyncFuture(BaseFuture):
     """Future implementation for synchronous execution."""
+
+    FUTURE_UUID_PREFIX: ClassVar[str] = "sync-future-"
 
     def __init__(self, result: Any = None, exception: Optional[Exception] = None):
         self._result = result
@@ -134,8 +151,10 @@ class SyncFuture(ConcurryFuture):
         fn(self)
 
 
-class ConcurrentFuture(ConcurryFuture):
+class ConcurrentFuture(BaseFuture):
     """Wrapper for concurrent.futures.Future to provide unified interface."""
+
+    FUTURE_UUID_PREFIX: ClassVar[str] = "concurrent-future-"
 
     def __init__(self, future: PyFuture):
         self._future = future
@@ -159,8 +178,10 @@ class ConcurrentFuture(ConcurryFuture):
         self._future.add_done_callback(fn)
 
 
-class AsyncioFuture(ConcurryFuture):
+class AsyncioFuture(BaseFuture):
     """Wrapper for asyncio Future to provide unified interface."""
+
+    FUTURE_UUID_PREFIX: ClassVar[str] = "asyncio-future-"
 
     def __init__(self, future):
         self._future = future
@@ -220,7 +241,99 @@ class AsyncioFuture(ConcurryFuture):
         self._future.add_done_callback(lambda fut: fn(self))
 
 
-def wrap_future(future: Any) -> ConcurryFuture:
+if _IS_RAY_INSTALLED:
+    import ray
+
+    class RayFutureWrapper(BaseFuture):
+        """Wrapper for Ray ObjectRef to provide unified interface."""
+
+        FUTURE_UUID_PREFIX: ClassVar[str] = "ray-future-"
+
+        def __init__(self, object_ref):
+            self._object_ref = object_ref
+            self._done = False
+            self._result = None
+            self._exception = None
+            self._cancelled = False
+            self._callbacks = []
+            self._lock = threading.Lock()
+
+        def result(self, timeout: Optional[float] = None) -> Any:
+            try:
+                if timeout is not None:
+                    result = ray.get(self._object_ref, timeout=timeout)
+                else:
+                    result = ray.get(self._object_ref)
+
+                with self._lock:
+                    self._result = result
+                    self._done = True
+                    # Call callbacks
+                    for callback in self._callbacks:
+                        try:
+                            callback(self)
+                        except:
+                            pass  # Ignore callback errors
+                    self._callbacks.clear()
+
+                return result
+            except Exception as e:
+                with self._lock:
+                    self._exception = e
+                    self._done = True
+                    # Call callbacks
+                    for callback in self._callbacks:
+                        try:
+                            callback(self)
+                        except:
+                            pass  # Ignore callback errors
+                    self._callbacks.clear()
+                raise
+
+        def cancel(self) -> bool:
+            try:
+                ray.cancel(self._object_ref)
+                with self._lock:
+                    self._cancelled = True
+                    self._done = True
+                return True
+            except:
+                return False
+
+        def cancelled(self) -> bool:
+            return self._cancelled
+
+        def done(self) -> bool:
+            if self._done:
+                return True
+
+            try:
+                ready, not_ready = ray.wait([self._object_ref], timeout=0)
+                done = len(ready) > 0
+                if done:
+                    with self._lock:
+                        self._done = True
+                return done
+            except:
+                return False
+
+        def exception(self, timeout: Optional[float] = None) -> Optional[Exception]:
+            if not self.done():
+                try:
+                    self.result(timeout)
+                except Exception as e:
+                    return e
+            return self._exception
+
+        def add_done_callback(self, fn: Callable) -> None:
+            with self._lock:
+                if self._done:
+                    fn(self)
+                else:
+                    self._callbacks.append(fn)
+
+
+def wrap_future(future: Any) -> BaseFuture:
     """Wrap any future-like object in the unified Future interface.
 
     Args:
@@ -229,12 +342,17 @@ def wrap_future(future: Any) -> ConcurryFuture:
     Returns:
         A Future instance providing the unified interface
     """
-    if isinstance(future, ConcurryFuture):
+    if isinstance(future, BaseFuture):
         return future
     elif isinstance(future, PyFuture):
         return ConcurrentFuture(future)
     elif asyncio.isfuture(future):
         return AsyncioFuture(future)
+    elif _IS_RAY_INSTALLED:
+        import ray
+
+        if isinstance(future, ray.ObjectRef):
+            return RayFutureWrapper(future)
 
     # Fallback - wrap as completed future
     return SyncFuture(result=future)

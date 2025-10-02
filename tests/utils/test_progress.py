@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+import concurry
 from concurry.utils.frameworks import _IS_RAY_INSTALLED, RayContext, ray_context
 from concurry.utils.progress import ProgressBar
 
@@ -17,7 +18,7 @@ def ray_cluster():
     import ray
 
     if not ray.is_initialized():
-        ray.init()
+        ray.init(runtime_env={"py_modules": [concurry]})
 
     yield
 

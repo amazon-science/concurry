@@ -2,10 +2,8 @@
 
 from typing import Optional
 
-from morphic.autoenum import AutoEnum, alias, auto
-from pydantic import confloat, conint, field_validator, model_validator
-
-from morphic.typed import Typed
+from morphic import AutoEnum, Typed, alias, auto
+from pydantic import conint, field_validator, model_validator
 
 # Environment variable names for configuration
 ENV_MAX_THREADS = "CONCURRY_MAX_THREADS"
@@ -45,30 +43,30 @@ class RateLimitConfig(Typed):
     refill_rate: Optional[float] = None  # For token bucket - tokens per second
     leak_rate: Optional[float] = None  # For leaky bucket
 
-    @field_validator('max_calls')
+    @field_validator("max_calls")
     @classmethod
     def validate_max_calls(cls, v):
         if v <= 0:
             raise ValueError("max_calls must be positive")
         return v
 
-    @field_validator('time_window')
+    @field_validator("time_window")
     @classmethod
     def validate_time_window(cls, v):
         if v <= 0:
             raise ValueError("time_window must be positive")
         return v
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def set_defaults_by_algorithm(self):
         """Set sensible defaults based on algorithm."""
         if self.algorithm == RateLimitAlgorithm.TokenBucket:
             if self.burst_capacity is None:
                 # Create a copy with the updated value since the model is frozen
-                return self.model_copy(update={'burst_capacity': self.max_calls})
+                return self.model_copy(update={"burst_capacity": self.max_calls})
             if self.refill_rate is None:
                 # Create a copy with the updated value since the model is frozen
-                return self.model_copy(update={'refill_rate': self.max_calls / self.time_window})
+                return self.model_copy(update={"refill_rate": self.max_calls / self.time_window})
         return self
 
     @property
@@ -101,21 +99,21 @@ class RetryConfig(Typed):
     jitter: float = 0.5
     retryable_exceptions: tuple = (Exception,)
 
-    @field_validator('max_retries')
+    @field_validator("max_retries")
     @classmethod
     def validate_max_retries(cls, v):
         if v < 0:
             raise ValueError("max_retries must be non-negative")
         return v
 
-    @field_validator('initial_delay')
+    @field_validator("initial_delay")
     @classmethod
     def validate_initial_delay(cls, v):
         if v < 0:
             raise ValueError("initial_delay must be positive")
         return v
 
-    @field_validator('exponential_base')
+    @field_validator("exponential_base")
     @classmethod
     def validate_exponential_base(cls, v):
         if v <= 1:
@@ -137,7 +135,7 @@ class ExecutorConfig(Typed):
     # Retry configuration
     retry_config: Optional[RetryConfig] = None
 
-    @field_validator('mode', mode='before')
+    @field_validator("mode", mode="before")
     @classmethod
     def validate_mode(cls, v):
         """Convert string mode to ExecutionMode enum if needed."""
@@ -145,7 +143,7 @@ class ExecutorConfig(Typed):
             return ExecutionMode(v)
         return v
 
-    @field_validator('rate_limit', mode='before')
+    @field_validator("rate_limit", mode="before")
     @classmethod
     def validate_rate_limit(cls, v):
         """Auto-convert dictionaries to config objects."""
@@ -153,7 +151,7 @@ class ExecutorConfig(Typed):
             return RateLimitConfig(**v)
         return v
 
-    @field_validator('retry_config', mode='before')
+    @field_validator("retry_config", mode="before")
     @classmethod
     def validate_retry_config(cls, v):
         """Auto-convert dictionaries to config objects."""
@@ -161,27 +159,27 @@ class ExecutorConfig(Typed):
             return RetryConfig(**v)
         return v
 
-    @field_validator('max_workers')
+    @field_validator("max_workers")
     @classmethod
     def validate_max_workers(cls, v):
         if v is not None and v <= 0:
             raise ValueError("max_workers must be positive")
         return v
 
-    @field_validator('timeout')
+    @field_validator("timeout")
     @classmethod
     def validate_timeout(cls, v):
         if v is not None and v <= 0:
             raise ValueError("timeout must be positive")
         return v
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def set_default_max_workers(self):
         """Set reasonable defaults based on mode."""
         if self.max_workers is None:
             default_workers = self._get_default_max_workers()
             if default_workers is not None:
-                return self.model_copy(update={'max_workers': default_workers})
+                return self.model_copy(update={"max_workers": default_workers})
         return self
 
     def _get_default_max_workers(self) -> Optional[int]:

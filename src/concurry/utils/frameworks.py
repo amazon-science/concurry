@@ -1,4 +1,4 @@
-from morphic.autoenum import AutoEnum, auto
+from morphic import AutoEnum, auto
 
 
 class RayContext(AutoEnum):

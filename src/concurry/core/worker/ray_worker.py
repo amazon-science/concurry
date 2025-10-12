@@ -1,11 +1,27 @@
 """Ray-based worker implementation for concurry."""
 
+import asyncio
+import inspect
 from typing import Any, Dict, Optional, Union
 
 from pydantic import PrivateAttr
 
 from ..future import RayFuture, SyncFuture
 from .base_worker import WorkerProxy
+
+
+# Note: Ray has native support for async methods in actors.
+# When you define an async method in a Ray actor and call it with .remote(),
+# Ray automatically handles the async execution.
+#
+# TODO: For optimal async performance with Ray, we could:
+# 1. Detect async methods and use Ray's async actor APIs
+# 2. Leverage Ray's asyncio integration for concurrent task execution
+# 3. Use Ray's async/await support for better concurrency within actors
+#
+# For now, Ray's default behavior correctly executes async functions,
+# though it may not provide the same level of concurrent execution as
+# a dedicated event loop (like AsyncioWorkerProxy).
 
 
 class RayWorkerProxy(WorkerProxy):
@@ -28,11 +44,25 @@ class RayWorkerProxy(WorkerProxy):
     - Execution errors are wrapped by Ray in `RayTaskError` (Ray's standard behavior)
     - Original exception information is preserved in the Ray error message
 
+    **Async Function Support:**
+
+    Ray has native support for async methods in actors - they work automatically.
+    For `submit_task()` with async functions, they are wrapped to execute correctly
+    but won't provide the same concurrency benefits as `AsyncioWorkerProxy`.
+
     **Example:**
 
         ```python
+        import asyncio
+
+        class MyWorker(Worker):
+            async def async_method(self, x: int) -> int:
+                await asyncio.sleep(0.01)
+                return x * 2
+
         # Use defaults (1 CPU, 0 GPUs)
         w = MyWorker.options(mode="ray").create()
+        result = w.async_method(5).result()  # Works with Ray's native async support
 
         # Override resources
         w = MyWorker.options(mode="ray", num_cpus=2, num_gpus=1).create()
@@ -42,6 +72,8 @@ class RayWorkerProxy(WorkerProxy):
             mode="ray",
             resources={"special_hardware": 1}
         ).create()
+
+        w.stop()
         ```
     """
 
@@ -136,6 +168,19 @@ class RayWorkerProxy(WorkerProxy):
         """
         # Don't catch exceptions - let them propagate immediately for fast failure
         import ray
+
+        # Ray doesn't support async functions directly in ray.remote() for tasks
+        # We need to wrap them to use asyncio.run()
+        if inspect.iscoroutinefunction(fn):
+            # Capture the async function in a closure
+            async_fn = fn
+
+            # Wrap the async function in a sync wrapper
+            def sync_wrapper(*args, **kwargs):
+                return asyncio.run(async_fn(*args, **kwargs))
+
+            # Use the wrapper instead
+            fn = sync_wrapper
 
         # Create a remote function and execute it on the actor's resources
         # We'll use ray.remote to make the function remote, then call it

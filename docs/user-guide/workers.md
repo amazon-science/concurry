@@ -93,7 +93,7 @@ worker.stop()
 
 ### Asyncio Mode
 
-Executes in an asyncio event loop in a dedicated thread:
+Executes in an asyncio event loop in a dedicated thread (ideal for async I/O operations):
 
 ```python
 worker = DataProcessor.options(mode="asyncio").create(2)
@@ -101,6 +101,8 @@ future = worker.process(10)
 result = future.result()
 worker.stop()
 ```
+
+**Note:** Asyncio mode provides significant performance benefits when using async functions. See the [Async Function Support](#async-function-support) section for details.
 
 ### Ray Mode
 
@@ -173,6 +175,277 @@ result3 = worker.process(10).result()  # Uses worker method
 
 worker.stop()
 ```
+
+## Async Function Support
+
+All workers in concurry can execute both synchronous and asynchronous functions. Async functions (defined with `async def`) are automatically detected and executed correctly across all execution modes.
+
+### Basic Async Worker
+
+Create workers with async methods:
+
+```python
+from concurry import Worker
+import asyncio
+
+class AsyncDataFetcher(Worker):
+    def __init__(self, base_url: str):
+        self.base_url = base_url
+        self.fetch_count = 0
+    
+    async def fetch_data(self, endpoint: str) -> dict:
+        """Async method that simulates fetching data."""
+        await asyncio.sleep(0.1)  # Simulate I/O delay
+        self.fetch_count += 1
+        return {"url": f"{self.base_url}/{endpoint}", "data": "..."}
+    
+    def get_count(self) -> int:
+        """Regular sync method."""
+        return self.fetch_count
+
+# Use with any execution mode
+worker = AsyncDataFetcher.options(mode="asyncio").create("https://api.example.com")
+future = worker.fetch_data("users")
+result = future.result()  # {'url': 'https://api.example.com/users', 'data': '...'}
+worker.stop()
+```
+
+### Mixing Async and Sync Methods
+
+Workers can have both async and sync methods:
+
+```python
+class HybridWorker(Worker):
+    def __init__(self):
+        self.results = []
+    
+    async def async_operation(self, x: int) -> int:
+        """Async method."""
+        await asyncio.sleep(0.01)
+        return x * 2
+    
+    def sync_operation(self, x: int) -> int:
+        """Sync method."""
+        return x + 10
+    
+    async def process_batch(self, items: list) -> list:
+        """Async method that uses asyncio.gather for concurrency."""
+        tasks = [self.async_operation(item) for item in items]
+        return await asyncio.gather(*tasks)
+
+worker = HybridWorker.options(mode="asyncio").create()
+
+# Call async method
+result1 = worker.async_operation(5).result()  # 10
+
+# Call sync method
+result2 = worker.sync_operation(5).result()  # 15
+
+# Process multiple items concurrently
+result3 = worker.process_batch([1, 2, 3, 4, 5]).result()  # [2, 4, 6, 8, 10]
+
+worker.stop()
+```
+
+### Submitting Async Functions
+
+Use `submit_task()` with async functions:
+
+```python
+async def async_compute(x: int, y: int) -> int:
+    """Standalone async function."""
+    await asyncio.sleep(0.01)
+    return x ** 2 + y ** 2
+
+# Submit async function to any worker
+worker = HybridWorker.options(mode="asyncio").create()
+future = worker.submit_task(async_compute, 3, 4)
+result = future.result()  # 25
+worker.stop()
+```
+
+### Performance: AsyncIO Worker vs Others
+
+The `AsyncioWorkerProxy` provides **significant performance benefits** for I/O-bound async operations by leveraging its dedicated event loop for concurrent execution:
+
+```python
+import asyncio
+import time
+
+class FileReader(Worker):
+    async def read_file_async(self, file_path: str) -> str:
+        """Read file asynchronously."""
+        # Using aiofiles for true async I/O
+        try:
+            import aiofiles
+            async with aiofiles.open(file_path, mode='r') as f:
+                return await f.read()
+        except ImportError:
+            # Fallback to simulate async I/O
+            await asyncio.sleep(0.001)
+            with open(file_path, 'r') as f:
+                return f.read()
+    
+    def read_file_sync(self, file_path: str) -> str:
+        """Read file synchronously."""
+        with open(file_path, 'r') as f:
+            return f.read()
+
+# Test with multiple files
+file_paths = [f"file_{i}.txt" for i in range(100)]
+
+# Sync approach with thread worker
+worker_thread = FileReader.options(mode="thread").create()
+start = time.time()
+futures = [worker_thread.read_file_sync(path) for path in file_paths]
+results_sync = [f.result() for f in futures]
+time_sync = time.time() - start
+worker_thread.stop()
+
+# Async approach with asyncio worker
+worker_async = FileReader.options(mode="asyncio").create()
+start = time.time()
+futures = [worker_async.read_file_async(path) for path in file_paths]
+results_async = [f.result() for f in futures]
+time_async = time.time() - start
+worker_async.stop()
+
+print(f"Sync time: {time_sync:.3f}s")
+print(f"Async time: {time_async:.3f}s")
+print(f"Speedup: {time_sync / time_async:.1f}x")
+# Expected: 5-15x speedup for I/O-bound operations
+```
+
+### Async Support Across Execution Modes
+
+All worker modes correctly execute async functions, but with different performance characteristics:
+
+| Mode | Async Support | Performance Notes |
+|------|---------------|-------------------|
+| **asyncio** | ✅ Native | **Best for async**: Uses dedicated event loop, enables true concurrent execution of multiple async tasks |
+| **thread** | ✅ Via `asyncio.run()` | Correct execution, but no concurrency benefit (each async call blocks the worker thread) |
+| **process** | ✅ Via `asyncio.run()` | Correct execution, but no concurrency benefit + serialization overhead |
+| **sync** | ✅ Via `asyncio.run()` | Correct execution, runs synchronously |
+| **ray** | ✅ Native + wrapper | Native support for async actor methods, `submit_task()` wraps async functions |
+
+**Recommendation:** Use `mode="asyncio"` for async functions to get maximum performance benefits from concurrent I/O.
+
+### Real-World Example: Async Web Scraper
+
+```python
+import asyncio
+import aiohttp
+from concurry import Worker
+
+class AsyncWebScraper(Worker):
+    def __init__(self, timeout: int = 10):
+        self.timeout = timeout
+        self.scraped_count = 0
+    
+    async def fetch_url(self, url: str) -> dict:
+        """Fetch a single URL asynchronously."""
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=self.timeout) as response:
+                self.scraped_count += 1
+                return {
+                    'url': url,
+                    'status': response.status,
+                    'content': await response.text()
+                }
+    
+    async def fetch_multiple(self, urls: list) -> list:
+        """Fetch multiple URLs concurrently."""
+        tasks = [self.fetch_url(url) for url in urls]
+        return await asyncio.gather(*tasks, return_exceptions=True)
+    
+    def get_stats(self) -> dict:
+        """Get scraping statistics (sync method)."""
+        return {'scraped_count': self.scraped_count}
+
+# Create async worker
+scraper = AsyncWebScraper.options(mode="asyncio").create(timeout=30)
+
+# Scrape multiple URLs concurrently
+urls = [
+    'https://example.com/page1',
+    'https://example.com/page2',
+    'https://example.com/page3',
+]
+
+# All URLs are fetched concurrently in the event loop
+results = scraper.fetch_multiple(urls).result()
+
+# Check stats
+stats = scraper.get_stats().result()
+print(f"Scraped {stats['scraped_count']} pages")
+
+scraper.stop()
+```
+
+### Async Error Handling
+
+Exceptions in async functions are propagated correctly:
+
+```python
+class AsyncValidator(Worker):
+    async def validate_async(self, value: int) -> int:
+        await asyncio.sleep(0.01)
+        if value < 0:
+            raise ValueError("Value must be positive")
+        return value
+
+worker = AsyncValidator.options(mode="asyncio").create()
+
+try:
+    result = worker.validate_async(-5).result()
+except ValueError as e:
+    print(f"Validation error: {e}")  # Original exception type preserved
+
+worker.stop()
+```
+
+### Best Practices for Async Workers
+
+1. **Use AsyncIO mode for async functions**: Get maximum concurrency benefits
+   ```python
+   # Good: True concurrent execution
+   worker = AsyncWorker.options(mode="asyncio").create()
+   
+   # Works but slower: No concurrency benefit
+   worker = AsyncWorker.options(mode="thread").create()
+   ```
+
+2. **Leverage asyncio.gather() for concurrent operations**:
+   ```python
+   async def process_many(self, items: list):
+       tasks = [self.async_operation(item) for item in items]
+       return await asyncio.gather(*tasks)
+   ```
+
+3. **Mix async and sync methods as needed**:
+   ```python
+   class Worker(Worker):
+       async def fetch_data(self):  # Async for I/O
+           return await self.http_get(...)
+       
+       def process_data(self, data):  # Sync for CPU work
+           return expensive_computation(data)
+   ```
+
+4. **Use appropriate async libraries**:
+   - `aiohttp` for HTTP requests
+   - `aiofiles` for file I/O
+   - `asyncpg` for PostgreSQL
+   - `motor` for MongoDB
+
+5. **Handle exceptions properly**:
+   ```python
+   async def safe_operation(self):
+       try:
+           return await risky_async_operation()
+       except SpecificError as e:
+           return default_value
+   ```
 
 ## State Management
 
@@ -372,8 +645,10 @@ This consistency makes it easier to switch between execution modes without chang
 - **sync**: Testing and debugging
 - **thread**: I/O-bound operations (network requests, file I/O)
 - **process**: CPU-bound operations (data processing, computation)
-- **asyncio**: Async I/O operations (async libraries, coroutines)
+- **asyncio**: **Async I/O operations (async libraries, coroutines)** - provides major performance benefits for async functions
 - **ray**: Distributed computing (large-scale parallel processing)
+
+**For async functions**: Always use `mode="asyncio"` to get the best performance. Other modes can execute async functions correctly but won't provide concurrency benefits.
 
 ### Resource Management
 

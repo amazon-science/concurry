@@ -625,3 +625,305 @@ class TestRayWorker:
         assert result == 15
 
         w.stop()
+
+
+# Async function support tests
+class AsyncWorker(Worker):
+    """Worker with async methods for testing."""
+
+    def __init__(self, value: int = 0):
+        self.value = value
+
+    async def async_add(self, x: int) -> int:
+        """Async method that adds x to value."""
+        import asyncio
+
+        await asyncio.sleep(0.01)  # Simulate async I/O
+        return self.value + x
+
+    async def async_multiply(self, x: int) -> int:
+        """Async method that multiplies value by x."""
+        import asyncio
+
+        await asyncio.sleep(0.01)  # Simulate async I/O
+        return self.value * x
+
+    def sync_method(self, x: int) -> int:
+        """Regular sync method for comparison."""
+        return self.value + x
+
+    async def async_error(self):
+        """Async method that raises an error."""
+        import asyncio
+
+        await asyncio.sleep(0.01)
+        raise ValueError("Async error occurred")
+
+
+class TestAsyncFunctionSupport:
+    """Test async function support across all worker modes."""
+
+    def test_async_method_call(self, worker_mode):
+        """Test calling async methods on workers."""
+        w = AsyncWorker.options(mode=worker_mode).create(10)
+        future = w.async_add(5)
+        result = future.result(timeout=5)
+        assert result == 15
+        w.stop()
+
+    def test_async_and_sync_methods(self, worker_mode):
+        """Test that both async and sync methods work on same worker."""
+        w = AsyncWorker.options(mode=worker_mode).create(10)
+
+        # Call async method
+        result1 = w.async_add(5).result(timeout=5)
+        assert result1 == 15
+
+        # Call sync method
+        result2 = w.sync_method(3).result(timeout=5)
+        assert result2 == 13
+
+        # Call another async method
+        result3 = w.async_multiply(2).result(timeout=5)
+        assert result3 == 20
+
+        w.stop()
+
+    def test_async_method_with_exception(self, worker_mode):
+        """Test that exceptions in async methods are properly propagated."""
+        w = AsyncWorker.options(mode=worker_mode).create(10)
+        future = w.async_error()
+
+        with pytest.raises(Exception) as exc_info:
+            future.result(timeout=5)
+
+        assert "Async error occurred" in str(exc_info.value)
+        w.stop()
+
+    def test_submit_async_function(self, worker_mode):
+        """Test submitting async functions via submit_task."""
+
+        async def async_compute(x, y):
+            import asyncio
+
+            await asyncio.sleep(0.01)
+            return x**2 + y**2
+
+        w = AsyncWorker.options(mode=worker_mode).create(10)
+        future = w.submit_task(async_compute, 3, 4)
+        result = future.result(timeout=5)
+        assert result == 25
+        w.stop()
+
+    def test_submit_async_lambda(self, worker_mode):
+        """Test submitting async lambda functions."""
+        # Note: async lambdas are not directly supported in Python,
+        # but we can submit regular async functions
+        async def async_square(x):
+            import asyncio
+
+            await asyncio.sleep(0.01)
+            return x**2
+
+        w = AsyncWorker.options(mode=worker_mode).create(10)
+        future = w.submit_task(async_square, 7)
+        result = future.result(timeout=5)
+        assert result == 49
+        w.stop()
+
+    def test_multiple_async_calls(self, worker_mode):
+        """Test multiple async method calls."""
+        w = AsyncWorker.options(mode=worker_mode).create(10)
+
+        # Submit multiple async tasks
+        futures = []
+        for i in range(5):
+            future = w.async_add(i)
+            futures.append((future, 10 + i))
+
+        # Check all results
+        for future, expected in futures:
+            result = future.result(timeout=5)
+            assert result == expected
+
+        w.stop()
+
+    def test_async_blocking_mode(self, worker_mode):
+        """Test async methods in blocking mode."""
+        w = AsyncWorker.options(mode=worker_mode, blocking=True).create(10)
+
+        result = w.async_add(5)
+        # Should return result directly, not a future
+        assert isinstance(result, int)
+        assert result == 15
+
+        w.stop()
+
+
+class FileIOWorker(Worker):
+    """Worker for testing file I/O performance with async."""
+
+    def __init__(self):
+        pass
+
+    async def read_file_async(self, file_path: str) -> str:
+        """Read a file asynchronously using aiofiles."""
+        try:
+            import aiofiles
+        except ImportError:
+            # Fallback to regular file reading if aiofiles not available
+            import asyncio
+
+            await asyncio.sleep(0.001)  # Simulate async I/O delay
+            with open(file_path, "r") as f:
+                return f.read()
+
+        async with aiofiles.open(file_path, mode="r") as f:
+            return await f.read()
+
+    def read_file_sync(self, file_path: str) -> str:
+        """Read a file synchronously."""
+        with open(file_path, "r") as f:
+            return f.read()
+
+    async def read_multiple_files_async(self, file_paths: List[str]) -> List[str]:
+        """Read multiple files concurrently using async."""
+        import asyncio
+
+        tasks = [self.read_file_async(path) for path in file_paths]
+        return await asyncio.gather(*tasks)
+
+
+class TestAsyncIOPerformance:
+    """Test performance benefits of async I/O with AsyncioWorkerProxy."""
+
+    def test_async_file_reading_speedup(self):
+        """Test that AsyncioWorkerProxy provides speedup for async file I/O.
+
+        This test creates 1000 small files and reads them using both sync and async methods.
+        AsyncioWorkerProxy should show significant performance improvement due to concurrent I/O.
+        """
+        import os
+        import tempfile
+
+        # Create temporary directory with 1000 files
+        with tempfile.TemporaryDirectory() as temp_dir:
+            num_files = 1000
+            file_paths = []
+
+            # Create files
+            for i in range(num_files):
+                file_path = os.path.join(temp_dir, f"file_{i}.txt")
+                with open(file_path, "w") as f:
+                    f.write(f"Content of file {i}\n" * 10)  # Make files slightly larger
+                file_paths.append(file_path)
+
+            # Test 1: Read files using sync method with thread worker (baseline)
+            w_thread = FileIOWorker.options(mode="thread").create()
+            start_time = time.time()
+            futures = [w_thread.read_file_sync(path) for path in file_paths[:100]]  # Read 100 files for baseline
+            results_sync = [f.result(timeout=30) for f in futures]
+            time_sync = time.time() - start_time
+            w_thread.stop()
+
+            # Test 2: Read files using async method with asyncio worker
+            w_async = FileIOWorker.options(mode="asyncio").create()
+            start_time = time.time()
+            futures = [w_async.read_file_async(path) for path in file_paths[:100]]  # Read 100 files async
+            results_async = [f.result(timeout=30) for f in futures]
+            time_async = time.time() - start_time
+            w_async.stop()
+
+            # Verify results are correct
+            assert len(results_sync) == 100
+            assert len(results_async) == 100
+            assert all("Content of file" in r for r in results_sync)
+            assert all("Content of file" in r for r in results_async)
+
+            # Print timing information for reference
+            print("\nFile I/O Performance Test (100 files):")
+            print(f"  Sync (thread):  {time_sync:.3f}s")
+            print(f"  Async (asyncio): {time_async:.3f}s")
+            print(f"  Speedup ratio:   {time_sync / time_async:.2f}x")
+
+            # Note: The speedup may vary based on system, but async should generally be faster
+            # We don't assert a specific speedup ratio as it depends on the environment
+
+    def test_async_concurrent_file_reading(self):
+        """Test concurrent file reading with async worker using gather."""
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            num_files = 50
+            file_paths = []
+
+            # Create files
+            for i in range(num_files):
+                file_path = os.path.join(temp_dir, f"file_{i}.txt")
+                with open(file_path, "w") as f:
+                    f.write(f"File {i} content")
+                file_paths.append(file_path)
+
+            # Test reading all files concurrently
+            w = FileIOWorker.options(mode="asyncio").create()
+            start_time = time.time()
+            future = w.read_multiple_files_async(file_paths)
+            results = future.result(timeout=30)
+            elapsed = time.time() - start_time
+            w.stop()
+
+            # Verify results
+            assert len(results) == num_files
+            for i, content in enumerate(results):
+                assert f"File {i} content" in content
+
+            print(f"\nConcurrent file reading test ({num_files} files): {elapsed:.3f}s")
+
+    def test_async_vs_process_worker(self):
+        """Compare async execution in asyncio vs process worker.
+
+        Process worker can execute async functions correctly but won't get
+        the same performance benefit as asyncio worker for I/O-bound tasks.
+        """
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            num_files = 50
+            file_paths = []
+
+            # Create files
+            for i in range(num_files):
+                file_path = os.path.join(temp_dir, f"file_{i}.txt")
+                with open(file_path, "w") as f:
+                    f.write(f"File {i} content\n" * 5)
+                file_paths.append(file_path)
+
+            # Test with process worker
+            w_process = FileIOWorker.options(mode="process").create()
+            start_time = time.time()
+            futures = [w_process.read_file_async(path) for path in file_paths[:20]]
+            results_process = [f.result(timeout=30) for f in futures]
+            time_process = time.time() - start_time
+            w_process.stop()
+
+            # Test with asyncio worker
+            w_asyncio = FileIOWorker.options(mode="asyncio").create()
+            start_time = time.time()
+            futures = [w_asyncio.read_file_async(path) for path in file_paths[:20]]
+            results_asyncio = [f.result(timeout=30) for f in futures]
+            time_asyncio = time.time() - start_time
+            w_asyncio.stop()
+
+            # Verify correctness
+            assert len(results_process) == 20
+            assert len(results_asyncio) == 20
+
+            print("\nAsync function execution comparison (20 files):")
+            print(f"  Process worker: {time_process:.3f}s")
+            print(f"  Asyncio worker: {time_asyncio:.3f}s")
+            if time_process > time_asyncio:
+                print(f"  Asyncio speedup: {time_process / time_asyncio:.2f}x")
+            else:
+                print("  Note: Results may vary based on system and overhead")

@@ -1,11 +1,26 @@
 """Synchronous worker implementation for concurry."""
 
+import asyncio
+import inspect
 from typing import Any
 
 from pydantic import PrivateAttr
 
 from ..future import SyncFuture
 from .base_worker import Worker, WorkerProxy
+
+
+def _invoke_function(fn, *args, **kwargs):
+    """Invoke a function, handling both sync and async functions.
+
+    For async functions, this will run them using asyncio.run().
+    """
+    if inspect.iscoroutinefunction(fn):
+        # Run async function using asyncio.run()
+        return asyncio.run(fn(*args, **kwargs))
+    else:
+        # Run sync function directly
+        return fn(*args, **kwargs)
 
 
 class SyncWorkerProxy(WorkerProxy):
@@ -20,16 +35,31 @@ class SyncWorkerProxy(WorkerProxy):
     - Execution errors are stored in the `SyncFuture` and raised when `result()` is called
     - Original exception types and messages are preserved
 
+    **Async Function Support:**
+
+    Sync workers can execute async functions correctly using `asyncio.run()`.
+    Execution is synchronous - no concurrency benefits. Useful for testing async code.
+
     **Example:**
 
         ```python
+        import asyncio
+
+        class MyWorker(Worker):
+            async def async_method(self, x: int) -> int:
+                await asyncio.sleep(0.01)
+                return x * 2
+
         w = MyWorker.options(mode="sync").create()
+        result = w.async_method(5).result()  # Works correctly, returns 10
 
         try:
             result = w.some_method().result()
         except ValueError as e:
             # Original ValueError is raised, not wrapped
             print(f"Got error: {e}")
+
+        w.stop()
         ```
     """
 
@@ -85,7 +115,7 @@ class SyncWorkerProxy(WorkerProxy):
 
         # Execute the function and wrap any execution errors in the future
         try:
-            result = fn(*args, **kwargs)
+            result = _invoke_function(fn, *args, **kwargs)
             return SyncFuture(result_value=result)
         except Exception as e:
             return SyncFuture(exception_value=e)

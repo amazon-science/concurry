@@ -1,5 +1,7 @@
 """Thread-based worker implementation for concurry."""
 
+import asyncio
+import inspect
 import queue
 import threading
 import uuid
@@ -9,6 +11,24 @@ from pydantic import PrivateAttr
 
 from ..future import ConcurrentFuture
 from .base_worker import WorkerProxy
+
+
+def _invoke_function(fn, *args, **kwargs):
+    """Invoke a function, handling both sync and async functions.
+
+    For async functions, this will run them using asyncio.run().
+    Note: This provides basic support for async functions in thread workers,
+    but won't provide the same performance benefits as AsyncioWorkerProxy.
+
+    TODO: For true async performance in thread workers, we would need to run
+    a persistent event loop in the worker thread, which would be a major implementation change.
+    """
+    if inspect.iscoroutinefunction(fn):
+        # Run async function using asyncio.run()
+        return asyncio.run(fn(*args, **kwargs))
+    else:
+        # Run sync function directly
+        return fn(*args, **kwargs)
 
 
 class ThreadWorkerProxy(WorkerProxy):
@@ -23,10 +43,24 @@ class ThreadWorkerProxy(WorkerProxy):
     - Execution errors are passed through the result queue and raised when `result()` is called
     - Original exception types and messages are preserved
 
+    **Async Function Support:**
+
+    Thread workers can execute async functions correctly using `asyncio.run()`.
+    However, they won't provide concurrency benefits as each async call blocks the
+    worker thread. Use `AsyncioWorkerProxy` for best async performance.
+
     **Example:**
 
         ```python
+        import asyncio
+
+        class MyWorker(Worker):
+            async def async_method(self, x: int) -> int:
+                await asyncio.sleep(0.01)
+                return x * 2
+
         w = MyWorker.options(mode="thread").create()
+        result = w.async_method(5).result()  # Works correctly, returns 10
 
         # Exceptions preserve their original type
         try:
@@ -34,6 +68,8 @@ class ThreadWorkerProxy(WorkerProxy):
         except ValueError as e:
             # Original ValueError is raised
             print(f"Got error: {e}")
+
+        w.stop()
         ```
     """
 
@@ -115,7 +151,7 @@ class ThreadWorkerProxy(WorkerProxy):
                                 ("error", TypeError(f"fn must be callable, got {type(fn).__name__}"))
                             )
                             continue
-                        result = fn(*task_args, **task_kwargs)
+                        result = _invoke_function(fn, *task_args, **task_kwargs)
                         result_queue.put(("ok", result))
                         continue
 
@@ -135,7 +171,7 @@ class ThreadWorkerProxy(WorkerProxy):
                         )
                         continue
 
-                    result = method(*args, **kwargs)
+                    result = _invoke_function(method, *args, **kwargs)
                     result_queue.put(("ok", result))
                 except Exception as e:
                     result_queue.put(("error", e))

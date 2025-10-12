@@ -1,5 +1,7 @@
 """Process-based worker implementation for concurry."""
 
+import asyncio
+import inspect
 import multiprocessing as mp
 import queue
 import threading
@@ -12,6 +14,24 @@ from pydantic import PrivateAttr
 
 from ..future import ConcurrentFuture
 from .base_worker import WorkerProxy
+
+
+def _invoke_function(fn, *args, **kwargs):
+    """Invoke a function, handling both sync and async functions.
+
+    For async functions, this will run them using asyncio.run().
+    Note: This provides basic support for async functions in process workers,
+    but won't provide the same performance benefits as AsyncioWorkerProxy.
+
+    TODO: For true async performance in process workers, we would need to run
+    a persistent event loop in each process, which would be a major implementation change.
+    """
+    if inspect.iscoroutinefunction(fn):
+        # Run async function using asyncio.run()
+        return asyncio.run(fn(*args, **kwargs))
+    else:
+        # Run sync function directly
+        return fn(*args, **kwargs)
 
 
 def _process_worker_main(worker_cls_bytes, init_args, init_kwargs, command_queue, result_queue):
@@ -47,7 +67,7 @@ def _process_worker_main(worker_cls_bytes, init_args, init_kwargs, command_queue
                     fn = cloudpickle.loads(fn_bytes)
                     if not callable(fn):
                         raise TypeError(f"fn must be callable, got {type(fn).__name__}")
-                    result = fn(*task_args, **task_kwargs)
+                    result = _invoke_function(fn, *task_args, **task_kwargs)
                     result_queue.put((request_id, "ok", result))
                     continue
 
@@ -58,7 +78,7 @@ def _process_worker_main(worker_cls_bytes, init_args, init_kwargs, command_queue
                 if method is None or not callable(method):
                     raise AttributeError(f"Method '{method_name}' not found or not callable")
 
-                result = method(*args, **kwargs)
+                result = _invoke_function(method, *args, **kwargs)
                 result_queue.put((request_id, "ok", result))
             except Exception as e:
                 tb_str = traceback.format_exc()
@@ -68,7 +88,7 @@ def _process_worker_main(worker_cls_bytes, init_args, init_kwargs, command_queue
             # Catch any unexpected exceptions in the process loop
             try:
                 result_queue.put((None, "error", (e, traceback.format_exc())))
-            except:
+            except Exception:
                 pass
             break
 
@@ -92,11 +112,25 @@ class ProcessWorkerProxy(WorkerProxy):
     - `mp_context = "spawn"`: Recommended for cross-platform code
     - `mp_context = "forkserver"`: Hybrid approach
 
+    **Async Function Support:**
+
+    Process workers can execute async functions correctly using `asyncio.run()`.
+    However, they won't provide concurrency benefits for async operations due to
+    process isolation. Use `AsyncioWorkerProxy` for best async performance.
+
     **Example:**
 
         ```python
+        import asyncio
+
+        class MyWorker(Worker):
+            async def async_method(self, x: int) -> int:
+                await asyncio.sleep(0.01)
+                return x * 2
+
         # Use default fork context
         w = MyWorker.options(mode="process").create()
+        result = w.async_method(5).result()  # Works correctly, returns 10
 
         # Use spawn context (cross-platform)
         w = MyWorker.options(mode="process", mp_context="spawn").create()
@@ -107,6 +141,8 @@ class ProcessWorkerProxy(WorkerProxy):
         except ValueError as e:
             # Original ValueError, not wrapped
             print(f"Got error: {e}")
+
+        w.stop()
         ```
     """
 

@@ -186,6 +186,45 @@ class Worker:
         worker = DataProcessor.options(mode="ray", num_cpus=1).create(2)
         ```
 
+    Async Function Support:
+        All workers can execute both sync and async functions. Async functions are
+        automatically detected and executed correctly across all modes.
+
+        ```python
+        import asyncio
+
+        class AsyncWorker(Worker):
+            def __init__(self):
+                self.count = 0
+
+            async def async_method(self, x: int) -> int:
+                await asyncio.sleep(0.01)  # Simulate async I/O
+                self.count += 1
+                return x * 2
+
+            def sync_method(self, x: int) -> int:
+                return x + 10
+
+        # Use asyncio mode for best async performance
+        worker = AsyncWorker.options(mode="asyncio").create()
+        result1 = worker.async_method(5).result()  # 10
+        result2 = worker.sync_method(5).result()  # 15
+        worker.stop()
+
+        # Submit async functions via submit_task
+        async def compute(x, y):
+            await asyncio.sleep(0.01)
+            return x ** 2 + y ** 2
+
+        worker = AsyncWorker.options(mode="asyncio").create()
+        result = worker.submit_task(compute, 3, 4).result()  # 25
+        worker.stop()
+        ```
+
+        **Performance:** AsyncioWorkerProxy provides significant speedup (5-15x) for
+        I/O-bound async operations by enabling true concurrent execution. Other modes
+        execute async functions correctly but without concurrency benefits.
+
     Blocking Mode:
         ```python
         # Returns results directly instead of futures

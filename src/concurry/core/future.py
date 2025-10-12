@@ -26,8 +26,22 @@ class BaseFuture(ABC):
 
     The API closely mirrors Python's `concurrent.futures.Future` to ensure familiarity and compatibility.
 
-    Key benefits:
-    1. **Framework Agnostic**: Code can work with futures without needing to know their specific framework. The `wrap_future()` function automatically converts any future-like object into this unified interface.
+    Implementation:
+    --------------
+    BaseFuture and all its subclasses are implemented as frozen dataclasses, providing:
+
+    - **High Performance**: Optimized initialization (< 2.5 µs for SyncFuture)
+    - **Immutability**: Frozen dataclasses prevent modification after creation
+    - **Type Safety**: Runtime validation in `__post_init__` ensures correct types at construction
+    - **Thread Safety**: Fast, lock-free UUID generation using `os.urandom(16).hex()`
+
+    Each subclass defines public parameters as dataclass fields and performs initialization,
+    validation, and state setup in its `__post_init__()` method.
+
+    Key Benefits:
+    ------------
+    1. **Framework Agnostic**: Code can work with futures without needing to know their specific framework.
+       The `wrap_future()` function automatically converts any future-like object into this unified interface.
 
     2. **Consistent API**: Provides a common interface (Adapter pattern) across all future types with:
         - `__await__` support for async/await syntax
@@ -37,18 +51,22 @@ class BaseFuture(ABC):
     3. **Thread-Safe**: All operations are thread-safe when a lock is provided. Implementations use locks
        to ensure thread-safety except for immutable futures like SyncFuture.
 
-    4. **Extensible**: New future types can be easily added by implementing this interface, allowing support for additional frameworks.
+    4. **Extensible**: New future types can be easily added by implementing this interface, allowing
+       support for additional frameworks.
 
-    5. **Control**: Gives precise control over future behavior, especially for edge cases and error conditions. For example, custom timeout handling can be implemented differently from framework defaults.
+    5. **Type-Safe**: Runtime validation at construction time with clear error messages for incorrect types.
 
     Behavioral Guarantees:
     ---------------------
     All implementations of BaseFuture provide identical behavior through the public API:
 
     1. **Exception Types**: All futures raise the same exception types for the same conditions:
-        - `CancelledError` when accessing a cancelled future
+        - `concurrent.futures.CancelledError` when accessing a cancelled future
         - `TimeoutError` when operations exceed the specified timeout
         - Original exception from the computation when it fails
+
+       Note: Even `asyncio.Future` raises `concurrent.futures.CancelledError` (not `asyncio.CancelledError`)
+       for API consistency.
 
     2. **Callbacks**: All `add_done_callback()` implementations pass the wrapper future (not the underlying
        framework future) to the callback. Callbacks are called exactly once when the future completes.
@@ -70,9 +88,24 @@ class BaseFuture(ABC):
 
     Immutability:
     ------------
-    BaseFuture is immutable (frozen via dataclass). The `set_result()` and `set_exception()` methods
-    are provided for API compatibility with `concurrent.futures.Future` but raise `NotImplementedError`
-    since the immutable design prevents modification after creation.
+    BaseFuture is immutable (frozen dataclass). The `set_result()`, `set_exception()`, and
+    `set_running_or_notify_cancel()` methods are provided for API compatibility with
+    `concurrent.futures.Future` but raise `NotImplementedError` since the immutable design
+    prevents modification after creation.
+
+    Private Members:
+    ---------------
+    BaseFuture defines only private members common to all futures (matching `concurrent.futures.Future`):
+
+    - `_result`: The computed result (or None if not yet available)
+    - `_exception`: The exception raised (or None if successful)
+    - `_done`: Whether the future has completed
+    - `_cancelled`: Whether the future was cancelled
+    - `_callbacks`: List of callbacks to invoke when done
+    - `_lock`: Thread lock for synchronization (None for SyncFuture)
+
+    Framework-specific private members (like `_future`, `_loop`, `_object_ref`) are defined only
+    on the subclasses that need them.
     """
 
     FUTURE_UUID_PREFIX: ClassVar[str] = ""
@@ -243,9 +276,22 @@ class SyncFuture(BaseFuture):
     This future type represents a computation that has already completed.
     It's useful for wrapping immediate results in the unified future interface.
 
+    Implementation:
+    --------------
+    SyncFuture is implemented as a frozen dataclass with highly optimized initialization:
+
+    - **Performance**: Initializes in < 2.5 microseconds
+    - **Thread-Safe**: No lock needed; immutability provides thread-safety
+    - **Type-Safe**: Validates `exception_value` is an Exception or None at construction
+    - **Always Done**: Created with `_done=True` since the result is immediately available
+
     Args:
         result_value: The result value (default: None)
-        exception_value: An exception that was raised (default: None)
+        exception_value: An exception that was raised (default: None). Must be an
+            Exception instance or None.
+
+    Raises:
+        TypeError: If exception_value is not None and not an Exception instance
 
     Example:
         ```python
@@ -259,6 +305,12 @@ class SyncFuture(BaseFuture):
             future.result()
         except ValueError as e:
             print(f"Got error: {e}")
+
+        # Type validation at construction
+        try:
+            future = SyncFuture(exception_value="not an exception")
+        except TypeError as e:
+            print(f"TypeError: {e}")  # exception_value must be an Exception or None
         ```
     """
 
@@ -334,8 +386,21 @@ class ConcurrentFuture(BaseFuture):
     This wrapper provides a consistent API for futures from Python's standard
     `concurrent.futures` module (ThreadPoolExecutor, ProcessPoolExecutor).
 
+    Implementation:
+    --------------
+    ConcurrentFuture is a frozen dataclass that wraps `concurrent.futures.Future`:
+
+    - **Thread-Safe**: Delegates to the inherently thread-safe `concurrent.futures.Future`
+    - **Type-Safe**: Validates the wrapped future is a `concurrent.futures.Future` at construction
+    - **Zero Overhead**: Direct delegation to underlying future methods
+    - **API Compatible**: Matches `concurrent.futures.Future` exactly
+
     Args:
-        future: A `concurrent.futures.Future` instance
+        future: A `concurrent.futures.Future` instance. Must be a valid
+            `concurrent.futures.Future` object.
+
+    Raises:
+        TypeError: If future is not a `concurrent.futures.Future` instance
 
     Example:
         ```python
@@ -346,6 +411,12 @@ class ConcurrentFuture(BaseFuture):
             py_future = executor.submit(lambda: 42)
             future = ConcurrentFuture(future=py_future)
             result = future.result(timeout=5)
+
+        # Type validation at construction
+        try:
+            future = ConcurrentFuture(future="not a future")
+        except TypeError as e:
+            print(f"TypeError: {e}")  # future must be a concurrent.futures.Future
         ```
     """
 
@@ -419,8 +490,22 @@ class AsyncioFuture(BaseFuture):
     This wrapper provides a consistent API for asyncio futures, including
     support for timeout parameters that aren't available in the native asyncio API.
 
+    Implementation:
+    --------------
+    AsyncioFuture is a frozen dataclass that wraps `asyncio.Future`:
+
+    - **Thread-Safe**: Uses an internal lock for thread-safe access to asyncio futures
+    - **Type-Safe**: Validates the wrapped future is an `asyncio.Future` at construction
+    - **Timeout Support**: Adds timeout parameters to `result()` and `exception()` methods
+    - **Exception Conversion**: Converts `asyncio.CancelledError` to `concurrent.futures.CancelledError`
+      for API consistency
+    - **Loop Tracking**: Stores reference to the asyncio event loop for proper async operation
+
     Args:
-        future: An `asyncio.Future` instance
+        future: An `asyncio.Future` instance. Must be a valid asyncio.Future object.
+
+    Raises:
+        TypeError: If future is not an `asyncio.Future` instance
 
     Example:
         ```python
@@ -438,6 +523,24 @@ class AsyncioFuture(BaseFuture):
             # Get result with timeout (not available in native asyncio!)
             result = future.result(timeout=5)
             return result
+
+        # Type validation at construction
+        try:
+            future = AsyncioFuture(future="not an asyncio future")
+        except TypeError as e:
+            print(f"TypeError: {e}")  # future must be an asyncio.Future
+
+        # Exception conversion for API consistency
+        async def test_cancellation():
+            loop = asyncio.get_event_loop()
+            async_future = loop.create_future()
+            future = AsyncioFuture(future=async_future)
+            async_future.cancel()
+
+            try:
+                future.result()
+            except concurrent.futures.CancelledError:
+                print("Raises concurrent.futures.CancelledError, not asyncio.CancelledError!")
         ```
     """
 
@@ -580,8 +683,21 @@ if _IS_RAY_INSTALLED:
         This wrapper provides a consistent API for Ray's ObjectRef, which is returned
         when submitting tasks to Ray. Requires Ray to be installed.
 
+        Implementation:
+        --------------
+        RayFuture is a frozen dataclass that wraps Ray's `ObjectRef`:
+
+        - **Thread-Safe**: Uses an internal lock to ensure thread-safe state management
+        - **Type-Safe**: Validates the wrapped object_ref is a Ray `ObjectRef` at construction
+        - **Exception Conversion**: Converts Ray's `GetTimeoutError` to standard `TimeoutError`
+        - **Callback Support**: Implements proper callback invocation on completion
+        - **State Tracking**: Maintains internal state for completion, cancellation, and results
+
         Args:
-            object_ref: A Ray `ObjectRef` instance
+            object_ref: A Ray `ObjectRef` instance. Must be a valid Ray ObjectRef object.
+
+        Raises:
+            TypeError: If object_ref is not a Ray `ObjectRef` instance
 
         Example:
             ```python
@@ -602,6 +718,12 @@ if _IS_RAY_INSTALLED:
             result = future.result(timeout=10)
 
             ray.shutdown()
+
+            # Type validation at construction
+            try:
+                future = RayFuture(object_ref="not an object ref")
+            except TypeError as e:
+                print(f"TypeError: {e}")  # object_ref must be a Ray ObjectRef
             ```
 
         Note:

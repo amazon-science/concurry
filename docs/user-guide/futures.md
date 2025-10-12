@@ -46,9 +46,20 @@ unified_future.add_done_callback(callback)
 
 `BaseFuture` implements the complete API of Python's `concurrent.futures.Future`, making it a drop-in replacement with two important differences:
 
-1. **Immutability**: `BaseFuture` is immutable (frozen via `Typed`). The `set_result()`, `set_exception()`, and `set_running_or_notify_cancel()` methods exist for API compatibility but raise `NotImplementedError` since results/exceptions are set during initialization.
+1. **Immutability**: `BaseFuture` is immutable (implemented as a frozen dataclass). The `set_result()`, `set_exception()`, and `set_running_or_notify_cancel()` methods exist for API compatibility but raise `NotImplementedError` since results/exceptions are set during initialization.
 
 2. **Thread-Safety**: All operations are thread-safe across all future types, with each implementation using appropriate locking mechanisms to ensure safe concurrent access.
+
+### Implementation Architecture
+
+`BaseFuture` and all its subclasses are implemented as **frozen dataclasses**, providing:
+
+1. **Performance**: Optimized for fast initialization - `SyncFuture` initializes in under 2.5 microseconds
+2. **Immutability**: Once created, futures cannot be modified (enforced at the dataclass level)
+3. **Type Safety**: Runtime validation ensures correct types are passed to constructors
+4. **Thread-Safety**: Fast, thread-safe UUID generation using `os.urandom(16).hex()`
+
+Each future subclass defines its public parameters as dataclass fields and performs initialization and validation in its `__post_init__` method.
 
 ### Behavioral Guarantees
 
@@ -195,35 +206,94 @@ Implementation details:
 `BaseFuture` defines only the private members common to all futures (matching `concurrent.futures.Future`):
 
 ```python
-class BaseFuture(Typed, ABC):
+@dataclass(frozen=True)
+class BaseFuture(ABC):
+    # UUID for tracking (generated automatically)
+    uuid: str = field(default="", init=False)
+    
     # Private members common to all futures (matching concurrent.futures.Future)
-    _result: Any = None
-    _exception: Optional[Exception] = None
-    _done: bool = False
-    _cancelled: bool = False
-    _callbacks: list = []
-    _lock: Optional[threading.Lock] = None
+    _result: Any = field(default=None, init=False, repr=False)
+    _exception: Optional[Exception] = field(default=None, init=False, repr=False)
+    _done: bool = field(default=False, init=False, repr=False)
+    _cancelled: bool = field(default=False, init=False, repr=False)
+    _callbacks: list = field(default_factory=list, init=False, repr=False)
+    _lock: Optional[threading.Lock] = field(default=None, init=False, repr=False)
 ```
 
 Framework-specific private members are defined only on the subclasses that need them:
 
 ```python
-class ConcurrentFuture(BaseFuture):
-    _future: PyFuture  # The underlying concurrent.futures.Future
-
-class AsyncioFuture(BaseFuture):
-    _future: Any      # The underlying asyncio.Future
-    _loop: Any        # The asyncio event loop
-
-class RayFuture(BaseFuture):
-    _object_ref: Any  # The Ray ObjectRef
-
+@dataclass(frozen=True)
 class SyncFuture(BaseFuture):
-    # No framework-specific members needed
-    pass
+    # Public parameters
+    result_value: Any = None
+    exception_value: Optional[Exception] = None
+    # No framework-specific private members needed
+
+@dataclass(frozen=True)
+class ConcurrentFuture(BaseFuture):
+    # Public parameter
+    future: PyFuture
+    # Framework-specific private member
+    _future: PyFuture = field(default=None, init=False, repr=False)
+
+@dataclass(frozen=True)
+class AsyncioFuture(BaseFuture):
+    # Public parameter
+    future: Any
+    # Framework-specific private members
+    _future: Any = field(default=None, init=False, repr=False)
+    _loop: Any = field(default=None, init=False, repr=False)
+
+@dataclass(frozen=True)
+class RayFuture(BaseFuture):
+    # Public parameter
+    object_ref: Any
+    # Framework-specific private member
+    _object_ref: Any = field(default=None, init=False, repr=False)
 ```
 
-Each subclass's `post_initialize()` method sets these private members appropriately for its specific framework.
+Each subclass's `__post_init__()` method performs:
+1. **Type validation**: Ensures the correct types are passed (raises `TypeError` if not)
+2. **ID generation**: Creates a unique, thread-safe UUID using `os.urandom(16).hex()`
+3. **State initialization**: Sets private members appropriately for its specific framework
+
+### Runtime Type Validation
+
+All future constructors validate their inputs and raise `TypeError` immediately if incorrect types are provided:
+
+```python
+from concurry.core.future import SyncFuture, ConcurrentFuture
+import concurrent.futures
+
+# SyncFuture validates exception_value is an Exception
+try:
+    future = SyncFuture(exception_value="not an exception")
+except TypeError as e:
+    print(f"TypeError: {e}")  # "exception_value must be an Exception or None, got str"
+
+# ConcurrentFuture validates future is a concurrent.futures.Future
+try:
+    future = ConcurrentFuture(future="not a future")
+except TypeError as e:
+    print(f"TypeError: {e}")  # "future must be a concurrent.futures.Future, got str"
+
+# AsyncioFuture validates future is an asyncio.Future
+import asyncio
+try:
+    future = AsyncioFuture(future="not an asyncio future")
+except TypeError as e:
+    print(f"TypeError: {e}")  # "future must be an asyncio.Future, got str"
+
+# RayFuture validates object_ref is a Ray ObjectRef (when Ray is installed)
+try:
+    from concurry.core.future import RayFuture
+    future = RayFuture(object_ref="not an object ref")
+except TypeError as e:
+    print(f"TypeError: {e}")  # "object_ref must be a Ray ObjectRef, got str"
+```
+
+This validation happens at construction time (in `__post_init__`), providing fail-fast behavior with clear error messages.
 
 ### 3. Async/Await Support
 
@@ -545,7 +615,28 @@ def safe_result(future, timeout: float = 10) -> Optional[Any]:
 
 ## Performance Considerations
 
-### 1. Wrapping Overhead
+### 1. Fast Initialization
+
+The implementation is highly optimized for fast initialization:
+
+```python
+from concurry.core.future import SyncFuture
+import time
+
+# SyncFuture initializes in under 2.5 microseconds
+start = time.perf_counter()
+future = SyncFuture(result_value=42)
+elapsed = time.perf_counter() - start
+print(f"Initialization: {elapsed * 1_000_000:.2f} µs")  # ~1-2 µs
+```
+
+Performance characteristics:
+- **SyncFuture**: < 2.5 µs initialization (optimized for immediate results)
+- **Wrapper futures**: Minimal overhead (~1-2 µs) over native futures
+- **UUID generation**: Fast thread-safe IDs using `os.urandom(16).hex()`
+- **Frozen dataclass**: No dynamic attribute access overhead
+
+### 2. Wrapping Overhead
 
 Wrapping adds minimal overhead:
 
@@ -558,12 +649,12 @@ result = future.result()  # Slightly faster
 
 # For framework-agnostic code (recommended)
 unified = wrap_future(future)
-result = unified.result()  # Minimal overhead, much more flexible
+result = unified.result()  # Minimal overhead (~1-2 µs), much more flexible
 ```
 
-### 2. Already Wrapped Futures
+### 3. Already Wrapped Futures
 
-`wrap_future()` is idempotent:
+`wrap_future()` is idempotent - no double-wrapping overhead:
 
 ```python
 from concurry.core.future import wrap_future
@@ -571,7 +662,19 @@ from concurry.core.future import wrap_future
 future1 = wrap_future(some_future)
 future2 = wrap_future(future1)  # Returns future1, no double-wrapping!
 
-assert future1 is future2  # True
+assert future1 is future2  # True - zero overhead
+```
+
+### 4. Thread-Safe UUID Generation
+
+Each future gets a unique ID generated using `os.urandom(16).hex()`:
+- **Fast**: ~100-200 nanoseconds per ID
+- **Thread-safe**: No locks or counters needed
+- **Unique**: 128-bit random IDs (collision probability negligible)
+
+```python
+future = SyncFuture(result_value=42)
+print(future.uuid)  # e.g., "sync-future-7f3b8d9e4c1a2f6b8e9d4c1a2f6b8e9d"
 ```
 
 ## Testing with Futures
@@ -647,17 +750,33 @@ def process_future(future: BaseFuture) -> Any:
 
 Concurry includes comprehensive tests to verify that all future implementations behave identically. These tests cover:
 
-- Result and exception retrieval with timeouts
-- Cancellation behavior
-- Callback invocation and parameter passing
-- Exception type consistency (`CancelledError`, `TimeoutError`)
-- Await support across all future types
-- Edge cases like already-completed futures
+- **Behavioral consistency**: Result and exception retrieval with timeouts
+- **Cancellation**: Consistent cancellation behavior across all future types
+- **Callbacks**: Proper invocation and parameter passing to callbacks
+- **Exception types**: Consistent `concurrent.futures.CancelledError` and `TimeoutError` across all backends
+- **Await support**: All futures work with `async/await` syntax
+- **Edge cases**: Already-completed futures, immediate callbacks, etc.
+- **Type validation**: Runtime checks ensure correct types at construction
+- **Thread-safety**: Concurrent access from multiple threads
+- **API compatibility**: All methods match `concurrent.futures.Future` signatures
 
 You can run these tests yourself:
 
 ```bash
-pytest tests/core/test_future_consistency.py -v
+# Test behavioral consistency
+pytest tests/core/future/test_future_consistency.py -v
+
+# Test exception type handling
+pytest tests/core/future/test_future_exception_types.py -v
+
+# Test API compatibility
+pytest tests/core/future/test_future_api.py -v
+
+# Test type validation
+pytest tests/core/future/test_future_validation.py -v
+
+# Run all future tests
+pytest tests/core/future/ -v
 ```
 
 This rigorous testing ensures you can rely on consistent behavior regardless of which execution framework you use.

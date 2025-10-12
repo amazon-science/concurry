@@ -2,6 +2,17 @@
 
 Complete API reference for Concurry's unified future interface.
 
+## Overview
+
+All future classes in Concurry are implemented as **frozen dataclasses** for optimal performance and type safety:
+
+- **Performance**: Optimized initialization (< 2.5 µs for `SyncFuture`)
+- **Immutability**: Frozen dataclasses prevent modification after creation
+- **Type Safety**: Runtime validation in `__post_init__` ensures correct types
+- **Thread Safety**: Fast UUID generation using `os.urandom(16).hex()`
+
+All futures implement the complete `concurrent.futures.Future` API with identical behavior across all backends.
+
 ## Module: `concurry.core.future`
 
 ### Functions

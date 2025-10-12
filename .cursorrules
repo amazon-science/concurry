@@ -1,0 +1,80 @@
+# Cursor Rules for Morphic Package
+
+## Code Quality Standards
+
+### No Backward Compatibility
+- **Never maintain backward compatibility** with deprecated patterns or old APIs
+- When making breaking changes, update all code and tests immediately
+- Remove deprecated code paths rather than maintaining them
+- Focus on the best current design, not historical compatibility
+
+### Type Hints
+- **Always include type hints** for all function parameters and return values
+- Use proper type annotations from `typing` module (e.g., `List`, `Dict`, `Optional`, `Union`)
+- Include type hints for class attributes and instance variables
+- Use `NoReturn` for functions that don't return (e.g., lifecycle hooks)
+- Never use bare `Any` without a good reason - prefer specific types
+
+### Explicit Checks
+
+#### Collection Emptiness
+- **Never use `not x` to check if a collection is empty**
+- **Always use `len(x) == 0`** for emptiness checks
+- **Use `len(x) > 0`** for non-empty checks
+
+❌ Bad:
+```python
+if not my_list:
+    pass
+if my_dict:
+    pass
+```
+
+✅ Good:
+```python
+if len(my_list) == 0:
+    pass
+if len(my_dict) > 0:
+    pass
+```
+
+#### None Checks
+- **Never check None using falsiness** (e.g., `not x`, `if x`)
+- **Always use explicit `is None` or `is not None`**
+
+❌ Bad:
+```python
+if not value:
+    pass
+if value:
+    pass
+```
+
+✅ Good:
+```python
+if value is None:
+    pass
+if value is not None:
+    pass
+```
+
+### Code Style
+- Follow PEP 8 style guidelines
+- Use descriptive variable names
+- Keep functions focused and single-purpose
+- Add comprehensive docstrings for all public APIs
+- Include usage examples in docstrings for complex functionality
+
+### Testing
+- Write comprehensive test coverage for all features
+- Update tests immediately when making breaking changes
+- Test both success and failure cases
+- Include edge cases and error conditions
+- Use descriptive test names that explain what is being tested
+
+### Documentation
+- Update user guides immediately when APIs change
+- Include practical examples in documentation
+- Explain the "why" behind design decisions
+- Keep documentation in sync with code changes
+

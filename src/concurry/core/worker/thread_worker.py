@@ -59,7 +59,7 @@ class ThreadWorkerProxy(WorkerProxy):
                 await asyncio.sleep(0.01)
                 return x * 2
 
-        w = MyWorker.options(mode="thread").create()
+        w = MyWorker.options(mode="thread").init()
         result = w.async_method(5).result()  # Works correctly, returns 10
 
         # Exceptions preserve their original type

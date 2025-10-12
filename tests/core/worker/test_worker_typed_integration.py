@@ -22,7 +22,7 @@ class TestWorkerProxyTypedValidation:
                 self.x = x
 
         # Create worker proxy
-        proxy = TestWorker.options(mode="sync").create(10)
+        proxy = TestWorker.options(mode="sync").init(10)
 
         # Try to modify public field - should fail
         with pytest.raises((ValidationError, AttributeError)):
@@ -41,7 +41,7 @@ class TestWorkerProxyTypedValidation:
                 pass
 
         # Create worker proxy
-        proxy = TestWorker.options(mode="sync").create()
+        proxy = TestWorker.options(mode="sync").init()
 
         # Test setting _stopped with correct type (bool)
         proxy._stopped = True
@@ -70,7 +70,7 @@ class TestWorkerProxyTypedValidation:
         # Invalid mode should still work (ExecutionMode will validate)
         # but will fail when trying to create the worker
         with pytest.raises(Exception):  # Could be ValueError or KeyError
-            TestWorker.options(mode="invalid_mode").create()
+            TestWorker.options(mode="invalid_mode").init()
 
     def test_worker_options_boolean_coercion(self):
         """Test that @validate decorator coerces string booleans."""
@@ -81,7 +81,7 @@ class TestWorkerProxyTypedValidation:
 
         # String boolean should be coerced to bool
         builder = TestWorker.options(mode="sync", blocking="true")
-        proxy = builder.create()
+        proxy = builder.init()
 
         # Blocking should be True (coerced from string)
         assert proxy.blocking is True
@@ -89,7 +89,7 @@ class TestWorkerProxyTypedValidation:
 
         # Test with False
         builder = TestWorker.options(mode="sync", blocking="false")
-        proxy = builder.create()
+        proxy = builder.init()
         assert proxy.blocking is False
         proxy.stop()
 
@@ -101,13 +101,13 @@ class TestWorkerProxyTypedValidation:
                 self.x = x
 
         # Valid initialization
-        proxy = TestWorker.options(mode="sync").create(10)
+        proxy = TestWorker.options(mode="sync").init(10)
         assert proxy.worker_cls == TestWorker
         assert proxy.blocking is False
         proxy.stop()
 
         # Test with explicit fields
-        proxy = TestWorker.options(mode="sync", blocking=True).create(20)
+        proxy = TestWorker.options(mode="sync", blocking=True).init(20)
         assert proxy.blocking is True
         proxy.stop()
 
@@ -119,7 +119,7 @@ class TestWorkerProxyTypedValidation:
                 pass
 
         # Create proxy with extra options
-        proxy = TestWorker.options(mode="sync", custom_option="test_value").create()
+        proxy = TestWorker.options(mode="sync", custom_option="test_value").init()
 
         # Extra options should be in _options
         assert "_options" in proxy.__pydantic_private__
@@ -152,7 +152,7 @@ class TestWorkerProxyTypedValidation:
 
         # Valid mp_context values
         for context in ["fork", "spawn", "forkserver"]:
-            proxy = TestWorker.options(mode="process", mp_context=context).create()
+            proxy = TestWorker.options(mode="process", mp_context=context).init()
             assert proxy.mp_context == context
             proxy.stop()
 
@@ -160,7 +160,7 @@ class TestWorkerProxyTypedValidation:
         # Note: Literal type checking might happen at Pydantic validation time
         # or at runtime when actually using the context
         with pytest.raises(Exception):  # ValidationError or ValueError
-            TestWorker.options(mode="process", mp_context="invalid").create()
+            TestWorker.options(mode="process", mp_context="invalid").init()
 
 
 class TestWorkerTypedFeatures:
@@ -188,7 +188,7 @@ class TestWorkerTypedFeatures:
                 return self.a + self.b + self.c
 
         # Should work with various initialization patterns
-        w = CustomWorker.options(mode="sync").create(1, 2, c=3, extra1="x", extra2="y")
+        w = CustomWorker.options(mode="sync").init(1, 2, c=3, extra1="x", extra2="y")
         result = w.process().result()
         assert result == 6
         w.stop()
@@ -207,6 +207,6 @@ class TestWorkerTypedFeatures:
 
         # Test type coercion (string to bool)
         builder = TestWorker.options(mode="thread", blocking="true")
-        proxy = builder.create()
+        proxy = builder.init()
         assert proxy.blocking is True
         proxy.stop()

@@ -129,11 +129,11 @@ class ProcessWorkerProxy(WorkerProxy):
                 return x * 2
 
         # Use default fork context
-        w = MyWorker.options(mode="process").create()
+        w = MyWorker.options(mode="process").init()
         result = w.async_method(5).result()  # Works correctly, returns 10
 
         # Use spawn context (cross-platform)
-        w = MyWorker.options(mode="process", mp_context="spawn").create()
+        w = MyWorker.options(mode="process", mp_context="spawn").init()
 
         # Exceptions preserve their original type
         try:

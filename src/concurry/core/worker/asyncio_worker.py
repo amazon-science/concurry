@@ -48,7 +48,7 @@ class AsyncioWorkerProxy(WorkerProxy):
                 tasks = [self.fetch(url) for url in urls]
                 return await asyncio.gather(*tasks)
 
-        w = MyAsyncWorker.options(mode="asyncio").create()
+        w = MyAsyncWorker.options(mode="asyncio").init()
 
         # Both async and sync methods work
         result1 = w.async_method().result()
@@ -81,7 +81,7 @@ class AsyncioWorkerProxy(WorkerProxy):
                 async with aiofiles.open(path, 'r') as f:
                     return await f.read()
 
-        worker = FileReader.options(mode="asyncio").create()
+        worker = FileReader.options(mode="asyncio").init()
         futures = [worker.read_file(f"file_{i}.txt") for i in range(100)]
         results = [f.result() for f in futures]
         worker.stop()

@@ -50,7 +50,7 @@ class SyncWorkerProxy(WorkerProxy):
                 await asyncio.sleep(0.01)
                 return x * 2
 
-        w = MyWorker.options(mode="sync").create()
+        w = MyWorker.options(mode="sync").init()
         result = w.async_method(5).result()  # Works correctly, returns 10
 
         try:

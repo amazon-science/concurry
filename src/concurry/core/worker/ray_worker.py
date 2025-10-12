@@ -61,17 +61,17 @@ class RayWorkerProxy(WorkerProxy):
                 return x * 2
 
         # Use defaults (1 CPU, 0 GPUs)
-        w = MyWorker.options(mode="ray").create()
+        w = MyWorker.options(mode="ray").init()
         result = w.async_method(5).result()  # Works with Ray's native async support
 
         # Override resources
-        w = MyWorker.options(mode="ray", num_cpus=2, num_gpus=1).create()
+        w = MyWorker.options(mode="ray", num_cpus=2, num_gpus=1).init()
 
         # Specify custom resources
         w = MyWorker.options(
             mode="ray",
             resources={"special_hardware": 1}
-        ).create()
+        ).init()
 
         w.stop()
         ```

@@ -12,9 +12,9 @@ A Worker is a class that:
 
 ## Basic Usage
 
-### Creating a Worker
+### Defining a Worker
 
-Create a worker by inheriting from `Worker`:
+Define a worker by inheriting from `Worker`:
 
 ```python
 from concurry import Worker
@@ -34,11 +34,11 @@ class DataProcessor(Worker):
 
 ### Using a Worker
 
-Create a worker instance with `.options().create()`:
+Initialize a worker instance with `.options().init()`:
 
 ```python
-# Create worker with thread execution
-worker = DataProcessor.options(mode="thread").create(3)
+# Initialize worker with thread execution
+worker = DataProcessor.options(mode="thread").init(3)
 
 # Call methods (returns futures)
 future = worker.process(10)
@@ -60,7 +60,7 @@ Workers support multiple execution modes:
 Executes synchronously in the current thread (useful for testing):
 
 ```python
-worker = DataProcessor.options(mode="sync").create(2)
+worker = DataProcessor.options(mode="sync").init(2)
 future = worker.process(10)
 result = future.result()  # 20 (already computed)
 worker.stop()
@@ -71,7 +71,7 @@ worker.stop()
 Executes in a dedicated thread (good for I/O-bound tasks):
 
 ```python
-worker = DataProcessor.options(mode="thread").create(2)
+worker = DataProcessor.options(mode="thread").init(2)
 future = worker.process(10)
 result = future.result()  # Blocks until complete
 worker.stop()
@@ -85,7 +85,7 @@ Executes in a separate process (good for CPU-bound tasks):
 worker = DataProcessor.options(
     mode="process",
     mp_context="fork"  # or "spawn", "forkserver"
-).create(2)
+).init(2)
 future = worker.process(10)
 result = future.result()
 worker.stop()
@@ -96,7 +96,7 @@ worker.stop()
 Executes in an asyncio event loop in a dedicated thread (ideal for async I/O operations):
 
 ```python
-worker = DataProcessor.options(mode="asyncio").create(2)
+worker = DataProcessor.options(mode="asyncio").init(2)
 future = worker.process(10)
 result = future.result()
 worker.stop()
@@ -113,7 +113,7 @@ import ray
 ray.init()
 
 # Uses default resource allocation (num_cpus=1, num_gpus=0)
-worker = DataProcessor.options(mode="ray").create(2)
+worker = DataProcessor.options(mode="ray").init(2)
 future = worker.process(10)
 result = future.result()
 worker.stop()
@@ -124,7 +124,7 @@ worker2 = DataProcessor.options(
     num_cpus=2,
     num_gpus=1,
     resources={"special_hardware": 1}
-).create(2)
+).init(2)
 future2 = worker2.process(20)
 result2 = future2.result()
 worker2.stop()
@@ -135,7 +135,7 @@ ray.shutdown()
 **Ray Default Resources:**
 - `num_cpus=1`: Each Ray actor is allocated 1 CPU by default
 - `num_gpus=0`: No GPU allocation by default  
-- These defaults allow Ray workers to be created without explicit resource specifications
+- These defaults allow Ray workers to be initialized without explicit resource specifications
 
 ## Blocking Mode
 
@@ -143,12 +143,12 @@ By default, worker methods return Futures. Use `blocking=True` to get results di
 
 ```python
 # Non-blocking (default)
-worker = DataProcessor.options(mode="thread").create(5)
+worker = DataProcessor.options(mode="thread").init(5)
 future = worker.process(10)  # Returns future
 result = future.result()  # Wait for result
 
 # Blocking mode
-worker = DataProcessor.options(mode="thread", blocking=True).create(5)
+worker = DataProcessor.options(mode="thread", blocking=True).init(5)
 result = worker.process(10)  # Returns 50 directly
 ```
 
@@ -160,7 +160,7 @@ Use `submit_task()` to execute arbitrary functions in the worker's context:
 def complex_computation(x, y):
     return (x ** 2 + y ** 2) ** 0.5
 
-worker = DataProcessor.options(mode="process").create(1)
+worker = DataProcessor.options(mode="process").init(1)
 
 # Submit function that's not a worker method
 future = worker.submit_task(complex_computation, 3, 4)
@@ -182,7 +182,7 @@ All workers in concurry can execute both synchronous and asynchronous functions.
 
 ### Basic Async Worker
 
-Create workers with async methods:
+Define workers with async methods:
 
 ```python
 from concurry import Worker
@@ -204,7 +204,7 @@ class AsyncDataFetcher(Worker):
         return self.fetch_count
 
 # Use with any execution mode
-worker = AsyncDataFetcher.options(mode="asyncio").create("https://api.example.com")
+worker = AsyncDataFetcher.options(mode="asyncio").init("https://api.example.com")
 future = worker.fetch_data("users")
 result = future.result()  # {'url': 'https://api.example.com/users', 'data': '...'}
 worker.stop()
@@ -233,7 +233,7 @@ class HybridWorker(Worker):
         tasks = [self.async_operation(item) for item in items]
         return await asyncio.gather(*tasks)
 
-worker = HybridWorker.options(mode="asyncio").create()
+worker = HybridWorker.options(mode="asyncio").init()
 
 # Call async method
 result1 = worker.async_operation(5).result()  # 10
@@ -258,7 +258,7 @@ async def async_compute(x: int, y: int) -> int:
     return x ** 2 + y ** 2
 
 # Submit async function to any worker
-worker = HybridWorker.options(mode="asyncio").create()
+worker = HybridWorker.options(mode="asyncio").init()
 future = worker.submit_task(async_compute, 3, 4)
 result = future.result()  # 25
 worker.stop()
@@ -295,7 +295,7 @@ class FileReader(Worker):
 file_paths = [f"file_{i}.txt" for i in range(100)]
 
 # Sync approach with thread worker
-worker_thread = FileReader.options(mode="thread").create()
+worker_thread = FileReader.options(mode="thread").init()
 start = time.time()
 futures = [worker_thread.read_file_sync(path) for path in file_paths]
 results_sync = [f.result() for f in futures]
@@ -303,7 +303,7 @@ time_sync = time.time() - start
 worker_thread.stop()
 
 # Async approach with asyncio worker
-worker_async = FileReader.options(mode="asyncio").create()
+worker_async = FileReader.options(mode="asyncio").init()
 start = time.time()
 futures = [worker_async.read_file_async(path) for path in file_paths]
 results_async = [f.result() for f in futures]
@@ -362,8 +362,8 @@ class AsyncWebScraper(Worker):
         """Get scraping statistics (sync method)."""
         return {'scraped_count': self.scraped_count}
 
-# Create async worker
-scraper = AsyncWebScraper.options(mode="asyncio").create(timeout=30)
+# Initialize async worker
+scraper = AsyncWebScraper.options(mode="asyncio").init(timeout=30)
 
 # Scrape multiple URLs concurrently
 urls = [
@@ -394,7 +394,7 @@ class AsyncValidator(Worker):
             raise ValueError("Value must be positive")
         return value
 
-worker = AsyncValidator.options(mode="asyncio").create()
+worker = AsyncValidator.options(mode="asyncio").init()
 
 try:
     result = worker.validate_async(-5).result()
@@ -409,10 +409,10 @@ worker.stop()
 1. **Use AsyncIO mode for async functions**: Get maximum concurrency benefits
    ```python
    # Good: True concurrent execution
-   worker = AsyncWorker.options(mode="asyncio").create()
+   worker = AsyncWorker.options(mode="asyncio").init()
    
    # Works but slower: No concurrency benefit
-   worker = AsyncWorker.options(mode="thread").create()
+   worker = AsyncWorker.options(mode="thread").init()
    ```
 
 2. **Leverage asyncio.gather() for concurrent operations**:
@@ -461,8 +461,8 @@ class Counter(Worker):
         return self.count
 
 # Each worker has separate state
-worker1 = Counter.options(mode="thread").create()
-worker2 = Counter.options(mode="thread").create()
+worker1 = Counter.options(mode="thread").init()
+worker2 = Counter.options(mode="thread").init()
 
 print(worker1.increment().result())  # 1
 print(worker1.increment().result())  # 2
@@ -488,7 +488,7 @@ class Calculator:
         return self.base + x
 
 # Use exactly like a Worker
-calc = Calculator.options(mode="thread").create(10)
+calc = Calculator.options(mode="thread").init(10)
 result = calc.add(5).result()  # 15
 calc.stop()
 ```
@@ -509,22 +509,22 @@ class DataProcessor(Worker):
         self.multiplier = multiplier
 
 # String booleans are automatically coerced
-worker = DataProcessor.options(mode="thread", blocking="true").create(3)
+worker = DataProcessor.options(mode="thread", blocking="true").init(3)
 assert worker.blocking is True  # Converted from string to bool
 
 # ExecutionMode values are validated
-worker = DataProcessor.options(mode="thread").create(3)  # Valid
-# worker = DataProcessor.options(mode="invalid").create(3)  # Would raise error
+worker = DataProcessor.options(mode="thread").init(3)  # Valid
+# worker = DataProcessor.options(mode="invalid").init(3)  # Would raise error
 
 worker.stop()
 ```
 
 ### Immutable Configuration
 
-Once a worker is created, its configuration fields are immutable:
+Once a worker is initialized, its configuration fields are immutable:
 
 ```python
-worker = DataProcessor.options(mode="thread", blocking=False).create(3)
+worker = DataProcessor.options(mode="thread", blocking=False).init(3)
 
 # These fields cannot be modified after creation
 # worker.blocking = True  # Raises error
@@ -541,7 +541,7 @@ worker.stop()
 Private attributes in worker proxies support automatic type checking:
 
 ```python
-worker = DataProcessor.options(mode="thread").create(3)
+worker = DataProcessor.options(mode="thread").init(3)
 
 # Internal state is type-checked
 worker._stopped = False  # Valid (bool)
@@ -576,7 +576,7 @@ class FlexibleWorker(Worker):
         return self.a + self.b + self.c
 
 # Works with any initialization pattern
-worker = FlexibleWorker.options(mode="sync").create(
+worker = FlexibleWorker.options(mode="sync").init(
     1, 2, c=3, extra1="x", extra2="y"
 )
 result = worker.process().result()  # 6
@@ -587,12 +587,12 @@ This design allows you to use Pydantic, dataclasses, attrs, or plain Python clas
 
 ## Multiple Workers
 
-You can create and use multiple workers in parallel:
+You can initialize and use multiple workers in parallel:
 
 ```python
-# Create multiple workers
+# Initialize multiple workers
 workers = [
-    DataProcessor.options(mode="thread").create(i)
+    DataProcessor.options(mode="thread").init(i)
     for i in range(1, 4)
 ]
 
@@ -655,7 +655,7 @@ This consistency makes it easier to switch between execution modes without chang
 Always call `stop()` to clean up resources:
 
 ```python
-worker = DataProcessor.options(mode="process").create(2)
+worker = DataProcessor.options(mode="process").init(2)
 try:
     result = worker.process(10).result()
     # ... use result
@@ -677,7 +677,7 @@ class ManagedWorker:
         self.worker.stop()
 
 # Usage
-with ManagedWorker(DataProcessor.options(mode="thread").create(2)) as worker:
+with ManagedWorker(DataProcessor.options(mode="thread").init(2)) as worker:
     result = worker.process(10).result()
     # worker.stop() called automatically
 ```
@@ -700,7 +700,7 @@ class Validator(Worker):
     def divide(self, a: int, b: int) -> float:
         return a / b
 
-worker = Validator.options(mode="process").create()
+worker = Validator.options(mode="process").init()
 
 # ValueError is raised as-is (not wrapped)
 try:
@@ -734,7 +734,7 @@ worker.stop()
 Configuration errors (like calling non-existent methods) are handled consistently:
 
 ```python
-worker = DataProcessor.options(mode="thread").create(2)
+worker = DataProcessor.options(mode="thread").init(2)
 
 # Sync and Ray modes: fail immediately
 try:
@@ -754,15 +754,15 @@ worker.stop()
 
 ## TaskWorker
 
-`TaskWorker` is a concrete worker implementation designed specifically for submitting arbitrary tasks without defining custom methods. It's useful when you just need to execute functions in different execution contexts without creating a custom worker class.
+`TaskWorker` is a concrete worker implementation designed specifically for submitting arbitrary tasks without defining custom methods. It's useful when you just need to execute functions in different execution contexts without defining a custom worker class.
 
 ### Basic Usage
 
 ```python
 from concurry import TaskWorker
 
-# Create a task worker
-worker = TaskWorker.options(mode="thread").create()
+# Initialize a task worker
+worker = TaskWorker.options(mode="thread").init()
 
 # Submit arbitrary functions
 def compute(x, y):
@@ -788,8 +788,8 @@ TaskWorker is particularly useful for:
 ```python
 from concurry import TaskWorker
 
-# Create a process-based task worker for CPU-intensive work
-worker = TaskWorker.options(mode="process").create()
+# Initialize a process-based task worker for CPU-intensive work
+worker = TaskWorker.options(mode="process").init()
 
 # Submit multiple computational tasks
 def factorial(n):
@@ -822,7 +822,7 @@ worker.stop()
 
 ```python
 # Using TaskWorker (simpler, but less structured)
-task_worker = TaskWorker.options(mode="thread").create()
+task_worker = TaskWorker.options(mode="thread").init()
 result = task_worker.submit_task(lambda x: x * 2, 10).result()
 task_worker.stop()
 
@@ -836,7 +836,7 @@ class Calculator(Worker):
         self.count += 1
         return x * self.multiplier
 
-calc_worker = Calculator.options(mode="thread").create(2)
+calc_worker = Calculator.options(mode="thread").init(2)
 result = calc_worker.compute(10).result()  # 20
 count = calc_worker.count  # State is maintained
 calc_worker.stop()

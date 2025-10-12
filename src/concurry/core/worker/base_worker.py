@@ -15,7 +15,7 @@ class WorkerBuilder:
     """Builder for creating worker instances with deferred initialization.
 
     This class holds configuration from .options() or .pool() calls and provides
-    a .create() method to instantiate the actual worker with initialization arguments.
+    a .init() method to instantiate the actual worker with initialization arguments.
     """
 
     def __init__(
@@ -42,14 +42,14 @@ class WorkerBuilder:
         if "init_args" in options:
             raise ValueError(
                 "The 'init_args' parameter is no longer supported. "
-                "Use .create(*args) instead. "
-                "Example: Worker.options(mode='thread').create(arg1, arg2)"
+                "Use .init(*args) instead. "
+                "Example: Worker.options(mode='thread').init(arg1, arg2)"
             )
         if "init_kwargs" in options:
             raise ValueError(
                 "The 'init_kwargs' parameter is no longer supported. "
-                "Use .create(**kwargs) instead. "
-                "Example: Worker.options(mode='thread').create(key1=val1, key2=val2)"
+                "Use .init(**kwargs) instead. "
+                "Example: Worker.options(mode='thread').init(key1=val1, key2=val2)"
             )
 
         self._worker_cls = worker_cls
@@ -58,8 +58,8 @@ class WorkerBuilder:
         self._is_pool = is_pool
         self._options = options
 
-    def create(self, *args: Any, **kwargs: Any) -> "WorkerProxy":
-        """Create the worker instance with initialization arguments.
+    def init(self, *args: Any, **kwargs: Any) -> "WorkerProxy":
+        """Initialize the worker instance with initialization arguments.
 
         Args:
             *args: Positional arguments for worker __init__
@@ -70,11 +70,11 @@ class WorkerBuilder:
 
         Example:
             ```python
-            # Create single worker
-            worker = MyWorker.options(mode="thread").create(multiplier=3)
+            # Initialize single worker
+            worker = MyWorker.options(mode="thread").init(multiplier=3)
 
-            # Create with positional and keyword args
-            worker = MyWorker.options(mode="process").create(10, name="processor")
+            # Initialize with positional and keyword args
+            worker = MyWorker.options(mode="process").init(10, name="processor")
             ```
         """
         if self._is_pool:
@@ -130,7 +130,7 @@ class Worker:
 
     **Important Design Note:**
 
-    The Worker class itself does NOT inherit from morphic.Typed. This design choice allows you
+    The Worker class itself does NOT inherit from morphic.Typed.     This design choice allows you
     complete freedom in defining your `__init__` method - you can use any signature with any
     combination of positional arguments, keyword arguments, *args, and **kwargs. The Typed
     integration is applied at the WorkerProxy layer, which wraps your worker and provides
@@ -144,7 +144,7 @@ class Worker:
     - Any other class structure
 
     The only requirement is that your worker class is instantiable via `__init__` with the
-    arguments you pass to `.create()`.
+    arguments you pass to `.init()`.
 
     Basic Usage:
         ```python
@@ -159,8 +159,8 @@ class Worker:
                 self.count += 1
                 return value * self.multiplier
 
-        # Create worker with thread execution
-        worker = DataProcessor.options(mode="thread").create(3)
+        # Initialize worker with thread execution
+        worker = DataProcessor.options(mode="thread").init(3)
         future = worker.process(10)
         result = future.result()  # 30
         worker.stop()
@@ -169,21 +169,21 @@ class Worker:
     Different Execution Modes:
         ```python
         # Synchronous (for testing/debugging)
-        worker = DataProcessor.options(mode="sync").create(2)
+        worker = DataProcessor.options(mode="sync").init(2)
 
         # Thread-based (good for I/O-bound tasks)
-        worker = DataProcessor.options(mode="thread").create(2)
+        worker = DataProcessor.options(mode="thread").init(2)
 
         # Process-based (good for CPU-bound tasks)
-        worker = DataProcessor.options(mode="process").create(2)
+        worker = DataProcessor.options(mode="process").init(2)
 
         # Asyncio-based (good for async I/O)
-        worker = DataProcessor.options(mode="asyncio").create(2)
+        worker = DataProcessor.options(mode="asyncio").init(2)
 
         # Ray-based (distributed computing)
         import ray
         ray.init()
-        worker = DataProcessor.options(mode="ray", num_cpus=1).create(2)
+        worker = DataProcessor.options(mode="ray", num_cpus=1).init(2)
         ```
 
     Async Function Support:
@@ -206,7 +206,7 @@ class Worker:
                 return x + 10
 
         # Use asyncio mode for best async performance
-        worker = AsyncWorker.options(mode="asyncio").create()
+        worker = AsyncWorker.options(mode="asyncio").init()
         result1 = worker.async_method(5).result()  # 10
         result2 = worker.sync_method(5).result()  # 15
         worker.stop()
@@ -216,7 +216,7 @@ class Worker:
             await asyncio.sleep(0.01)
             return x ** 2 + y ** 2
 
-        worker = AsyncWorker.options(mode="asyncio").create()
+        worker = AsyncWorker.options(mode="asyncio").init()
         result = worker.submit_task(compute, 3, 4).result()  # 25
         worker.stop()
         ```
@@ -228,7 +228,7 @@ class Worker:
     Blocking Mode:
         ```python
         # Returns results directly instead of futures
-        worker = DataProcessor.options(mode="thread", blocking=True).create(5)
+        worker = DataProcessor.options(mode="thread", blocking=True).init(5)
         result = worker.process(10)  # Returns 50 directly, not a future
         worker.stop()
         ```
@@ -239,7 +239,7 @@ class Worker:
         def compute(x, y):
             return x ** 2 + y ** 2
 
-        worker = DataProcessor.options(mode="process").create(1)
+        worker = DataProcessor.options(mode="process").init(1)
 
         # Submit function that's not a worker method
         future = worker.submit_task(compute, 3, 4)
@@ -263,8 +263,8 @@ class Worker:
                 return self.count
 
         # Each worker maintains its own state
-        worker1 = Counter.options(mode="thread").create()
-        worker2 = Counter.options(mode="thread").create()
+        worker1 = Counter.options(mode="thread").init()
+        worker2 = Counter.options(mode="thread").init()
 
         print(worker1.increment().result())  # 1
         print(worker1.increment().result())  # 2
@@ -286,7 +286,7 @@ class Worker:
         """Configure worker execution options.
 
         Returns a WorkerBuilder that can be used to create worker instances
-        with .create(*args, **kwargs).
+        with .init(*args, **kwargs).
 
         **Type Validation:**
 
@@ -306,19 +306,19 @@ class Worker:
                 - For process: mp_context (fork, spawn, forkserver)
 
         Returns:
-            A WorkerBuilder instance that can create workers via .create()
+            A WorkerBuilder instance that can create workers via .init()
 
         Examples:
             Basic Usage:
                 ```python
                 # Configure and create worker
-                worker = MyWorker.options(mode="thread").create(multiplier=3)
+                worker = MyWorker.options(mode="thread").init(multiplier=3)
                 ```
 
             Type Coercion:
                 ```python
                 # String booleans are automatically converted
-                worker = MyWorker.options(mode="thread", blocking="true").create()
+                worker = MyWorker.options(mode="thread", blocking="true").init()
                 assert worker.blocking is True
                 ```
 
@@ -329,13 +329,13 @@ class Worker:
                     mode="ray",
                     num_cpus=2,
                     num_gpus=1
-                ).create(multiplier=3)
+                ).init(multiplier=3)
 
                 # Process with spawn context
                 worker = MyWorker.options(
                     mode="process",
                     mp_context="spawn"
-                ).create(multiplier=3)
+                ).init(multiplier=3)
                 ```
         """
         return WorkerBuilder(worker_cls=cls, mode=mode, blocking=blocking, is_pool=False, **kwargs)
@@ -370,7 +370,7 @@ class Worker:
         Example (future API):
             ```python
             # Create pool of workers
-            pool = MyWorker.pool(max_workers=5, mode="thread").create(multiplier=3)
+            pool = MyWorker.pool(max_workers=5, mode="thread").init(multiplier=3)
 
             # Use exactly like a single worker
             future = pool.process(10)
@@ -572,7 +572,7 @@ class WorkerProxy(Typed, ABC):
                     def process(self, value: int) -> int:
                         return value * self.multiplier
 
-                worker = DataProcessor.options(mode="thread").create(2)
+                worker = DataProcessor.options(mode="thread").init(2)
 
                 # Call worker method
                 result1 = worker.process(10).result()  # 20
@@ -664,7 +664,7 @@ def worker(cls: Type[T]) -> Type[T]:
                     return value * self.multiplier
 
             # Use like any Worker
-            processor = DataProcessor.options(mode="thread").create(3)
+            processor = DataProcessor.options(mode="thread").init(3)
             result = processor.process(10).result()  # 30
             processor.stop()
             ```
@@ -730,7 +730,7 @@ class TaskWorker(Worker):
             from concurry import TaskWorker
 
             # Create a task worker
-            worker = TaskWorker.options(mode="thread").create()
+            worker = TaskWorker.options(mode="thread").init()
 
             # Submit arbitrary functions
             def compute(x, y):
@@ -745,13 +745,13 @@ class TaskWorker(Worker):
         With Different Execution Modes:
             ```python
             # Thread-based execution
-            thread_worker = TaskWorker.options(mode="thread").create()
+            thread_worker = TaskWorker.options(mode="thread").init()
 
             # Process-based execution for CPU-intensive tasks
-            process_worker = TaskWorker.options(mode="process").create()
+            process_worker = TaskWorker.options(mode="process").init()
 
             # Asyncio-based execution
-            async_worker = TaskWorker.options(mode="asyncio").create()
+            async_worker = TaskWorker.options(mode="asyncio").init()
 
             # Submit tasks to any of them
             result1 = thread_worker.submit_task(lambda x: x * 2, 10).result()
@@ -766,7 +766,7 @@ class TaskWorker(Worker):
         Blocking Mode:
             ```python
             # Get results directly without futures
-            worker = TaskWorker.options(mode="thread", blocking=True).create()
+            worker = TaskWorker.options(mode="thread", blocking=True).init()
 
             result = worker.submit_task(lambda x: x * 10, 5)  # Returns 50 directly
 
@@ -775,7 +775,7 @@ class TaskWorker(Worker):
 
         Multiple Tasks:
             ```python
-            worker = TaskWorker.options(mode="process").create()
+            worker = TaskWorker.options(mode="process").init()
 
             # Submit multiple tasks
             futures = [

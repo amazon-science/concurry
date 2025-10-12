@@ -20,7 +20,7 @@ class TestSyncFuture:
 
     def test_sync_future_with_result(self):
         """Test SyncFuture with a successful result."""
-        future = SyncFuture(result=42)
+        future = SyncFuture(result_value=42)
 
         assert future.result() == 42
         assert future.done()
@@ -31,7 +31,7 @@ class TestSyncFuture:
     def test_sync_future_with_exception(self):
         """Test SyncFuture with an exception."""
         exc = ValueError("test error")
-        future = SyncFuture(exception=exc)
+        future = SyncFuture(exception_value=exc)
 
         with pytest.raises(ValueError, match="test error"):
             future.result()
@@ -43,7 +43,7 @@ class TestSyncFuture:
 
     def test_sync_future_callbacks(self):
         """Test SyncFuture callback functionality."""
-        future = SyncFuture(result="test")
+        future = SyncFuture(result_value="test")
         callback_called = []
 
         def callback(fut):
@@ -56,7 +56,7 @@ class TestSyncFuture:
         """Test SyncFuture can be awaited."""
 
         async def test_await():
-            future = SyncFuture(result="awaited")
+            future = SyncFuture(result_value="awaited")
             result = await future
             return result
 
@@ -68,6 +68,35 @@ class TestSyncFuture:
         finally:
             loop.close()
 
+    def test_sync_future_initialization_performance(self):
+        """Test that SyncFuture initialization is fast."""
+        import time
+
+        # Warm up (to avoid any JIT compilation overhead)
+        for _ in range(10):
+            SyncFuture(result_value=42)
+
+        # Measure time for multiple initializations
+        repeats: int = 10_000
+        start_time = time.perf_counter()
+        for _ in range(repeats):
+            SyncFuture(result_value=42)
+        end_time = time.perf_counter()
+
+        # Calculate average time per initialization
+        total_time = end_time - start_time
+        avg_time_per_init = total_time / repeats
+
+        assert avg_time_per_init < 3e-6, (
+            f"SyncFuture initialization too slow: {avg_time_per_init:.2e} seconds per init"
+        )
+
+        # Verify the future still works correctly
+        future = SyncFuture(result_value=42)
+        assert future.result() == 42
+        assert future.done() is True
+        assert future.cancelled() is False
+
 
 class TestConcurrentFuture:
     """Test ConcurrentFuture class."""
@@ -77,7 +106,7 @@ class TestConcurrentFuture:
         cf_future = concurrent.futures.Future()
         cf_future.set_result(123)
 
-        future = ConcurrentFuture(cf_future)
+        future = ConcurrentFuture(future=cf_future)
 
         assert future.result() == 123
         assert future.done()
@@ -90,7 +119,7 @@ class TestConcurrentFuture:
         exc = RuntimeError("concurrent error")
         cf_future.set_exception(exc)
 
-        future = ConcurrentFuture(cf_future)
+        future = ConcurrentFuture(future=cf_future)
 
         with pytest.raises(RuntimeError, match="concurrent error"):
             future.result()
@@ -102,7 +131,7 @@ class TestConcurrentFuture:
     def test_concurrent_future_timeout(self):
         """Test ConcurrentFuture with timeout."""
         cf_future = concurrent.futures.Future()
-        future = ConcurrentFuture(cf_future)
+        future = ConcurrentFuture(future=cf_future)
 
         with pytest.raises(concurrent.futures.TimeoutError):
             future.result(timeout=0.1)
@@ -110,7 +139,7 @@ class TestConcurrentFuture:
     def test_concurrent_future_cancel(self):
         """Test ConcurrentFuture cancellation."""
         cf_future = concurrent.futures.Future()
-        future = ConcurrentFuture(cf_future)
+        future = ConcurrentFuture(future=cf_future)
 
         assert future.cancel()
         assert future.cancelled()
@@ -118,7 +147,7 @@ class TestConcurrentFuture:
     def test_concurrent_future_callbacks(self):
         """Test ConcurrentFuture callback functionality."""
         cf_future = concurrent.futures.Future()
-        future = ConcurrentFuture(cf_future)
+        future = ConcurrentFuture(future=cf_future)
         callback_results = []
 
         def callback(fut):
@@ -143,7 +172,7 @@ class TestAsyncioFuture:
             asyncio_future = loop.create_future()
             asyncio_future.set_result(99)
 
-            future = AsyncioFuture(asyncio_future)
+            future = AsyncioFuture(future=asyncio_future)
 
             assert future.result() == 99
             assert future.done()
@@ -161,7 +190,7 @@ class TestAsyncioFuture:
             exc = ValueError("asyncio error")
             asyncio_future.set_exception(exc)
 
-            future = AsyncioFuture(asyncio_future)
+            future = AsyncioFuture(future=asyncio_future)
 
             with pytest.raises(ValueError, match="asyncio error"):
                 future.result()
@@ -178,7 +207,7 @@ class TestAsyncioFuture:
         asyncio.set_event_loop(loop)
         try:
             asyncio_future = loop.create_future()
-            future = AsyncioFuture(asyncio_future)
+            future = AsyncioFuture(future=asyncio_future)
 
             with pytest.raises(TimeoutError, match="Future did not complete within timeout"):
                 future.result(timeout=0.1)
@@ -191,7 +220,7 @@ class TestAsyncioFuture:
         asyncio.set_event_loop(loop)
         try:
             asyncio_future = loop.create_future()
-            future = AsyncioFuture(asyncio_future)
+            future = AsyncioFuture(future=asyncio_future)
 
             assert future.cancel()
             assert future.cancelled()
@@ -204,7 +233,7 @@ class TestAsyncioFuture:
         asyncio.set_event_loop(loop)
         try:
             asyncio_future = loop.create_future()
-            future = AsyncioFuture(asyncio_future)
+            future = AsyncioFuture(future=asyncio_future)
             callback_results = []
 
             def callback(fut):
@@ -227,7 +256,7 @@ class TestWrapFuture:
 
     def test_wrap_future_with_sync_future(self):
         """Test wrap_future with SyncFuture returns the same instance."""
-        original = SyncFuture(result=42)
+        original = SyncFuture(result_value=42)
         wrapped = wrap_future(original)
 
         assert wrapped is original
@@ -321,7 +350,7 @@ class TestAsyncAwait:
         """Test awaiting SyncFuture."""
 
         async def test_await():
-            future = SyncFuture(result="awaited_sync")
+            future = SyncFuture(result_value="awaited_sync")
             result = await future
             return result
 
@@ -339,7 +368,7 @@ class TestAsyncAwait:
         async def test_await():
             cf_future = concurrent.futures.Future()
             cf_future.set_result("awaited_concurrent")
-            future = ConcurrentFuture(cf_future)
+            future = ConcurrentFuture(future=cf_future)
             result = await future
             return result
 
@@ -358,7 +387,7 @@ class TestAsyncAwait:
             loop = asyncio.get_event_loop()
             asyncio_future = loop.create_future()
             asyncio_future.set_result("awaited_asyncio")
-            future = AsyncioFuture(asyncio_future)
+            future = AsyncioFuture(future=asyncio_future)
             result = await future
             return result
 
@@ -379,7 +408,7 @@ class TestIntegration:
         # Test all the cases from the notebook
 
         # SyncFuture
-        sync_future = SyncFuture(result=42)
+        sync_future = SyncFuture(result_value=42)
         wrapped_sync = wrap_future(sync_future)
         assert wrapped_sync is sync_future
         assert wrapped_sync.result() == 42
@@ -412,7 +441,7 @@ class TestIntegration:
         """Test error handling across different future types."""
         # SyncFuture with exception
         sync_exc = ValueError("sync error")
-        sync_future = SyncFuture(exception=sync_exc)
+        sync_future = SyncFuture(exception_value=sync_exc)
         with pytest.raises(ValueError, match="sync error"):
             sync_future.result()
 
@@ -420,7 +449,7 @@ class TestIntegration:
         cf_future = concurrent.futures.Future()
         cf_exc = RuntimeError("concurrent error")
         cf_future.set_exception(cf_exc)
-        concurrent_future = ConcurrentFuture(cf_future)
+        concurrent_future = ConcurrentFuture(future=cf_future)
         with pytest.raises(RuntimeError, match="concurrent error"):
             concurrent_future.result()
 
@@ -431,7 +460,7 @@ class TestIntegration:
             asyncio_future = loop.create_future()
             asyncio_exc = ValueError("asyncio error")
             asyncio_future.set_exception(asyncio_exc)
-            asyncio_wrapper = AsyncioFuture(asyncio_future)
+            asyncio_wrapper = AsyncioFuture(future=asyncio_future)
             with pytest.raises(ValueError, match="asyncio error"):
                 asyncio_wrapper.result()
         finally:

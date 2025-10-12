@@ -1,0 +1,117 @@
+site_name: Concurry Documentation
+site_description: A unified, delightful Python concurrency library
+site_author: Abhishek Divekar
+site_url: https://adivekar-utexas.github.io/concurry/
+
+repo_name: adivekar-utexas/concurry
+repo_url: https://github.com/adivekar-utexas/concurry
+edit_uri: edit/main/docs/
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - User Guide:
+    - Getting Started: user-guide/getting-started.md
+    - Futures: user-guide/futures.md
+    - Progress Tracking: user-guide/progress.md
+  - API Reference:
+    - Overview: api/index.md
+    - Futures: api/futures.md
+    - Progress: api/progress.md
+  - Examples: examples.md
+  - Contributing: contributing.md
+  - Changelog: changelog.md
+
+theme:
+  name: material
+  palette:
+    # Palette toggle for light mode
+    - scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    # Palette toggle for dark mode
+    - scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.path
+    - navigation.top
+    - search.highlight
+    - search.share
+    - toc.follow
+    - content.code.copy
+    - content.code.select
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - admonition
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - footnotes
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+  - mkdocstrings:
+      enabled: true
+      default_handler: python
+      handlers:
+        python:
+          paths: [src]
+          options:
+            # General options
+            show_source: true
+            show_bases: true
+            show_submodules: true
+
+            # Extra options (moved from deprecated location)
+            extra:
+              show_inheritance: true
+
+            # Docstring options
+            docstring_style: google
+            docstring_options:
+              ignore_init_summary: true
+
+            # Signature options
+            show_signature_annotations: true
+            signature_crossrefs: true
+
+            # Member options
+            members_order: source
+            show_if_no_docstring: false
+
+            # Heading options
+            heading_level: 2
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+
+            # Filter options
+            filters:
+              - "!^_"  # Exclude private members
+              - "!^test_"  # Exclude test functions
+
+extra:
+  version:
+    provider: mike
+    default: latest
+
+extra_css:
+  - stylesheets/extra.css
+

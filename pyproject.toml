@@ -43,9 +43,14 @@ dev = [
     "flake8>=3.8",
     "mypy>=0.900",
 ]
+docs = [
+    "mkdocs>=1.6.0",
+    "mkdocs-material>=9.5.0",
+    "mkdocstrings[python]>=0.24.0",
+    "mike>=2.0.0",
+]
 all = [
-    "ray>=2.0.0",
-    "cloudpickle>=2.0.0",
+    "morphic[dev,docs,ray]",
 ]
 
 [tool.hatch.version]
@@ -83,3 +88,22 @@ ignore = [
     ## Ignored because it causes no harm (and is needed sometimes):
     "F841",     # unused-variable: https://docs.astral.sh/ruff/rules/unused-variable/
 ]
+
+[tool.black]
+line-length = 110
+target-version = ["py310", "py311", "py312"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true

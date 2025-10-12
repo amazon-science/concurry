@@ -1,0 +1,151 @@
+/* Custom styles for Concurry documentation */
+
+/* Enhanced code blocks */
+.highlight {
+    border-radius: 0.5rem;
+    overflow: hidden;
+}
+
+/* Better spacing for admonitions */
+.md-typeset .admonition {
+    margin: 1.5rem 0;
+}
+
+/* Custom styling for API reference */
+.doc-heading {
+    border-bottom: 2px solid var(--md-primary-fg-color);
+    padding-bottom: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+/* Enhanced table styling */
+.md-typeset table:not([class]) {
+    border-collapse: collapse;
+    margin: 1.5rem 0;
+    width: 100%;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    border-radius: 0.5rem;
+    overflow: hidden;
+}
+
+.md-typeset table:not([class]) th {
+    background-color: var(--md-primary-fg-color);
+    color: var(--md-primary-bg-color);
+    font-weight: 600;
+    padding: 1rem;
+}
+
+.md-typeset table:not([class]) td {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--md-default-fg-color--lightest);
+}
+
+/* Code example enhancements */
+.codehilite {
+    position: relative;
+}
+
+.codehilite:hover::after {
+    content: "📋";
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    cursor: pointer;
+    opacity: 0.7;
+}
+
+/* Navigation improvements */
+.md-nav__item--active > .md-nav__link {
+    font-weight: 600;
+}
+
+/* Custom color scheme adjustments */
+:root {
+    --md-text-font: "Inter", -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif;
+    --md-code-font: "JetBrains Mono", "Fira Code", "Roboto Mono", monospace;
+}
+
+/* Enhanced blockquote styling */
+.md-typeset blockquote {
+    border-left: 4px solid var(--md-primary-fg-color);
+    background-color: var(--md-default-bg-color);
+    margin: 1.5rem 0;
+    padding: 1rem 1.5rem;
+    border-radius: 0 0.5rem 0.5rem 0;
+}
+
+/* API documentation specific styles */
+.doc-signature {
+    background-color: var(--md-code-bg-color);
+    padding: 1rem;
+    border-radius: 0.5rem;
+    margin: 1rem 0;
+    font-family: var(--md-code-font);
+    font-size: 0.9rem;
+    border-left: 3px solid var(--md-primary-fg-color);
+}
+
+.doc-parameters {
+    margin-left: 1rem;
+}
+
+.doc-returns {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--md-default-fg-color--lightest);
+}
+
+/* Version badge styling */
+.version-badge {
+    background-color: var(--md-primary-fg-color);
+    color: var(--md-primary-bg-color);
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.25rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+/* Search result enhancements */
+.md-search-result__meta {
+    color: var(--md-default-fg-color--light);
+}
+
+/* Footer customizations */
+.md-footer-meta__inner {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+/* Responsive improvements */
+@media screen and (max-width: 76.1875em) {
+    .md-typeset table:not([class]) {
+        font-size: 0.8rem;
+    }
+
+    .doc-signature {
+        font-size: 0.8rem;
+        padding: 0.75rem;
+    }
+}
+
+/* Print styles */
+@media print {
+    .md-header,
+    .md-tabs,
+    .md-footer,
+    .md-sidebar {
+        display: none !important;
+    }
+
+    .md-main__inner {
+        margin: 0;
+    }
+
+    .md-content {
+        margin: 0;
+    }
+}
+

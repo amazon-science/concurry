@@ -1,0 +1,177 @@
+"""Asyncio-based worker implementation for concurry."""
+
+import asyncio
+import threading
+from typing import Any, Optional
+
+from pydantic import PrivateAttr
+
+from .base_worker import Worker, WorkerProxy
+
+
+class AsyncioWorkerProxy(WorkerProxy):
+    """Worker proxy for asyncio-based execution.
+
+    This proxy runs the worker with an asyncio event loop in a dedicated thread.
+    Supports both synchronous and asynchronous worker methods.
+
+    **Exception Handling:**
+
+    - Setup errors (e.g., `AttributeError` for non-existent methods) fail immediately
+    - Execution errors propagate naturally through asyncio futures
+    - Original exception types and messages are preserved
+    - Both sync and async method exceptions are handled consistently
+
+    **Async Support:**
+
+    - Automatically detects and awaits coroutine functions
+    - Synchronous methods work without modification
+    - Event loop runs in a dedicated background thread
+
+    **Example:**
+
+        ```python
+        class MyAsyncWorker(Worker):
+            async def async_method(self):
+                await asyncio.sleep(1)
+                return "done"
+
+            def sync_method(self):
+                return "also works"
+
+        w = MyAsyncWorker.options(mode="asyncio").create()
+
+        # Both async and sync methods work
+        result1 = w.async_method().result()
+        result2 = w.sync_method().result()
+
+        # Exceptions preserve their original type
+        try:
+            w.failing_method().result()
+        except ValueError as e:
+            print(f"Got error: {e}")
+        ```
+    """
+
+    # Private attributes (use Any for non-serializable types)
+    _loop: Any = PrivateAttr(default=None)
+    _worker: Any = PrivateAttr(default=None)
+    _loop_thread: Any = PrivateAttr()
+    _loop_ready: Any = PrivateAttr()
+
+    def post_initialize(self) -> None:
+        """Initialize private attributes after Typed validation."""
+        super().post_initialize()
+
+        # Create event loop in a dedicated thread
+        self._loop_thread = threading.Thread(target=self._run_event_loop, daemon=True)
+        self._loop_ready = threading.Event()
+        self._loop_thread.start()
+
+        # Wait for event loop to be ready
+        if not self._loop_ready.wait(timeout=30):
+            raise RuntimeError("Failed to start asyncio event loop")
+
+        # Initialize the worker
+        self._initialize_worker()
+
+    def _run_event_loop(self):
+        """Run the asyncio event loop in a dedicated thread."""
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._loop_ready.set()
+
+        try:
+            self._loop.run_forever()
+        finally:
+            self._loop.close()
+
+    def _initialize_worker(self):
+        """Initialize the worker instance in the event loop."""
+        future = asyncio.run_coroutine_threadsafe(self._async_initialize(), self._loop)
+        try:
+            future.result(timeout=30)
+        except Exception as e:
+            raise RuntimeError(f"Worker initialization failed: {e}")
+
+    async def _async_initialize(self):
+        """Async initialization of the worker."""
+        self._worker = self.worker_cls(*self.init_args, **self.init_kwargs)
+
+    def _execute_method(self, method_name: str, *args: Any, **kwargs: Any):
+        """Execute a method in the asyncio event loop.
+
+        Args:
+            method_name: Name of the method to invoke
+            *args: Positional arguments
+            **kwargs: Keyword arguments
+
+        Returns:
+            ConcurrentFuture for the method execution
+        """
+
+        # Create a future in the asyncio event loop
+        async def _run_method():
+            method = getattr(self._worker, method_name)
+            if not callable(method):
+                raise AttributeError(f"'{self.worker_cls.__name__}' has no callable method '{method_name}'")
+
+            if asyncio.iscoroutinefunction(method):
+                result = await method(*args, **kwargs)
+            else:
+                result = method(*args, **kwargs)
+
+            return result
+
+        # Schedule the coroutine in the event loop
+        asyncio_future = asyncio.run_coroutine_threadsafe(_run_method(), self._loop)
+
+        # Wrap the asyncio future
+        # run_coroutine_threadsafe returns a concurrent.futures.Future
+        from ..future import ConcurrentFuture
+
+        return ConcurrentFuture(future=asyncio_future)
+
+    def _execute_task(self, fn, *args: Any, **kwargs: Any):
+        """Execute an arbitrary function in the asyncio event loop.
+
+        Args:
+            fn: Callable function to execute
+            *args: Positional arguments
+            **kwargs: Keyword arguments
+
+        Returns:
+            ConcurrentFuture for the task execution
+        """
+
+        # Create a future in the asyncio event loop
+        async def _run_task():
+            if not callable(fn):
+                raise TypeError(f"fn must be callable, got {type(fn).__name__}")
+
+            if asyncio.iscoroutinefunction(fn):
+                result = await fn(*args, **kwargs)
+            else:
+                result = fn(*args, **kwargs)
+
+            return result
+
+        # Schedule the coroutine in the event loop
+        asyncio_future = asyncio.run_coroutine_threadsafe(_run_task(), self._loop)
+
+        # Wrap the asyncio future
+        from ..future import ConcurrentFuture
+
+        return ConcurrentFuture(future=asyncio_future)
+
+    def stop(self, timeout: float = 30) -> None:
+        """Stop the worker and event loop.
+
+        Args:
+            timeout: Maximum time to wait for cleanup in seconds
+        """
+        super().stop(timeout)
+
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._loop_thread.join(timeout=timeout)

@@ -1,27 +1,21 @@
-"""
-Concurry - A delicious way to parallelize your code.
+"""Core functionality for concurry."""
 
-Concurry provides a consistent API for parallel and concurrent execution
-across asyncio, threads, processes and distributed systems.
-"""
-
-# Core types
-from .core import (
+from .future import (
     BaseFuture,
     SyncFuture,
     ConcurrentFuture,
     AsyncioFuture,
     wrap_future,
-    ExecutionMode,
-    TaskWorker,
-    Worker,
-    worker,
 )
+from .config import (
+    ExecutionMode,
+    RateLimitAlgorithm,
+    RateLimitConfig,
+    RetryConfig,
+    ExecutorConfig,
+)
+from .worker import TaskWorker, Worker, worker
 
-# Utilities
-from .utils.progress import ProgressBar
-
-# Public API
 __all__ = [
     # Future types
     "BaseFuture",
@@ -31,17 +25,19 @@ __all__ = [
     "wrap_future",
     # Config types
     "ExecutionMode",
+    "RateLimitAlgorithm",
+    "RateLimitConfig",
+    "RetryConfig",
+    "ExecutorConfig",
     # Worker types
     "TaskWorker",
     "Worker",
     "worker",
-    # Utilities
-    "ProgressBar",
 ]
 
 # Conditionally export RayFuture if Ray is installed
 try:
-    from .core import RayFuture
+    from .future import RayFuture
 
     __all__.append("RayFuture")
 except ImportError:

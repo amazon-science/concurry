@@ -763,6 +763,12 @@ if _IS_RAY_INSTALLED:
             if self._cancelled:
                 raise CancelledError("Future was cancelled")
 
+            # Return cached result if already fetched
+            if self._done:
+                if self._exception:
+                    raise self._exception
+                return self._result
+
             try:
                 if timeout is not None:
                     result = ray.get(self._object_ref, timeout=timeout)
@@ -770,8 +776,9 @@ if _IS_RAY_INSTALLED:
                     result = ray.get(self._object_ref)
 
                 with self._lock:
-                    self._result = result
-                    self._done = True
+                    # Use object.__setattr__ because this is a frozen dataclass
+                    object.__setattr__(self, "_result", result)
+                    object.__setattr__(self, "_done", True)
                     # Call callbacks
                     for callback in self._callbacks:
                         try:
@@ -785,12 +792,14 @@ if _IS_RAY_INSTALLED:
                 # Convert Ray's GetTimeoutError to standard TimeoutError
                 if e.__class__.__name__ == "GetTimeoutError":
                     with self._lock:
-                        self._done = False  # Not actually done, just timed out
+                        # Use object.__setattr__ because this is a frozen dataclass
+                        object.__setattr__(self, "_done", False)  # Not actually done, just timed out
                     raise TimeoutError("Future did not complete within timeout") from e
 
                 with self._lock:
-                    self._exception = e
-                    self._done = True
+                    # Use object.__setattr__ because this is a frozen dataclass
+                    object.__setattr__(self, "_exception", e)
+                    object.__setattr__(self, "_done", True)
                     # Call callbacks
                     for callback in self._callbacks:
                         try:
@@ -808,8 +817,9 @@ if _IS_RAY_INSTALLED:
 
                 try:
                     ray.cancel(self._object_ref)
-                    self._cancelled = True
-                    self._done = True
+                    # Use object.__setattr__ because this is a frozen dataclass
+                    object.__setattr__(self, "_cancelled", True)
+                    object.__setattr__(self, "_done", True)
                     # Call callbacks
                     for callback in self._callbacks:
                         try:
@@ -842,7 +852,8 @@ if _IS_RAY_INSTALLED:
                 done = len(ready) > 0
                 if done:
                     with self._lock:
-                        self._done = True
+                        # Use object.__setattr__ because this is a frozen dataclass
+                        object.__setattr__(self, "_done", True)
                 return done
             except:
                 return False
@@ -860,7 +871,8 @@ if _IS_RAY_INSTALLED:
                 except Exception as e:
                     # Store exception for future calls
                     with self._lock:
-                        self._exception = e
+                        # Use object.__setattr__ because this is a frozen dataclass
+                        object.__setattr__(self, "_exception", e)
                     return e
             return self._exception
 

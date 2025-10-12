@@ -1,0 +1,101 @@
+"""Synchronous worker implementation for concurry."""
+
+from typing import Any
+
+from pydantic import PrivateAttr
+
+from ..future import SyncFuture
+from .base_worker import Worker, WorkerProxy
+
+
+class SyncWorkerProxy(WorkerProxy):
+    """Worker proxy for synchronous execution.
+
+    This proxy executes all methods synchronously in the current thread
+    and wraps results in SyncFuture for API consistency.
+
+    **Exception Handling:**
+
+    - Setup errors (e.g., `AttributeError` for non-existent methods) fail immediately
+    - Execution errors are stored in the `SyncFuture` and raised when `result()` is called
+    - Original exception types and messages are preserved
+
+    **Example:**
+
+        ```python
+        w = MyWorker.options(mode="sync").create()
+
+        try:
+            result = w.some_method().result()
+        except ValueError as e:
+            # Original ValueError is raised, not wrapped
+            print(f"Got error: {e}")
+        ```
+    """
+
+    # Private attributes (use Any for non-serializable types)
+    _worker: Any = PrivateAttr()
+
+    def post_initialize(self) -> None:
+        """Initialize private attributes after Typed validation."""
+        super().post_initialize()
+
+        # Create the worker instance directly using public fields
+        self._worker = self.worker_cls(*self.init_args, **self.init_kwargs)
+
+    def _execute_method(self, method_name: str, *args: Any, **kwargs: Any) -> SyncFuture:
+        """Execute a method synchronously and wrap result in SyncFuture.
+
+        Args:
+            method_name: Name of the method to invoke
+            *args: Positional arguments
+            **kwargs: Keyword arguments
+
+        Returns:
+            SyncFuture with the result or exception
+
+        Raises:
+            AttributeError: If the method doesn't exist or isn't callable (immediate failure)
+        """
+        # Validate method exists and is callable - these errors should propagate immediately
+        method = getattr(self._worker, method_name)
+        if not callable(method):
+            raise AttributeError(f"'{self.worker_cls.__name__}' has no callable method '{method_name}'")
+
+        # Delegate to _execute_task to avoid code duplication
+        return self._execute_task(method, *args, **kwargs)
+
+    def _execute_task(self, fn, *args: Any, **kwargs: Any) -> SyncFuture:
+        """Execute an arbitrary function synchronously and wrap result in SyncFuture.
+
+        Args:
+            fn: Callable function to execute
+            *args: Positional arguments
+            **kwargs: Keyword arguments
+
+        Returns:
+            SyncFuture with the result or exception
+
+        Raises:
+            TypeError: If fn is not callable (immediate failure)
+        """
+        # Validate that fn is callable - this error should propagate immediately
+        if not callable(fn):
+            raise TypeError(f"fn must be callable, got {type(fn).__name__}")
+
+        # Execute the function and wrap any execution errors in the future
+        try:
+            result = fn(*args, **kwargs)
+            return SyncFuture(result_value=result)
+        except Exception as e:
+            return SyncFuture(exception_value=e)
+
+    def stop(self, timeout: float = 30) -> None:
+        """Stop the worker.
+
+        For sync workers, this just marks the worker as stopped.
+
+        Args:
+            timeout: Ignored for sync workers
+        """
+        super().stop(timeout)

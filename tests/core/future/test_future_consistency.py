@@ -366,6 +366,3 @@ class TestFutureConsistency:
         asyncio.run(test_concurrent_future())
         asyncio.run(test_asyncio_future())
 
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

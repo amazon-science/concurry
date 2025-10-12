@@ -343,9 +343,195 @@ data = range(20)
 results = multi_stage_processing(data)
 ```
 
+## Example 10: Worker Pattern for Stateful Operations
+
+Use the Worker pattern to maintain state across multiple operations:
+
+```python
+from concurry import Worker
+
+class DataProcessor(Worker):
+    def __init__(self, multiplier: int):
+        self.multiplier = multiplier
+        self.processed_count = 0
+        self.total_sum = 0
+    
+    def process(self, value: int) -> int:
+        """Process a value and update internal state."""
+        self.processed_count += 1
+        result = value * self.multiplier
+        self.total_sum += result
+        return result
+    
+    def get_stats(self) -> dict:
+        """Get processing statistics."""
+        return {
+            "processed": self.processed_count,
+            "total": self.total_sum,
+            "average": self.total_sum / self.processed_count if self.processed_count > 0 else 0
+        }
+
+# Create worker in different execution modes
+# Thread mode - good for I/O-bound operations
+thread_worker = DataProcessor.options(mode="thread").create(multiplier=2)
+
+# Process values
+for i in range(10):
+    result = thread_worker.process(i).result()
+    print(f"Processed {i} -> {result}")
+
+# Get final stats
+stats = thread_worker.get_stats().result()
+print(f"Stats: {stats}")
+
+thread_worker.stop()
+
+# Process mode - good for CPU-bound operations
+process_worker = DataProcessor.options(mode="process").create(multiplier=3)
+
+# Process in parallel
+futures = [process_worker.process(i) for i in range(100)]
+results = [f.result() for f in futures]
+
+print(f"Processed {len(results)} items in separate process")
+process_worker.stop()
+```
+
+## Example 11: TaskWorker for Quick Task Execution
+
+Use TaskWorker when you don't need custom methods:
+
+```python
+from concurry import TaskWorker
+
+# Create a task worker
+worker = TaskWorker.options(mode="thread").create()
+
+# Submit arbitrary functions
+def compute_stats(data):
+    """Compute statistics on data."""
+    return {
+        "sum": sum(data),
+        "mean": sum(data) / len(data),
+        "max": max(data),
+        "min": min(data)
+    }
+
+# Submit the task
+data = [1, 5, 3, 9, 2, 8, 4, 7, 6]
+future = worker.submit_task(compute_stats, data)
+stats = future.result()
+print(f"Statistics: {stats}")
+
+# Submit multiple tasks
+def factorial(n):
+    if n <= 1:
+        return 1
+    return n * factorial(n - 1)
+
+futures = [worker.submit_task(factorial, i) for i in range(1, 11)]
+factorials = [f.result() for f in futures]
+print(f"Factorials: {factorials}")
+
+worker.stop()
+```
+
+## Example 12: Workers with Different Execution Modes
+
+Compare performance across different execution modes:
+
+```python
+from concurry import Worker
+import time
+
+class BenchmarkWorker(Worker):
+    def cpu_intensive(self, n: int) -> int:
+        """Simulate CPU-intensive work."""
+        result = 0
+        for i in range(n):
+            result += i * i
+        return result
+    
+    def io_intensive(self, duration: float) -> str:
+        """Simulate I/O-intensive work."""
+        time.sleep(duration)
+        return f"Slept for {duration}s"
+
+# Test different modes
+modes = ["sync", "thread", "process", "asyncio"]
+
+for mode in modes:
+    start = time.time()
+    worker = BenchmarkWorker.options(mode=mode).create()
+    
+    # Submit CPU-intensive tasks
+    futures = [worker.cpu_intensive(100000) for _ in range(5)]
+    results = [f.result() for f in futures]
+    
+    elapsed = time.time() - start
+    print(f"{mode:8s} mode: {elapsed:.3f}s")
+    
+    worker.stop()
+
+# For I/O-bound tasks, threads/asyncio are more efficient
+# For CPU-bound tasks, processes are more efficient
+```
+
+## Example 13: Blocking Mode for Simplified Code
+
+Use blocking mode when you prefer direct results over futures:
+
+```python
+from concurry import Worker
+
+class Calculator(Worker):
+    def add(self, a: int, b: int) -> int:
+        return a + b
+    
+    def multiply(self, a: int, b: int) -> int:
+        return a * b
+
+# Non-blocking (default) - returns futures
+worker_async = Calculator.options(mode="thread").create()
+future1 = worker_async.add(5, 3)
+future2 = worker_async.multiply(4, 2)
+print(f"Results: {future1.result()}, {future2.result()}")
+worker_async.stop()
+
+# Blocking mode - returns results directly
+worker_sync = Calculator.options(mode="thread", blocking=True).create()
+result1 = worker_sync.add(5, 3)  # Returns 8 directly
+result2 = worker_sync.multiply(4, 2)  # Returns 8 directly
+print(f"Results: {result1}, {result2}")
+worker_sync.stop()
+```
+
+## Example 14: Worker Pool Pattern (Coming Soon)
+
+The future WorkerPool API will look like this:
+
+```python
+from concurry import Worker
+
+class TaskProcessor(Worker):
+    def process(self, item):
+        # Process item
+        return item * 2
+
+# This API is planned for future releases:
+# pool = TaskProcessor.pool(max_workers=5, mode="process").create()
+# 
+# # Use exactly like a single worker
+# futures = [pool.process(i) for i in range(100)]
+# results = [f.result() for f in futures]
+# 
+# pool.stop()
+```
+
 ## Next Steps
 
 - [API Reference](api/index.md) - Detailed API documentation
 - [Futures Guide](user-guide/futures.md) - Deep dive into futures
 - [Progress Guide](user-guide/progress.md) - Advanced progress tracking
+- [Workers Guide](user-guide/workers.md) - Complete worker pattern documentation
 

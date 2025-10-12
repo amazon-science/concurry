@@ -9,6 +9,7 @@ Concurry provides a consistent, framework-agnostic interface for working with co
 ## Key Features
 
 - 🔄 **Unified Future Interface**: Work with futures from any framework (threading, asyncio, Ray) through a single, consistent API
+- 🎭 **Actor Pattern (Workers)**: Stateful, isolated workers that run across sync, thread, process, asyncio, and Ray backends with a unified interface
 - 📊 **Beautiful Progress Bars**: Feature-rich progress tracking with tqdm integration, including success/failure states and customizable styling
 - 🎯 **Framework Agnostic**: Write code once, run it with any execution backend
 - 🚀 **High Performance**: Optimized frozen dataclass implementation with < 2.5 µs initialization, minimal overhead (~1-2 µs wrapping), and thread-safe UUID generation
@@ -56,6 +57,41 @@ for i in range(100):
 pbar.success("All done!")
 ```
 
+### Worker Pattern
+
+```python
+from concurry import Worker
+
+class DataProcessor(Worker):
+    def __init__(self, multiplier: int):
+        self.multiplier = multiplier
+        self.count = 0
+    
+    def process(self, value: int) -> int:
+        self.count += 1
+        return value * self.multiplier
+
+# Create worker in any execution mode
+worker = DataProcessor.options(mode="thread").create(multiplier=3)
+
+# Call methods (returns futures)
+future = worker.process(10)
+result = future.result()  # 30
+
+# State is maintained across calls
+future2 = worker.process(5)
+print(f"Processed {worker.count} items")  # Tracks state
+
+worker.stop()
+
+# Or use TaskWorker for quick task execution
+from concurry import TaskWorker
+
+task_worker = TaskWorker.options(mode="process").create()
+result = task_worker.submit_task(lambda x: x ** 2, 5).result()  # 25
+task_worker.stop()
+```
+
 ## Why Choose Concurry?
 
 ### Unified Future Interface
@@ -97,6 +133,7 @@ Concurry follows best practices:
 - [Installation Guide](installation.md) - Get started with Concurry
 - [Getting Started](user-guide/getting-started.md) - Learn the basics
 - [Futures Guide](user-guide/futures.md) - Master the unified future interface
+- [Workers Guide](user-guide/workers.md) - Learn the actor pattern with Workers
 - [Progress Guide](user-guide/progress.md) - Learn about progress tracking
 - [API Reference](api/index.md) - Detailed API documentation
 - [Examples](examples.md) - Real-world usage examples

@@ -842,6 +842,411 @@ count = calc_worker.count  # State is maintained
 calc_worker.stop()
 ```
 
+## Automatic Future Unwrapping
+
+One of the most powerful features in concurry is automatic future unwrapping, which enables seamless composition of workers. When you pass a `BaseFuture` (returned by any worker method) as an argument to another worker method, concurry automatically unwraps it by calling `.result()` before passing the value to the receiving worker.
+
+### Basic Future Unwrapping
+
+By default, all futures passed as arguments are automatically unwrapped:
+
+```python
+from concurry import Worker
+
+class DataSource(Worker):
+    def __init__(self, value: int):
+        self.value = value
+    
+    def get_data(self) -> int:
+        return self.value * 10
+
+class DataProcessor(Worker):
+    def __init__(self):
+        pass
+    
+    def process(self, data: int) -> int:
+        return data + 100
+
+# Initialize workers with different execution modes
+source = DataSource.options(mode="thread").init(5)
+processor = DataProcessor.options(mode="process").init()
+
+# Get data from source (returns a future)
+future_data = source.get_data()  # Future -> 50
+
+# Pass future directly to processor - it's automatically unwrapped!
+result = processor.process(future_data).result()  # 50 + 100 = 150
+
+print(result)  # 150
+source.stop()
+processor.stop()
+```
+
+**What happened:**
+1. `source.get_data()` returns a `BaseFuture` wrapping the value `50`
+2. When passed to `processor.process()`, concurry automatically calls `future_data.result()` to get `50`
+3. The processor receives the materialized value `50`, not the future object
+
+### Nested Structure Unwrapping
+
+Future unwrapping works recursively through nested data structures like lists, tuples, dicts, and sets:
+
+```python
+class MathWorker(Worker):
+    def __init__(self, base: int):
+        self.base = base
+    
+    def add(self, x: int) -> int:
+        return self.base + x
+    
+    def multiply(self, x: int) -> int:
+        return self.base * x
+
+class Aggregator(Worker):
+    def __init__(self):
+        pass
+    
+    def sum_list(self, numbers: list) -> int:
+        return sum(numbers)
+    
+    def sum_nested(self, data: dict) -> int:
+        """Sum all integers in a nested structure."""
+        total = 0
+        for value in data.values():
+            if isinstance(value, int):
+                total += value
+            elif isinstance(value, list):
+                total += sum(value)
+            elif isinstance(value, dict):
+                total += self.sum_nested(value)
+        return total
+
+# Create workers
+math_worker = MathWorker.options(mode="thread").init(10)
+aggregator = Aggregator.options(mode="thread").init()
+
+# Create multiple futures
+f1 = math_worker.add(5)   # Future -> 15
+f2 = math_worker.add(10)  # Future -> 20
+f3 = math_worker.add(15)  # Future -> 25
+
+# Pass list of futures - all automatically unwrapped
+result1 = aggregator.sum_list([f1, f2, f3]).result()
+print(result1)  # 15 + 20 + 25 = 60
+
+# Pass deeply nested structure with futures
+nested_data = {
+    "values": [f1, f2],           # Futures in a list
+    "extra": {"bonus": f3},       # Future in nested dict
+    "constant": 100                # Regular value (not a future)
+}
+result2 = aggregator.sum_nested(nested_data).result()
+print(result2)  # 15 + 20 + 25 + 100 = 160
+
+math_worker.stop()
+aggregator.stop()
+```
+
+**Supported Collections:**
+- `list`: `[future1, future2]`
+- `tuple`: `(future1, future2)`
+- `dict`: `{"key": future}` (only values are unwrapped, not keys)
+- `set`: `{future1, future2}`
+- `frozenset`: `frozenset([future1, future2])`
+
+### Cross-Worker Communication
+
+Future unwrapping works seamlessly across different worker types:
+
+```python
+# Thread worker produces data
+producer = DataSource.options(mode="thread").init(100)
+
+# Process worker consumes it (different execution context)
+consumer = DataProcessor.options(mode="process").init()
+
+future = producer.get_data()  # ThreadWorker future
+result = consumer.process(future).result()  # Unwrapped and passed to ProcessWorker
+
+print(result)  # 1100
+producer.stop()
+consumer.stop()
+```
+
+The future is automatically materialized on the client side and the value is passed to the receiving worker, regardless of worker type.
+
+### Ray Zero-Copy Optimization
+
+When passing futures between Ray workers, concurry uses a special optimization to avoid data serialization:
+
+```python
+import ray
+ray.init()
+
+from concurry import Worker
+
+class RayCompute(Worker):
+    def __init__(self, multiplier: int):
+        self.multiplier = multiplier
+    
+    def compute(self, x: int) -> int:
+        return x * self.multiplier
+
+# Two Ray workers
+worker1 = RayCompute.options(mode="ray").init(10)
+worker2 = RayCompute.options(mode="ray").init(5)
+
+# Worker1 produces a RayFuture (wrapping an ObjectRef)
+future = worker1.compute(100)  # RayFuture wrapping ObjectRef -> 1000
+
+# When passed to worker2, the ObjectRef is passed directly (zero-copy!)
+# No data serialization occurs - Ray handles data movement internally
+result = worker2.compute(future).result()  # 1000 * 5 = 5000
+
+print(result)  # 5000
+worker1.stop()
+worker2.stop()
+ray.shutdown()
+```
+
+**How it works:**
+- **RayFuture → RayWorker**: ObjectRef passed directly (zero-copy)
+- **Other Future → RayWorker**: Value materialized before passing
+- **RayFuture → Other Worker**: Value materialized before passing
+
+This optimization significantly improves performance for Ray-to-Ray communication by avoiding unnecessary data movement through the client.
+
+### Disabling Future Unwrapping
+
+In some cases, you may want to pass futures as objects (e.g., for inspection or custom handling). Use `unwrap_futures=False`:
+
+```python
+from concurry import Worker
+from concurry.core.future import BaseFuture
+
+class FutureInspector(Worker):
+    def __init__(self):
+        pass
+    
+    def is_future(self, obj) -> bool:
+        return isinstance(obj, BaseFuture)
+    
+    def get_future_id(self, obj) -> str:
+        if isinstance(obj, BaseFuture):
+            return obj.uuid
+        return "not a future"
+
+# Create worker with unwrapping disabled
+inspector = FutureInspector.options(
+    mode="thread",
+    unwrap_futures=False  # Pass futures as objects
+).init()
+
+# Create a producer
+producer = DataSource.options(mode="thread").init(42)
+future = producer.get_data()
+
+# Inspector receives the future object, not the value
+is_fut = inspector.is_future(future).result()
+print(is_fut)  # True
+
+fut_id = inspector.get_future_id(future).result()
+print(fut_id)  # sync-future-abc123...
+
+inspector.stop()
+producer.stop()
+```
+
+### Mixing Futures and Regular Values
+
+You can freely mix futures with regular values in your arguments:
+
+```python
+aggregator = Aggregator.options(mode="thread").init()
+math_worker = MathWorker.options(mode="thread").init(10)
+
+f1 = math_worker.add(5)  # Future -> 15
+
+# Mix futures with regular values
+result = aggregator.sum_list([f1, 20, 30, 40]).result()
+print(result)  # 15 + 20 + 30 + 40 = 105
+
+aggregator.stop()
+math_worker.stop()
+```
+
+### Exception Handling
+
+Exceptions in futures are properly propagated during unwrapping:
+
+```python
+class FailingWorker(Worker):
+    def __init__(self):
+        pass
+    
+    def may_fail(self, value: int) -> int:
+        if value < 0:
+            raise ValueError("Value must be positive")
+        return value * 2
+
+producer = FailingWorker.options(mode="thread").init()
+consumer = DataProcessor.options(mode="thread").init()
+
+# Create a future that will fail
+failing_future = producer.may_fail(-5)
+
+# When unwrapping, the ValueError is raised
+try:
+    result = consumer.process(failing_future).result()
+except ValueError as e:
+    print(f"Caught error during unwrapping: {e}")
+    # Output: Caught error during unwrapping: Value must be positive
+
+producer.stop()
+consumer.stop()
+```
+
+The original exception type and message are preserved through the unwrapping process.
+
+### Performance Considerations
+
+**Zero-Copy Scenarios (No Data Movement):**
+- Sync/Thread/Asyncio workers: Already share memory space
+- Ray → Ray: ObjectRef passed directly (Ray handles data movement)
+
+**Single Copy Scenarios (Optimal):**
+- Thread → Process: Value materialized once and serialized to process
+- Process → Ray: Value materialized once and passed to Ray
+- Any worker type → Different type: One serialization step
+
+**What Doesn't Happen:**
+- ❌ Client doesn't materialize and re-serialize for compatible workers
+- ❌ No double serialization (worker → client → worker)
+- ❌ No unnecessary data copies
+
+### Real-World Example: Data Pipeline
+
+```python
+from concurry import Worker
+import ray
+
+ray.init()
+
+class DataFetcher(Worker):
+    """Fetch data from source (I/O bound - use thread)."""
+    def __init__(self, source: str):
+        self.source = source
+    
+    def fetch(self, query: str) -> dict:
+        # Simulate fetching data
+        return {"source": self.source, "query": query, "rows": [1, 2, 3, 4, 5]}
+
+class DataTransformer(Worker):
+    """Transform data (CPU bound - use process or ray)."""
+    def __init__(self, scale: int):
+        self.scale = scale
+    
+    def transform(self, data: dict) -> dict:
+        # Expensive transformation
+        data["rows"] = [x * self.scale for x in data["rows"]]
+        data["transformed"] = True
+        return data
+
+class DataAggregator(Worker):
+    """Aggregate results (use ray for distributed aggregation)."""
+    def __init__(self):
+        self.count = 0
+    
+    def aggregate(self, datasets: list) -> dict:
+        self.count += len(datasets)
+        all_rows = []
+        for dataset in datasets:
+            all_rows.extend(dataset["rows"])
+        return {"total_rows": len(all_rows), "sum": sum(all_rows), "count": self.count}
+
+# Build pipeline with different execution modes
+fetcher = DataFetcher.options(mode="thread").init("database")
+transformer = DataTransformer.options(mode="ray").init(10)
+aggregator = DataAggregator.options(mode="ray").init()
+
+# Fetch data (returns futures)
+data1 = fetcher.fetch("SELECT * FROM table1")
+data2 = fetcher.fetch("SELECT * FROM table2")
+data3 = fetcher.fetch("SELECT * FROM table3")
+
+# Transform data (futures automatically unwrapped)
+transformed1 = transformer.transform(data1)
+transformed2 = transformer.transform(data2)
+transformed3 = transformer.transform(data3)
+
+# Aggregate results (list of futures automatically unwrapped)
+result = aggregator.aggregate([transformed1, transformed2, transformed3]).result()
+
+print(result)
+# Output: {'total_rows': 15, 'sum': 450, 'count': 3}
+
+# Clean up
+fetcher.stop()
+transformer.stop()
+aggregator.stop()
+ray.shutdown()
+```
+
+In this pipeline:
+1. Data is fetched by a thread worker (I/O bound)
+2. Each dataset is transformed by a Ray worker (CPU bound, distributed)
+3. Results are aggregated by another Ray worker
+4. All futures are automatically unwrapped at each stage
+5. Ray → Ray communication uses zero-copy ObjectRefs
+
+### Best Practices
+
+**1. Let Unwrapping Happen Automatically:**
+```python
+# ✅ Good: Let concurry handle unwrapping
+future = producer.get_data()
+result = consumer.process(future).result()
+
+# ❌ Avoid: Manual unwrapping (unnecessary)
+future = producer.get_data()
+value = future.result()  # Extra step
+result = consumer.process(value).result()
+```
+
+**2. Use Ray for Distributed Pipelines:**
+```python
+# ✅ Good: Ray workers benefit from zero-copy ObjectRefs
+ray_worker1 = Worker.options(mode="ray").init()
+ray_worker2 = Worker.options(mode="ray").init()
+result = ray_worker2.process(ray_worker1.compute(x)).result()
+```
+
+**3. Mix Execution Modes Appropriately:**
+```python
+# ✅ Good: Match execution mode to task characteristics
+fetcher = DataFetcher.options(mode="thread").init()    # I/O bound
+processor = DataProcessor.options(mode="process").init()  # CPU bound
+result = processor.transform(fetcher.fetch()).result()  # Seamless
+```
+
+**4. Handle Exceptions Gracefully:**
+```python
+# ✅ Good: Catch exceptions during unwrapping
+try:
+    result = consumer.process(risky_future).result()
+except ValueError as e:
+    print(f"Pipeline failed: {e}")
+```
+
+**5. Only Disable Unwrapping When Necessary:**
+```python
+# ✅ Good: Only disable when you need to inspect futures
+inspector = FutureInspector.options(unwrap_futures=False).init()
+
+# ❌ Avoid: Disabling unnecessarily complicates code
+worker = Worker.options(unwrap_futures=False).init()  # Why?
+```
+
 ## Performance Considerations
 
 ### Startup Overhead

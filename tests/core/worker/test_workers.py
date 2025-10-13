@@ -717,6 +717,7 @@ class TestAsyncFunctionSupport:
 
     def test_submit_async_lambda(self, worker_mode):
         """Test submitting async lambda functions."""
+
         # Note: async lambdas are not directly supported in Python,
         # but we can submit regular async functions
         async def async_square(x):
@@ -821,7 +822,9 @@ class TestAsyncIOPerformance:
             # Test 1: Read files using sync method with thread worker (baseline)
             w_thread = FileIOWorker.options(mode="thread").init()
             start_time = time.time()
-            futures = [w_thread.read_file_sync(path) for path in file_paths[:100]]  # Read 100 files for baseline
+            futures = [
+                w_thread.read_file_sync(path) for path in file_paths[:100]
+            ]  # Read 100 files for baseline
             results_sync = [f.result(timeout=30) for f in futures]
             time_sync = time.time() - start_time
             w_thread.stop()

@@ -365,4 +365,3 @@ class TestFutureConsistency:
         asyncio.run(test_sync_future())
         asyncio.run(test_concurrent_future())
         asyncio.run(test_asyncio_future())
-

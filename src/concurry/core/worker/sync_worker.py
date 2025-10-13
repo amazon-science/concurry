@@ -7,7 +7,7 @@ from typing import Any
 from pydantic import PrivateAttr
 
 from ..future import SyncFuture
-from .base_worker import Worker, WorkerProxy
+from .base_worker import WorkerProxy, _unwrap_futures_in_args
 
 
 def _invoke_function(fn, *args, **kwargs):
@@ -112,6 +112,9 @@ class SyncWorkerProxy(WorkerProxy):
         # Validate that fn is callable - this error should propagate immediately
         if not callable(fn):
             raise TypeError(f"fn must be callable, got {type(fn).__name__}")
+
+        # Unwrap any BaseFuture instances in args/kwargs
+        args, kwargs = _unwrap_futures_in_args(args, kwargs, self.unwrap_futures)
 
         # Execute the function and wrap any execution errors in the future
         try:

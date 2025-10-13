@@ -10,7 +10,7 @@ from typing import Any, Dict
 from pydantic import PrivateAttr
 
 from ..future import ConcurrentFuture
-from .base_worker import WorkerProxy
+from .base_worker import WorkerProxy, _unwrap_futures_in_args
 
 
 def _invoke_function(fn, *args, **kwargs):
@@ -191,6 +191,9 @@ class ThreadWorkerProxy(WorkerProxy):
         Returns:
             ConcurrentFuture for the method execution
         """
+        # Unwrap any BaseFuture instances in args/kwargs
+        args, kwargs = _unwrap_futures_in_args(args, kwargs, self.unwrap_futures)
+
         request_id = str(uuid.uuid4())
         result_queue = queue.Queue()
 
@@ -233,6 +236,9 @@ class ThreadWorkerProxy(WorkerProxy):
         Returns:
             ConcurrentFuture for the task execution
         """
+        # Unwrap any BaseFuture instances in args/kwargs
+        args, kwargs = _unwrap_futures_in_args(args, kwargs, self.unwrap_futures)
+
         request_id = str(uuid.uuid4())
         result_queue = queue.Queue()
 

@@ -4,11 +4,11 @@ import asyncio
 import inspect
 from typing import Any, Dict, Optional, Union
 
+from morphic.structs import map_collection
 from pydantic import PrivateAttr
 
-from ..future import RayFuture, SyncFuture
+from ..future import RayFuture
 from .base_worker import WorkerProxy
-
 
 # Note: Ray has native support for async methods in actors.
 # When you define an async method in a Ray actor and call it with .remote(),
@@ -22,6 +22,99 @@ from .base_worker import WorkerProxy
 # For now, Ray's default behavior correctly executes async functions,
 # though it may not provide the same level of concurrent execution as
 # a dedicated event loop (like AsyncioWorkerProxy).
+
+
+def _unwrap_future_for_ray(obj: Any) -> Any:
+    """Unwrap futures for Ray, preserving ObjectRefs for zero-copy.
+
+    RayFuture → ObjectRef (zero-copy for top-level args, resolved for nested)
+    Other BaseFuture → .result() (materialize)
+    Non-future → unchanged
+
+    Note: Ray automatically unwraps top-level ObjectRef arguments but NOT
+    ObjectRefs nested in collections. This function handles both cases.
+
+    Args:
+        obj: Object that might be a BaseFuture
+
+    Returns:
+        ObjectRef if obj is RayFuture (zero-copy),
+        materialized value if obj is other BaseFuture,
+        otherwise obj unchanged
+    """
+    from ..future import BaseFuture
+
+    if isinstance(obj, RayFuture):
+        # Zero-copy: pass ObjectRef directly
+        return obj._object_ref
+    elif isinstance(obj, BaseFuture):
+        # Cross-worker: materialize value
+        return obj.result()
+    return obj
+
+
+def _resolve_nested_objectrefs(obj: Any) -> Any:
+    """Resolve ObjectRefs that are nested in collections.
+
+    Ray automatically unwraps top-level ObjectRef arguments, but ObjectRefs
+    nested in collections (lists, dicts, etc.) must be explicitly resolved.
+
+    Args:
+        obj: Object that might be an ObjectRef
+
+    Returns:
+        Resolved value if obj is an ObjectRef, otherwise obj unchanged
+    """
+    import ray
+
+    if isinstance(obj, ray.ObjectRef):
+        return ray.get(obj)
+    return obj
+
+
+def _unwrap_futures_for_ray(
+    args: tuple,
+    kwargs: dict,
+    unwrap_futures: bool,
+) -> tuple:
+    """Ray-specific unwrapping with zero-copy optimization.
+
+    Recursively traverses nested collections and:
+    - Extracts ObjectRef from RayFuture (zero-copy)
+    - Materializes other BaseFuture types via .result()
+    - Resolves nested ObjectRefs (Ray limitation workaround)
+    - Leaves non-future values unchanged
+
+    Args:
+        args: Positional arguments
+        kwargs: Keyword arguments
+        unwrap_futures: Whether to perform unwrapping
+
+    Returns:
+        Tuple of (unwrapped_args, unwrapped_kwargs)
+    """
+    if not unwrap_futures:
+        return args, kwargs
+
+    # Step 1: Unwrap BaseFuture instances to ObjectRefs or values
+    unwrapped_args = tuple(map_collection(arg, _unwrap_future_for_ray, recurse=True) for arg in args)
+
+    unwrapped_kwargs = {
+        key: map_collection(value, _unwrap_future_for_ray, recurse=True) for key, value in kwargs.items()
+    }
+
+    # Step 2: Resolve any ObjectRefs that are nested in collections
+    # Ray only auto-unwraps top-level ObjectRef args, not nested ones
+    resolved_args = tuple(
+        map_collection(arg, _resolve_nested_objectrefs, recurse=True) for arg in unwrapped_args
+    )
+
+    resolved_kwargs = {
+        key: map_collection(value, _resolve_nested_objectrefs, recurse=True)
+        for key, value in unwrapped_kwargs.items()
+    }
+
+    return resolved_args, resolved_kwargs
 
 
 class RayWorkerProxy(WorkerProxy):
@@ -49,6 +142,13 @@ class RayWorkerProxy(WorkerProxy):
     Ray has native support for async methods in actors - they work automatically.
     For `submit_task()` with async functions, they are wrapped to execute correctly
     but won't provide the same concurrency benefits as `AsyncioWorkerProxy`.
+
+    **Future Unwrapping with Zero-Copy Optimization:**
+
+    When passing RayFuture instances from one Ray worker to another, the underlying
+    ObjectRef is passed directly (zero-copy), avoiding data serialization. For futures
+    from other worker types, values are materialized before passing. This optimization
+    is automatic when `unwrap_futures=True` (default).
 
     **Example:**
 
@@ -144,6 +244,9 @@ class RayWorkerProxy(WorkerProxy):
             AttributeError: If the method doesn't exist on the actor
             Exception: Any immediate errors during method invocation setup
         """
+        # Unwrap futures with Ray zero-copy optimization
+        args, kwargs = _unwrap_futures_for_ray(args, kwargs, self.unwrap_futures)
+
         # Don't catch exceptions - let them propagate immediately for fast failure
         # This ensures errors like AttributeError (method not found) fail immediately
         # rather than being wrapped in a future
@@ -166,6 +269,9 @@ class RayWorkerProxy(WorkerProxy):
             ImportError: If Ray is not available
             Exception: Any immediate errors during task submission setup
         """
+        # Unwrap futures with Ray zero-copy optimization
+        args, kwargs = _unwrap_futures_for_ray(args, kwargs, self.unwrap_futures)
+
         # Don't catch exceptions - let them propagate immediately for fast failure
         import ray
 

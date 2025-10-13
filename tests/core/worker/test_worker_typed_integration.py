@@ -8,7 +8,6 @@ import pytest
 from pydantic import ValidationError
 
 from concurry import Worker
-from concurry.core.config import ExecutionMode
 
 
 class TestWorkerProxyTypedValidation:
@@ -131,11 +130,12 @@ class TestWorkerProxyTypedValidation:
 
     def test_different_proxy_types_all_use_typed(self):
         """Test that all WorkerProxy subclasses inherit from Typed."""
+        from morphic import Typed
+
+        from concurry.core.worker.asyncio_worker import AsyncioWorkerProxy
+        from concurry.core.worker.process_worker import ProcessWorkerProxy
         from concurry.core.worker.sync_worker import SyncWorkerProxy
         from concurry.core.worker.thread_worker import ThreadWorkerProxy
-        from concurry.core.worker.process_worker import ProcessWorkerProxy
-        from concurry.core.worker.asyncio_worker import AsyncioWorkerProxy
-        from morphic import Typed
 
         # All proxy classes should be Typed subclasses
         assert issubclass(SyncWorkerProxy, Typed)

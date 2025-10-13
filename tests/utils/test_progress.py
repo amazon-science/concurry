@@ -1,9 +1,10 @@
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import morphic
 import pytest
 
-import concurry, morphic
+import concurry
 from concurry.utils.frameworks import _IS_RAY_INSTALLED, RayContext, ray_context
 from concurry.utils.progress import ProgressBar
 

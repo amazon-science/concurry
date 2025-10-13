@@ -2,11 +2,11 @@
 
 import asyncio
 import threading
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import PrivateAttr
 
-from .base_worker import Worker, WorkerProxy
+from .base_worker import WorkerProxy, _unwrap_futures_in_args
 
 
 class AsyncioWorkerProxy(WorkerProxy):
@@ -144,6 +144,8 @@ class AsyncioWorkerProxy(WorkerProxy):
         Returns:
             ConcurrentFuture for the method execution
         """
+        # Unwrap any BaseFuture instances in args/kwargs
+        unwrapped_args, unwrapped_kwargs = _unwrap_futures_in_args(args, kwargs, self.unwrap_futures)
 
         # Create a future in the asyncio event loop
         async def _run_method():
@@ -152,9 +154,9 @@ class AsyncioWorkerProxy(WorkerProxy):
                 raise AttributeError(f"'{self.worker_cls.__name__}' has no callable method '{method_name}'")
 
             if asyncio.iscoroutinefunction(method):
-                result = await method(*args, **kwargs)
+                result = await method(*unwrapped_args, **unwrapped_kwargs)
             else:
-                result = method(*args, **kwargs)
+                result = method(*unwrapped_args, **unwrapped_kwargs)
 
             return result
 
@@ -178,6 +180,8 @@ class AsyncioWorkerProxy(WorkerProxy):
         Returns:
             ConcurrentFuture for the task execution
         """
+        # Unwrap any BaseFuture instances in args/kwargs
+        unwrapped_args, unwrapped_kwargs = _unwrap_futures_in_args(args, kwargs, self.unwrap_futures)
 
         # Create a future in the asyncio event loop
         async def _run_task():
@@ -185,9 +189,9 @@ class AsyncioWorkerProxy(WorkerProxy):
                 raise TypeError(f"fn must be callable, got {type(fn).__name__}")
 
             if asyncio.iscoroutinefunction(fn):
-                result = await fn(*args, **kwargs)
+                result = await fn(*unwrapped_args, **unwrapped_kwargs)
             else:
-                result = fn(*args, **kwargs)
+                result = fn(*unwrapped_args, **unwrapped_kwargs)
 
             return result
 

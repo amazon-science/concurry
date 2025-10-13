@@ -4,11 +4,60 @@ from abc import ABC
 from typing import Any, Callable, Optional, Type, TypeVar
 
 from morphic import Typed, validate
+from morphic.structs import map_collection
 from pydantic import ConfigDict, PrivateAttr
 
 from ..config import ExecutionMode
 
 T = TypeVar("T")
+
+
+def _unwrap_future_value(obj: Any) -> Any:
+    """Unwrap a single future or return object as-is.
+
+    Args:
+        obj: Object that might be a BaseFuture
+
+    Returns:
+        Materialized value if obj is a BaseFuture, otherwise obj unchanged
+    """
+    from ..future import BaseFuture
+
+    if isinstance(obj, BaseFuture):
+        return obj.result()
+    return obj
+
+
+def _unwrap_futures_in_args(
+    args: tuple,
+    kwargs: dict,
+    unwrap_futures: bool,
+) -> tuple:
+    """Unwrap all BaseFuture instances in args and kwargs.
+
+    Recursively traverses nested collections (list, tuple, dict, set)
+    and unwraps any BaseFuture instances found.
+
+    Args:
+        args: Positional arguments
+        kwargs: Keyword arguments
+        unwrap_futures: Whether to perform unwrapping
+
+    Returns:
+        Tuple of (unwrapped_args, unwrapped_kwargs)
+    """
+    if not unwrap_futures:
+        return args, kwargs
+
+    # Unwrap each arg with recursive collection traversal
+    unwrapped_args = tuple(map_collection(arg, _unwrap_future_value, recurse=True) for arg in args)
+
+    # Unwrap each kwarg value with recursive traversal
+    unwrapped_kwargs = {
+        key: map_collection(value, _unwrap_future_value, recurse=True) for key, value in kwargs.items()
+    }
+
+    return unwrapped_args, unwrapped_kwargs
 
 
 class WorkerBuilder:
@@ -301,6 +350,9 @@ class Worker:
                 Accepts string or ExecutionMode enum value
             blocking: If True, method calls return results directly instead of futures
                 Accepts bool or string representation ("true", "false", "1", "0")
+            unwrap_futures: If True (default), automatically unwrap BaseFuture arguments
+                by calling .result() on them before passing to worker methods. This enables
+                seamless composition of workers. Set to False to pass futures as-is.
             **kwargs: Additional options passed to the worker implementation
                 - For ray: num_cpus, num_gpus, resources, etc.
                 - For process: mp_context (fork, spawn, forkserver)
@@ -336,6 +388,20 @@ class Worker:
                     mode="process",
                     mp_context="spawn"
                 ).init(multiplier=3)
+                ```
+
+            Future Unwrapping (Default Enabled):
+                ```python
+                # Automatic future unwrapping (default)
+                producer = Worker1.options(mode="thread").init()
+                consumer = Worker2.options(mode="thread").init()
+
+                future = producer.compute(10)  # Returns BaseFuture
+                result = consumer.process(future).result()  # future is auto-unwrapped
+
+                # Disable unwrapping to pass futures as objects
+                worker = MyWorker.options(mode="thread", unwrap_futures=False).init()
+                result = worker.inspect_future(future).result()  # Receives BaseFuture object
                 ```
         """
         return WorkerBuilder(worker_cls=cls, mode=mode, blocking=blocking, is_pool=False, **kwargs)
@@ -419,6 +485,7 @@ class WorkerProxy(Typed, ABC):
     - **Public Fields**: Defined as regular Pydantic fields, frozen after initialization
       - `worker_cls`: The worker class to instantiate
       - `blocking`: Whether method calls return results directly instead of futures
+      - `unwrap_futures`: Whether to automatically unwrap BaseFuture arguments (default: True)
       - `init_args`: Positional arguments for worker initialization
       - `init_kwargs`: Keyword arguments for worker initialization
       - Subclass-specific fields (e.g., `num_cpus` for RayWorkerProxy)
@@ -427,6 +494,13 @@ class WorkerProxy(Typed, ABC):
       - `_stopped`: Boolean flag indicating if worker is stopped
       - `_options`: Dictionary of additional options
       - Implementation-specific attributes (e.g., `_thread`, `_process`, `_loop`)
+
+    **Future Unwrapping:**
+
+    By default (`unwrap_futures=True`), BaseFuture arguments are automatically unwrapped
+    by calling `.result()` before passing to worker methods. This enables seamless worker
+    composition where one worker's output can be directly passed to another worker.
+    Nested futures in collections (lists, dicts, tuples) are also unwrapped recursively.
 
     **Usage Notes:**
 
@@ -470,6 +544,7 @@ class WorkerProxy(Typed, ABC):
 
     worker_cls: Type[Worker]
     blocking: bool = False
+    unwrap_futures: bool = True
     init_args: tuple = ()
     init_kwargs: dict = {}
 

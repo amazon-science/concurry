@@ -13,7 +13,7 @@ import cloudpickle
 from pydantic import PrivateAttr
 
 from ..future import ConcurrentFuture
-from .base_worker import WorkerProxy
+from .base_worker import WorkerProxy, _unwrap_futures_in_args
 
 
 def _invoke_function(fn, *args, **kwargs):
@@ -253,6 +253,9 @@ class ProcessWorkerProxy(WorkerProxy):
         Returns:
             ConcurrentFuture for the method execution
         """
+        # Unwrap any BaseFuture instances in args/kwargs
+        args, kwargs = _unwrap_futures_in_args(args, kwargs, self.unwrap_futures)
+
         from concurrent.futures import Future as PyFuture
 
         request_id = str(uuid.uuid4())
@@ -276,6 +279,9 @@ class ProcessWorkerProxy(WorkerProxy):
         Returns:
             ConcurrentFuture for the task execution
         """
+        # Unwrap any BaseFuture instances in args/kwargs
+        args, kwargs = _unwrap_futures_in_args(args, kwargs, self.unwrap_futures)
+
         from concurrent.futures import Future as PyFuture
 
         request_id = str(uuid.uuid4())

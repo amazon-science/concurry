@@ -3,6 +3,7 @@
 import asyncio
 import queue
 import threading
+from concurrent.futures import Future as PyFuture
 from typing import Any, Dict
 
 from pydantic import PrivateAttr
@@ -231,9 +232,6 @@ class AsyncioWorkerProxy(WorkerProxy):
             # Method doesn't exist - will be caught later
             is_async = False
 
-        # Use concurrent.futures.Future for efficient blocking
-        from concurrent.futures import Future as PyFuture
-
         result_future = PyFuture()
         future = ConcurrentFuture(future=result_future)
 
@@ -294,9 +292,6 @@ class AsyncioWorkerProxy(WorkerProxy):
 
         # Check if function is async or sync
         is_async = asyncio.iscoroutinefunction(fn)
-
-        # Use concurrent.futures.Future for efficient blocking
-        from concurrent.futures import Future as PyFuture
 
         result_future = PyFuture()
         future = ConcurrentFuture(future=result_future)

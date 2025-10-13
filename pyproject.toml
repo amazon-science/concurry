@@ -44,6 +44,7 @@ dev = [
     "flake8>=3.8",
     "mypy>=0.900",
     "aiofiles>=25.0",
+    "aiohttp>=3.13",
 ]
 docs = [
     "mkdocs>=1.6.0",
@@ -52,7 +53,8 @@ docs = [
     "mike>=2.0.0",
 ]
 all = [
-    "morphic[dev,docs,ray]",
+    "morphic[all]",
+    "concurry[dev,docs,ray]",
 ]
 
 [tool.hatch.version]

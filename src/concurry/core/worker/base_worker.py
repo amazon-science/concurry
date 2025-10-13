@@ -165,6 +165,7 @@ class WorkerBuilder:
         from .asyncio_worker import AsyncioWorkerProxy
         from .process_worker import ProcessWorkerProxy
         from .sync_worker import SyncWorkerProxy
+        from .task_worker import TaskWorker, TaskWorkerMixin
         from .thread_worker import ThreadWorkerProxy
 
         # Convert mode string to ExecutionMode
@@ -185,6 +186,18 @@ class WorkerBuilder:
             proxy_cls = RayWorkerProxy
         else:
             raise ValueError(f"Unsupported execution mode: {execution_mode}")
+
+        # If this is TaskWorker, create a combined proxy class with TaskWorkerMixin
+        if self._worker_cls is TaskWorker or (
+            isinstance(self._worker_cls, type) and issubclass(self._worker_cls, TaskWorker)
+        ):
+            # Create a dynamic class that combines the base proxy with TaskWorkerMixin
+            # Use TaskWorkerMixin as the first base class so its methods take precedence
+            proxy_cls = type(
+                f"Task{proxy_cls.__name__}",
+                (TaskWorkerMixin, proxy_cls),
+                {},
+            )
 
         # Create proxy with init args/kwargs
         # Typed expects all parameters as keyword arguments
@@ -290,14 +303,17 @@ class Worker:
         result2 = worker.sync_method(5).result()  # 15
         worker.stop()
 
-        # Submit async functions via submit_task
+        # Submit async functions via TaskWorker
+        from concurry import TaskWorker
+        import asyncio
+
         async def compute(x, y):
             await asyncio.sleep(0.01)
             return x ** 2 + y ** 2
 
-        worker = AsyncWorker.options(mode="asyncio").init()
-        result = worker.submit_task(compute, 3, 4).result()  # 25
-        worker.stop()
+        task_worker = TaskWorker.options(mode="asyncio").init()
+        result = task_worker.submit(compute, 3, 4).result()  # 25
+        task_worker.stop()
         ```
 
         **Performance:** AsyncioWorkerProxy provides significant speedup (5-15x) for
@@ -312,23 +328,24 @@ class Worker:
         worker.stop()
         ```
 
-    Submitting Arbitrary Functions:
+    Submitting Arbitrary Functions with TaskWorker:
         ```python
-        # Use submit_task() like Executor.submit()
+        # Use TaskWorker for Executor-like interface
+        from concurry import TaskWorker
+
         def compute(x, y):
             return x ** 2 + y ** 2
 
-        worker = DataProcessor.options(mode="process").init(1)
+        task_worker = TaskWorker.options(mode="process").init()
 
-        # Submit function that's not a worker method
-        future = worker.submit_task(compute, 3, 4)
+        # Submit arbitrary functions
+        future = task_worker.submit(compute, 3, 4)
         result = future.result()  # 25
 
-        # Mix method calls and task submission
-        result1 = worker.process(10).result()  # Uses worker method
-        result2 = worker.submit_task(lambda x: x * 100, 5).result()  # Arbitrary function
+        # Use map() for multiple tasks
+        results = list(task_worker.map(lambda x: x * 100, [1, 2, 3, 4, 5]))
 
-        worker.stop()
+        task_worker.stop()
         ```
 
     State Management:
@@ -649,105 +666,6 @@ class WorkerProxy(Typed, ABC):
         """
         raise NotImplementedError("Subclasses must implement _execute_method")
 
-    def submit_task(self, fn: Callable, *args: Any, **kwargs: Any):
-        """Submit an arbitrary function to be executed by the worker.
-
-        This method allows submitting any callable function to be executed in the
-        worker's execution context (thread, process, asyncio loop, or Ray actor).
-        Similar to Executor.submit() but runs in the worker's context.
-
-        Args:
-            fn: Callable function to execute
-            *args: Positional arguments for the function
-            **kwargs: Keyword arguments for the function
-
-        Returns:
-            BaseFuture for the task execution (or result directly if blocking=True)
-
-        Examples:
-            Basic Function Submission:
-                ```python
-                def compute(x, y):
-                    return x + y
-
-                worker = Worker.options(mode="process")
-                future = worker.submit_task(compute, 10, 20)
-                result = future.result()  # 30
-                worker.stop()
-                ```
-
-            Using with Lambda Functions:
-                ```python
-                worker = Worker.options(mode="thread")
-                future = worker.submit_task(lambda x: x ** 2, 5)
-                result = future.result()  # 25
-                worker.stop()
-                ```
-
-            Mixing Method Calls and Task Submission:
-                ```python
-                class DataProcessor(Worker):
-                    def __init__(self, multiplier: int):
-                        self.multiplier = multiplier
-
-                    def process(self, value: int) -> int:
-                        return value * self.multiplier
-
-                worker = DataProcessor.options(mode="thread").init(2)
-
-                # Call worker method
-                result1 = worker.process(10).result()  # 20
-
-                # Submit arbitrary function
-                result2 = worker.submit_task(lambda x: x + 100, 5).result()  # 105
-
-                worker.stop()
-                ```
-
-            With Keyword Arguments:
-                ```python
-                def complex_calc(x, y, power=2, offset=0):
-                    return (x ** power + y ** power) + offset
-
-                worker = Worker.options(mode="process")
-                future = worker.submit_task(complex_calc, 3, 4, power=2, offset=10)
-                result = future.result()  # 35
-                worker.stop()
-                ```
-
-            In Blocking Mode:
-                ```python
-                worker = Worker.options(mode="thread", blocking=True)
-                result = worker.submit_task(lambda x: x * 2, 50)  # Returns 100 directly
-                worker.stop()
-                ```
-        """
-        # Access attributes using Pydantic's mechanism
-        if self._stopped:
-            raise RuntimeError("Worker is stopped")
-
-        future = self._execute_task(fn, *args, **kwargs)
-
-        if self.blocking:
-            # Return result directly (blocking)
-            return future.result()
-        else:
-            # Return future (non-blocking)
-            return future
-
-    def _execute_task(self, fn: Callable, *args: Any, **kwargs: Any):
-        """Execute an arbitrary function on the worker.
-
-        Args:
-            fn: Callable function to execute
-            *args: Positional arguments
-            **kwargs: Keyword arguments
-
-        Returns:
-            BaseFuture for the task execution
-        """
-        raise NotImplementedError("Subclasses must implement _execute_task")
-
     def stop(self, timeout: float = 30) -> None:
         """Stop the worker and clean up resources.
 
@@ -832,89 +750,3 @@ def worker(cls: Type[T]) -> Type[T]:
         cls = type(cls.__name__, (Worker, cls), dict(cls.__dict__))
 
     return cls
-
-
-class TaskWorker(Worker):
-    """A generic worker for submitting arbitrary tasks.
-
-    TaskWorker is a concrete worker implementation that has no custom methods
-    and is designed specifically for executing arbitrary functions via submit_task().
-    This is useful when you don't need to define custom worker methods but just
-    want to execute functions in different execution contexts.
-
-    This class is intended to be used by higher-level abstractions like
-    WorkerExecutor and WorkerPool.
-
-    Examples:
-        Basic Task Execution:
-            ```python
-            from concurry import TaskWorker
-
-            # Create a task worker
-            worker = TaskWorker.options(mode="thread").init()
-
-            # Submit arbitrary functions
-            def compute(x, y):
-                return x ** 2 + y ** 2
-
-            future = worker.submit_task(compute, 3, 4)
-            result = future.result()  # 25
-
-            worker.stop()
-            ```
-
-        With Different Execution Modes:
-            ```python
-            # Thread-based execution
-            thread_worker = TaskWorker.options(mode="thread").init()
-
-            # Process-based execution for CPU-intensive tasks
-            process_worker = TaskWorker.options(mode="process").init()
-
-            # Asyncio-based execution
-            async_worker = TaskWorker.options(mode="asyncio").init()
-
-            # Submit tasks to any of them
-            result1 = thread_worker.submit_task(lambda x: x * 2, 10).result()
-            result2 = process_worker.submit_task(lambda x: x ** 3, 5).result()
-            result3 = async_worker.submit_task(lambda x: x + 100, 7).result()
-
-            thread_worker.stop()
-            process_worker.stop()
-            async_worker.stop()
-            ```
-
-        Blocking Mode:
-            ```python
-            # Get results directly without futures
-            worker = TaskWorker.options(mode="thread", blocking=True).init()
-
-            result = worker.submit_task(lambda x: x * 10, 5)  # Returns 50 directly
-
-            worker.stop()
-            ```
-
-        Multiple Tasks:
-            ```python
-            worker = TaskWorker.options(mode="process").init()
-
-            # Submit multiple tasks
-            futures = [
-                worker.submit_task(lambda x: x ** 2, i)
-                for i in range(10)
-            ]
-
-            # Collect results
-            results = [f.result() for f in futures]
-            print(results)  # [0, 1, 4, 9, 16, 25, 36, 49, 64, 81]
-
-            worker.stop()
-            ```
-    """
-
-    def __init__(self):
-        """Initialize the TaskWorker.
-
-        TaskWorker requires no initialization arguments.
-        """
-        super().__init__()

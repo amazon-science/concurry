@@ -405,9 +405,9 @@ Use TaskWorker when you don't need custom methods:
 from concurry import TaskWorker
 
 # Create a task worker
-worker = TaskWorker.options(mode="thread").create()
+worker = TaskWorker.options(mode="thread").init()
 
-# Submit arbitrary functions
+# Submit arbitrary functions using submit()
 def compute_stats(data):
     """Compute statistics on data."""
     return {
@@ -419,18 +419,17 @@ def compute_stats(data):
 
 # Submit the task
 data = [1, 5, 3, 9, 2, 8, 4, 7, 6]
-future = worker.submit_task(compute_stats, data)
+future = worker.submit(compute_stats, data)
 stats = future.result()
 print(f"Statistics: {stats}")
 
-# Submit multiple tasks
+# Use map() for multiple tasks
 def factorial(n):
     if n <= 1:
         return 1
     return n * factorial(n - 1)
 
-futures = [worker.submit_task(factorial, i) for i in range(1, 11)]
-factorials = [f.result() for f in futures]
+factorials = list(worker.map(factorial, range(1, 11)))
 print(f"Factorials: {factorials}")
 
 worker.stop()

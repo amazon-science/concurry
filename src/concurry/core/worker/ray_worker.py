@@ -141,7 +141,7 @@ class RayWorkerProxy(WorkerProxy):
     **Async Function Support:**
 
     Ray has native support for async methods in actors - they work automatically.
-    For `submit_task()` with async functions, they are wrapped to execute correctly
+    For TaskWorker with async functions, they are wrapped to execute correctly
     but won't provide the same concurrency benefits as `AsyncioWorkerProxy`.
 
     **Future Unwrapping with Zero-Copy Optimization:**

@@ -414,49 +414,54 @@ class TestFutureInterface:
         w.stop()
 
 
-class TestWorkerSubmitTask:
-    """Test submit_task functionality."""
+class TestTaskWorkerSubmit:
+    """Test TaskWorker.submit() functionality."""
 
     def test_submit_simple_function(self, worker_mode):
         """Test submitting a simple function."""
+        from concurry import TaskWorker
 
         def add(x, y):
             return x + y
 
-        w = SimpleWorker.options(mode=worker_mode).init(10)
-        future = w.submit_task(add, 5, 10)
+        w = TaskWorker.options(mode=worker_mode).init()
+        future = w.submit(add, 5, 10)
         result = future.result(timeout=5)
         assert result == 15
         w.stop()
 
     def test_submit_with_kwargs(self, worker_mode):
         """Test submitting a function with keyword arguments."""
+        from concurry import TaskWorker
 
         def multiply(x, y, factor=1):
             return (x * y) * factor
 
-        w = SimpleWorker.options(mode=worker_mode).init(10)
-        future = w.submit_task(multiply, 3, 4, factor=2)
+        w = TaskWorker.options(mode=worker_mode).init()
+        future = w.submit(multiply, 3, 4, factor=2)
         result = future.result(timeout=5)
         assert result == 24
         w.stop()
 
     def test_submit_lambda(self, worker_mode):
         """Test submitting a lambda function."""
-        w = SimpleWorker.options(mode=worker_mode).init(10)
-        future = w.submit_task(lambda x: x**2, 5)
+        from concurry import TaskWorker
+
+        w = TaskWorker.options(mode=worker_mode).init()
+        future = w.submit(lambda x: x**2, 5)
         result = future.result(timeout=5)
         assert result == 25
         w.stop()
 
     def test_submit_with_exception(self, worker_mode):
         """Test submitting a function that raises an exception."""
+        from concurry import TaskWorker
 
         def failing_fn():
             raise ValueError("Task failed")
 
-        w = SimpleWorker.options(mode=worker_mode).init(10)
-        future = w.submit_task(failing_fn)
+        w = TaskWorker.options(mode=worker_mode).init()
+        future = w.submit(failing_fn)
 
         with pytest.raises(Exception) as exc_info:
             future.result(timeout=5)
@@ -466,58 +471,79 @@ class TestWorkerSubmitTask:
 
     def test_submit_multiple_tasks(self, worker_mode):
         """Test submitting multiple tasks."""
+        from concurry import TaskWorker
 
         def compute(x):
             return x * 2
 
-        w = SimpleWorker.options(mode=worker_mode).init(10)
+        w = TaskWorker.options(mode=worker_mode).init()
 
-        futures = [w.submit_task(compute, i) for i in range(5)]
+        futures = [w.submit(compute, i) for i in range(5)]
         results = [f.result(timeout=5) for f in futures]
 
         assert results == [0, 2, 4, 6, 8]
         w.stop()
 
     def test_submit_blocking_mode(self, worker_mode):
-        """Test submit_task in blocking mode."""
+        """Test submit() in blocking mode."""
+        from concurry import TaskWorker
 
         def add(x, y):
             return x + y
 
-        w = SimpleWorker.options(mode=worker_mode, blocking=True).init(10)
-        result = w.submit_task(add, 10, 20)
+        w = TaskWorker.options(mode=worker_mode, blocking=True).init()
+        result = w.submit(add, 10, 20)
 
         # Should return result directly, not a future
         assert isinstance(result, int)
         assert result == 30
         w.stop()
 
-    def test_submit_after_method_call(self, worker_mode):
-        """Test mixing method calls and task submission."""
+    def test_map_simple(self, worker_mode):
+        """Test TaskWorker.map() with a simple function."""
+        from concurry import TaskWorker
 
-        def compute(x):
-            return x * 3
+        def square(x):
+            return x**2
 
-        w = SimpleWorker.options(mode=worker_mode).init(10)
+        w = TaskWorker.options(mode=worker_mode).init()
+        results = list(w.map(square, range(5)))
+        assert results == [0, 1, 4, 9, 16]
+        w.stop()
 
-        # Call a method
-        result1 = w.add(5).result(timeout=5)
-        assert result1 == 15
+    def test_map_multiple_iterables(self, worker_mode):
+        """Test TaskWorker.map() with multiple iterables."""
+        from concurry import TaskWorker
 
-        # Submit a task
-        result2 = w.submit_task(compute, 10).result(timeout=5)
-        assert result2 == 30
+        def add(x, y):
+            return x + y
 
-        # Call another method
-        result3 = w.multiply(2).result(timeout=5)
-        assert result3 == 20
+        w = TaskWorker.options(mode=worker_mode).init()
+        results = list(w.map(add, [1, 2, 3], [10, 20, 30]))
+        assert results == [11, 22, 33]
+        w.stop()
 
+    def test_map_with_kwargs_function(self, worker_mode):
+        """Test TaskWorker.map() with a function that has kwargs."""
+        from concurry import TaskWorker
+
+        def multiply(x, factor=2):
+            return x * factor
+
+        w = TaskWorker.options(mode=worker_mode).init()
+        # Note: map() doesn't directly support passing kwargs to fn
+        # This tests that the function's default kwargs work
+        results = list(w.map(multiply, range(5)))
+        assert results == [0, 2, 4, 6, 8]
         w.stop()
 
 
-# Ray-specific tests (only run if Ray is available)
-class TestTaskWorker:
-    """Test TaskWorker - a concrete worker for submitting arbitrary tasks."""
+# Additional TaskWorker tests (old API - should be removed or use new submit() API)
+class TestTaskWorkerOldTests:
+    """Test TaskWorker - a concrete worker for submitting arbitrary tasks.
+
+    Note: These tests duplicate TestTaskWorkerSubmit above but are kept for compatibility.
+    Consider removing this test class in favor of TestTaskWorkerSubmit."""
 
     def test_basic_task_submission(self, worker_mode):
         """Test basic task submission with TaskWorker."""
@@ -526,7 +552,7 @@ class TestTaskWorker:
             return x**2 + y**2
 
         w = TaskWorker.options(mode=worker_mode).init()
-        future = w.submit_task(compute, 3, 4)
+        future = w.submit(compute, 3, 4)
         result = future.result(timeout=5)
 
         assert result == 25
@@ -536,7 +562,7 @@ class TestTaskWorker:
         """Test submitting lambda functions."""
         w = TaskWorker.options(mode=worker_mode).init()
 
-        result = w.submit_task(lambda x: x * 10, 5).result(timeout=5)
+        result = w.submit(lambda x: x * 10, 5).result(timeout=5)
         assert result == 50
 
         w.stop()
@@ -545,7 +571,7 @@ class TestTaskWorker:
         """Test submitting multiple tasks to TaskWorker."""
         w = TaskWorker.options(mode=worker_mode).init()
 
-        futures = [w.submit_task(lambda x: x**2, i) for i in range(5)]
+        futures = [w.submit(lambda x: x**2, i) for i in range(5)]
         results = [f.result(timeout=5) for f in futures]
 
         assert results == [0, 1, 4, 9, 16]
@@ -558,7 +584,7 @@ class TestTaskWorker:
             return (x + y) * multiplier
 
         w = TaskWorker.options(mode=worker_mode).init()
-        result = w.submit_task(compute, 5, 10, multiplier=2).result(timeout=5)
+        result = w.submit(compute, 5, 10, multiplier=2).result(timeout=5)
 
         assert result == 30
         w.stop()
@@ -567,7 +593,7 @@ class TestTaskWorker:
         """Test TaskWorker in blocking mode."""
         w = TaskWorker.options(mode=worker_mode, blocking=True).init()
 
-        result = w.submit_task(lambda x: x + 100, 7)
+        result = w.submit(lambda x: x + 100, 7)
 
         # Should return result directly, not a future
         assert isinstance(result, int)
@@ -581,7 +607,7 @@ class TestTaskWorker:
             raise ValueError("Task failed")
 
         w = TaskWorker.options(mode=worker_mode).init()
-        future = w.submit_task(failing_task)
+        future = w.submit(failing_task)
 
         with pytest.raises(Exception) as exc_info:
             future.result(timeout=5)
@@ -590,11 +616,12 @@ class TestTaskWorker:
         w.stop()
 
     def test_no_custom_methods(self):
-        """Test that TaskWorker has no custom methods, only submit_task."""
+        """Test that TaskWorker has no custom methods, only submit/map."""
         w = TaskWorker.options(mode="sync").init()
 
-        # Should have submit_task
-        assert hasattr(w, "submit_task")
+        # Should have submit and map
+        assert hasattr(w, "submit")
+        assert hasattr(w, "map")
 
         # Should have standard methods
         assert hasattr(w, "stop")
@@ -610,7 +637,7 @@ class TestTaskWorker:
 
         for mode in modes:
             w = TaskWorker.options(mode=mode).init()
-            result = w.submit_task(lambda x: x * 2, 5).result(timeout=5)
+            result = w.submit(lambda x: x * 2, 5).result(timeout=5)
             assert result == 10
             w.stop()
 
@@ -716,7 +743,7 @@ class TestAsyncFunctionSupport:
         w.stop()
 
     def test_submit_async_function(self, worker_mode):
-        """Test submitting async functions via submit_task."""
+        """Test submitting async functions via TaskWorker."""
 
         async def async_compute(x, y):
             import asyncio
@@ -724,8 +751,8 @@ class TestAsyncFunctionSupport:
             await asyncio.sleep(0.01)
             return x**2 + y**2
 
-        w = AsyncWorker.options(mode=worker_mode).init(10)
-        future = w.submit_task(async_compute, 3, 4)
+        w = TaskWorker.options(mode=worker_mode).init()
+        future = w.submit(async_compute, 3, 4)
         result = future.result(timeout=5)
         assert result == 25
         w.stop()
@@ -741,8 +768,8 @@ class TestAsyncFunctionSupport:
             await asyncio.sleep(0.01)
             return x**2
 
-        w = AsyncWorker.options(mode=worker_mode).init(10)
-        future = w.submit_task(async_square, 7)
+        w = TaskWorker.options(mode=worker_mode).init()
+        future = w.submit(async_square, 7)
         result = future.result(timeout=5)
         assert result == 49
         w.stop()

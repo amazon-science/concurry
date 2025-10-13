@@ -171,26 +171,33 @@ worker = DataProcessor.options(mode="thread", blocking=True).init(5)
 result = worker.process(10)  # Returns 50 directly
 ```
 
-## Submitting Arbitrary Functions
+## Submitting Arbitrary Functions with TaskWorker
 
-Use `submit_task()` to execute arbitrary functions in the worker's context:
+Use `TaskWorker` with `submit()` and `map()` methods to execute arbitrary functions:
 
 ```python
+from concurry import TaskWorker
+
 def complex_computation(x, y):
     return (x ** 2 + y ** 2) ** 0.5
 
-worker = DataProcessor.options(mode="process").init(1)
+# Create a task worker
+worker = TaskWorker.options(mode="process").init()
 
-# Submit function that's not a worker method
-future = worker.submit_task(complex_computation, 3, 4)
+# Submit function
+future = worker.submit(complex_computation, 3, 4)
 result = future.result()  # 5.0
 
 # Also works with lambdas
-future2 = worker.submit_task(lambda x: x * 100, 5)
+future2 = worker.submit(lambda x: x * 100, 5)
 result2 = future2.result()  # 500
 
-# Mix method calls and task submission
-result3 = worker.process(10).result()  # Uses worker method
+# Use map() for multiple tasks
+def square(x):
+    return x ** 2
+
+results = list(worker.map(square, range(10)))
+print(results)  # [0, 1, 4, 9, 16, 25, 36, 49, 64, 81]
 
 worker.stop()
 ```
@@ -266,19 +273,22 @@ result3 = worker.process_batch([1, 2, 3, 4, 5]).result()  # [2, 4, 6, 8, 10]
 worker.stop()
 ```
 
-### Submitting Async Functions
+### Submitting Async Functions with TaskWorker
 
-Use `submit_task()` with async functions:
+Use `TaskWorker.submit()` with async functions:
 
 ```python
+from concurry import TaskWorker
+import asyncio
+
 async def async_compute(x: int, y: int) -> int:
     """Standalone async function."""
     await asyncio.sleep(0.01)
     return x ** 2 + y ** 2
 
-# Submit async function to any worker
-worker = HybridWorker.options(mode="asyncio").init()
-future = worker.submit_task(async_compute, 3, 4)
+# Submit async function via TaskWorker
+worker = TaskWorker.options(mode="asyncio").init()
+future = worker.submit(async_compute, 3, 4)
 result = future.result()  # 25
 worker.stop()
 ```
@@ -368,7 +378,7 @@ All worker modes correctly execute async functions, but with different performan
 | **thread** | ✅ Via `asyncio.run()` | `ConcurrentFuture` | Correct execution, but no concurrency benefit (each async call blocks the worker thread) |
 | **process** | ✅ Via `asyncio.run()` | `ConcurrentFuture` | Correct execution, but no concurrency benefit + serialization overhead |
 | **sync** | ✅ Via `asyncio.run()` | `SyncFuture` | Correct execution, runs synchronously (no concurrency) |
-| **ray** | ✅ Native + wrapper | `RayFuture` | Native support for async actor methods, `submit_task()` wraps async functions |
+| **ray** | ✅ Native + wrapper | `RayFuture` | Native support for async actor methods, TaskWorker wraps async functions |
 
 **AsyncioWorkerProxy Architecture:**
 
@@ -818,7 +828,7 @@ worker.stop()
 
 ## TaskWorker
 
-`TaskWorker` is a concrete worker implementation designed specifically for submitting arbitrary tasks without defining custom methods. It's useful when you just need to execute functions in different execution contexts without defining a custom worker class.
+`TaskWorker` is a concrete worker implementation that provides an `Executor`-like interface (`submit()` and `map()`) for executing arbitrary functions. It's useful when you just need to execute functions in different execution contexts without defining custom worker methods.
 
 ### Basic Usage
 
@@ -828,12 +838,19 @@ from concurry import TaskWorker
 # Initialize a task worker
 worker = TaskWorker.options(mode="thread").init()
 
-# Submit arbitrary functions
+# Submit arbitrary functions using submit()
 def compute(x, y):
     return x ** 2 + y ** 2
 
-future = worker.submit_task(compute, 3, 4)
+future = worker.submit(compute, 3, 4)
 result = future.result()  # 25
+
+# Use map() for multiple tasks
+def square(x):
+    return x ** 2
+
+results = list(worker.map(square, range(10)))
+print(results)  # [0, 1, 4, 9, 16, 25, 36, 49, 64, 81]
 
 worker.stop()
 ```
@@ -844,10 +861,10 @@ TaskWorker is particularly useful for:
 
 - Quick prototyping without defining custom worker classes
 - Building higher-level abstractions like WorkerExecutor or WorkerPool
-- Submitting one-off tasks to different execution contexts
+- Executing multiple tasks with `map()` for batch processing
 - Testing worker functionality without custom methods
 
-### Example: Processing Multiple Tasks
+### Example: Processing Multiple Tasks with map()
 
 ```python
 from concurry import TaskWorker
@@ -855,13 +872,27 @@ from concurry import TaskWorker
 # Initialize a process-based task worker for CPU-intensive work
 worker = TaskWorker.options(mode="process").init()
 
-# Submit multiple computational tasks
+# Use map() for batch processing
 def factorial(n):
     if n <= 1:
         return 1
     return n * factorial(n - 1)
 
-futures = [worker.submit_task(factorial, i) for i in range(1, 11)]
+results = list(worker.map(factorial, range(1, 11)))
+print(results)  # [1, 2, 6, 24, 120, 720, 5040, 40320, 362880, 3628800]
+
+worker.stop()
+```
+
+### Example: Using submit() for Individual Tasks
+
+```python
+from concurry import TaskWorker
+
+worker = TaskWorker.options(mode="thread").init()
+
+# Submit individual tasks
+futures = [worker.submit(factorial, i) for i in range(1, 11)]
 results = [f.result() for f in futures]
 
 print(results)  # [1, 2, 6, 24, 120, 720, 5040, 40320, 362880, 3628800]
@@ -873,7 +904,8 @@ worker.stop()
 
 **Use TaskWorker when:**
 - You don't need custom methods
-- You're just submitting arbitrary functions
+- You're executing arbitrary functions
+- You want the familiar `concurrent.futures.Executor` interface (`submit()` and `map()`)
 - You want a quick solution without boilerplate
 
 **Use Custom Worker when:**
@@ -885,9 +917,9 @@ worker.stop()
 ### Example: TaskWorker vs Custom Worker
 
 ```python
-# Using TaskWorker (simpler, but less structured)
+# Using TaskWorker (simpler, Executor-like interface)
 task_worker = TaskWorker.options(mode="thread").init()
-result = task_worker.submit_task(lambda x: x * 2, 10).result()
+result = task_worker.submit(lambda x: x * 2, 10).result()
 task_worker.stop()
 
 # Using Custom Worker (more structure, better for complex logic)

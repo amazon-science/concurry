@@ -87,8 +87,8 @@ worker.stop()
 # Or use TaskWorker for quick task execution
 from concurry import TaskWorker
 
-task_worker = TaskWorker.options(mode="process").create()
-result = task_worker.submit_task(lambda x: x ** 2, 5).result()  # 25
+task_worker = TaskWorker.options(mode="process").init()
+result = task_worker.submit(lambda x: x ** 2, 5).result()  # 25
 task_worker.stop()
 ```
 

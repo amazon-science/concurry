@@ -1,10 +1,11 @@
 """Worker module for concurry - actor pattern implementation."""
 
-from .base_worker import TaskWorker, Worker, WorkerProxy, worker
+from .base_worker import Worker, WorkerProxy, worker
 from .sync_worker import SyncWorkerProxy
 from .thread_worker import ThreadWorkerProxy
 from .process_worker import ProcessWorkerProxy
 from .asyncio_worker import AsyncioWorkerProxy
+from .task_worker import TaskWorker
 
 __all__ = [
     "TaskWorker",

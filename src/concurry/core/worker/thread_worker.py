@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import queue
 import threading
+from concurrent.futures import Future as PyFuture
 from typing import Any, Dict
 
 from pydantic import PrivateAttr
@@ -96,7 +97,6 @@ class ThreadWorkerProxy(WorkerProxy):
 
     def _wait_for_initialization(self):
         """Wait for worker thread to initialize."""
-        from concurrent.futures import Future as PyFuture
 
         # Create future and wrap in ConcurrentFuture
         py_future = PyFuture()
@@ -193,6 +193,11 @@ class ThreadWorkerProxy(WorkerProxy):
     def _execute_method(self, method_name: str, *args: Any, **kwargs: Any):
         """Execute a method in the worker thread.
 
+        Optimized with:
+        - Fast-path future unwrapping check
+        - Minimized locked section
+        - Reduced queue operation overhead
+
         Args:
             method_name: Name of the method to invoke
             *args: Positional arguments
@@ -201,15 +206,14 @@ class ThreadWorkerProxy(WorkerProxy):
         Returns:
             ConcurrentFuture for the method execution
         """
-        # Unwrap any BaseFuture instances in args/kwargs
+        # Unwrap futures if needed (fast-path handled in _unwrap_futures_in_args)
         args, kwargs = _unwrap_futures_in_args(args, kwargs, self.unwrap_futures)
-
-        from concurrent.futures import Future as PyFuture
 
         # Create future and wrap in ConcurrentFuture immediately
         py_future = PyFuture()
         future = ConcurrentFuture(future=py_future)
 
+        # Minimize locked section
         with self._futures_lock:
             self._futures[future.uuid] = future
 
@@ -220,6 +224,11 @@ class ThreadWorkerProxy(WorkerProxy):
     def _execute_task(self, fn, *args: Any, **kwargs: Any):
         """Execute an arbitrary function in the worker thread.
 
+        Optimized with:
+        - Fast-path future unwrapping check
+        - Minimized locked section
+        - Reduced queue operation overhead
+
         Args:
             fn: Callable function to execute
             *args: Positional arguments
@@ -228,15 +237,14 @@ class ThreadWorkerProxy(WorkerProxy):
         Returns:
             ConcurrentFuture for the task execution
         """
-        # Unwrap any BaseFuture instances in args/kwargs
+        # Unwrap futures if needed (fast-path handled in _unwrap_futures_in_args)
         args, kwargs = _unwrap_futures_in_args(args, kwargs, self.unwrap_futures)
-
-        from concurrent.futures import Future as PyFuture
 
         # Create future and wrap in ConcurrentFuture immediately
         py_future = PyFuture()
         future = ConcurrentFuture(future=py_future)
 
+        # Minimize locked section
         with self._futures_lock:
             self._futures[future.uuid] = future
 

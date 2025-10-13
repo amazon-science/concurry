@@ -6,6 +6,7 @@ from typing import Any, Dict
 
 from pydantic import PrivateAttr
 
+from ..future import AsyncioFuture
 from .base_worker import WorkerProxy, _unwrap_futures_in_args
 
 
@@ -93,7 +94,7 @@ class AsyncioWorkerProxy(WorkerProxy):
     _worker: Any = PrivateAttr(default=None)
     _loop_thread: Any = PrivateAttr()
     _loop_ready: Any = PrivateAttr()
-    _futures: Dict[str, Any] = PrivateAttr()  # Maps future.uuid -> ConcurrentFuture
+    _futures: Dict[str, Any] = PrivateAttr()  # Maps future.uuid -> AsyncioFuture
     _futures_lock: Any = PrivateAttr()
 
     def post_initialize(self) -> None:
@@ -101,7 +102,7 @@ class AsyncioWorkerProxy(WorkerProxy):
         super().post_initialize()
 
         # Initialize futures tracking
-        self._futures = {}  # future.uuid -> ConcurrentFuture
+        self._futures = {}  # future.uuid -> AsyncioFuture
         self._futures_lock = threading.Lock()
 
         # Create event loop in a dedicated thread
@@ -148,12 +149,12 @@ class AsyncioWorkerProxy(WorkerProxy):
             **kwargs: Keyword arguments
 
         Returns:
-            ConcurrentFuture for the method execution
+            AsyncioFuture for the method execution
         """
-        # Unwrap any BaseFuture instances in args/kwargs
+        # Unwrap futures if needed (fast-path handled in _unwrap_futures_in_args)
         unwrapped_args, unwrapped_kwargs = _unwrap_futures_in_args(args, kwargs, self.unwrap_futures)
 
-        # Create a future in the asyncio event loop
+        # Create and execute method in the event loop
         async def _run_method():
             method = getattr(self._worker, method_name)
             if not callable(method):
@@ -166,16 +167,19 @@ class AsyncioWorkerProxy(WorkerProxy):
 
             return result
 
-        # Schedule the coroutine in the event loop
-        asyncio_future = asyncio.run_coroutine_threadsafe(_run_method(), self._loop)
+        # Use asyncio.ensure_future to schedule coroutine and get asyncio.Future
+        # We need to call this from within the event loop thread
+        async def _create_future_and_run():
+            return asyncio.ensure_future(_run_method())
 
-        # Wrap the asyncio future
-        # run_coroutine_threadsafe returns a concurrent.futures.Future
-        from ..future import ConcurrentFuture
+        # Schedule and get the asyncio.Future
+        sync_future = asyncio.run_coroutine_threadsafe(_create_future_and_run(), self._loop)
+        loop_future = sync_future.result()  # Get the asyncio.Future (fast, just returns the future object)
 
-        future = ConcurrentFuture(future=asyncio_future)
+        # Wrap the asyncio.Future
+        future = AsyncioFuture(future=loop_future)
 
-        # Store future for cancellation on stop()
+        # Store future for cancellation on stop() - minimize locked section
         with self._futures_lock:
             self._futures[future.uuid] = future
 
@@ -190,12 +194,12 @@ class AsyncioWorkerProxy(WorkerProxy):
             **kwargs: Keyword arguments
 
         Returns:
-            ConcurrentFuture for the task execution
+            AsyncioFuture for the task execution
         """
-        # Unwrap any BaseFuture instances in args/kwargs
+        # Unwrap futures if needed (fast-path handled in _unwrap_futures_in_args)
         unwrapped_args, unwrapped_kwargs = _unwrap_futures_in_args(args, kwargs, self.unwrap_futures)
 
-        # Create a future in the asyncio event loop
+        # Create and execute task in the event loop
         async def _run_task():
             if not callable(fn):
                 raise TypeError(f"fn must be callable, got {type(fn).__name__}")
@@ -207,15 +211,18 @@ class AsyncioWorkerProxy(WorkerProxy):
 
             return result
 
-        # Schedule the coroutine in the event loop
-        asyncio_future = asyncio.run_coroutine_threadsafe(_run_task(), self._loop)
+        # Use asyncio.ensure_future to schedule coroutine and get asyncio.Future
+        async def _create_future_and_run():
+            return asyncio.ensure_future(_run_task())
 
-        # Wrap the asyncio future
-        from ..future import ConcurrentFuture
+        # Schedule and get the asyncio.Future
+        sync_future = asyncio.run_coroutine_threadsafe(_create_future_and_run(), self._loop)
+        loop_future = sync_future.result()  # Get the asyncio.Future (fast, just returns the future object)
 
-        future = ConcurrentFuture(future=asyncio_future)
+        # Wrap the asyncio.Future
+        future = AsyncioFuture(future=loop_future)
 
-        # Store future for cancellation on stop()
+        # Store future for cancellation on stop() - minimize locked section
         with self._futures_lock:
             self._futures[future.uuid] = future
 

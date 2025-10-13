@@ -6,6 +6,7 @@ import multiprocessing as mp
 import queue
 import threading
 import traceback
+from concurrent.futures import Future as PyFuture
 from typing import Any, Literal
 
 import cloudpickle
@@ -195,7 +196,6 @@ class ProcessWorkerProxy(WorkerProxy):
 
     def _wait_for_initialization(self):
         """Wait for worker process to initialize."""
-        from concurrent.futures import Future as PyFuture
 
         # Create future and wrap in ConcurrentFuture
         py_future = PyFuture()
@@ -263,8 +263,6 @@ class ProcessWorkerProxy(WorkerProxy):
         # Unwrap any BaseFuture instances in args/kwargs
         args, kwargs = _unwrap_futures_in_args(args, kwargs, self.unwrap_futures)
 
-        from concurrent.futures import Future as PyFuture
-
         # Create future and wrap in ConcurrentFuture
         py_future = PyFuture()
         future = ConcurrentFuture(future=py_future)
@@ -289,8 +287,6 @@ class ProcessWorkerProxy(WorkerProxy):
         """
         # Unwrap any BaseFuture instances in args/kwargs
         args, kwargs = _unwrap_futures_in_args(args, kwargs, self.unwrap_futures)
-
-        from concurrent.futures import Future as PyFuture
 
         # Create future and wrap in ConcurrentFuture
         py_future = PyFuture()

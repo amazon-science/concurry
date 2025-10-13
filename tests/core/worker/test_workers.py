@@ -963,6 +963,7 @@ class TestAsyncIOPerformance:
 
                 def __init__(self, base_url: str):
                     self.base_url = base_url
+                    self._session = None
 
                 def fetch_sync(self, resource_id: int) -> str:
                     """Synchronous HTTP request."""
@@ -973,13 +974,22 @@ class TestAsyncIOPerformance:
                         return response.read().decode()
 
                 async def fetch_async(self, resource_id: int) -> str:
-                    """Async HTTP request using aiohttp."""
+                    """Async HTTP request using aiohttp with shared session."""
                     import aiohttp
 
-                    async with aiohttp.ClientSession() as session:
-                        url = f"{self.base_url}/data/{resource_id}"
-                        async with session.get(url) as response:
-                            return await response.text()
+                    # Create session on first use (reuse for all requests)
+                    if self._session is None:
+                        self._session = aiohttp.ClientSession()
+
+                    url = f"{self.base_url}/data/{resource_id}"
+                    async with self._session.get(url) as response:
+                        return await response.text()
+
+                async def cleanup_session(self) -> None:
+                    """Clean up the aiohttp session."""
+                    if self._session is not None:
+                        await self._session.close()
+                        self._session = None
 
             num_requests = 30
             base_url = f"http://127.0.0.1:{port}"
@@ -1014,6 +1024,8 @@ class TestAsyncIOPerformance:
             futures = [w_async.fetch_async(i) for i in range(num_requests)]
             results_async = [f.result(timeout=30) for f in futures]
             time_async = time.time() - start_time
+            # Clean up the aiohttp session
+            w_async.cleanup_session().result(timeout=5)
             w_async.stop()
 
             # Verify results are correct

@@ -29,7 +29,7 @@ keywords = ["concurrency", "parallel", "async", "threading", "multiprocessing", 
 dependencies = [
     "tqdm>=4.60.0",
     "cloudpickle>=2.0.0",
-    "morphic@ git+https://github.com/adivekar-utexas/morphic.git@mainline",
+    "morphic",
 ]
 
 [project.optional-dependencies]

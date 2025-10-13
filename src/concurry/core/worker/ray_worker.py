@@ -2,6 +2,7 @@
 
 import asyncio
 import inspect
+import threading
 from typing import Any, Dict, Optional, Union
 
 from morphic.structs import map_collection
@@ -183,10 +184,16 @@ class RayWorkerProxy(WorkerProxy):
 
     # Private attributes
     _ray_actor: Any = PrivateAttr()
+    _futures: Dict[str, Any] = PrivateAttr()  # Maps future.uuid -> RayFuture
+    _futures_lock: Any = PrivateAttr()
 
     def post_initialize(self) -> None:
         """Initialize private attributes after Typed validation."""
         super().post_initialize()
+
+        # Initialize futures tracking
+        self._futures = {}  # future.uuid -> RayFuture
+        self._futures_lock = threading.Lock()
 
         # Create Ray actor (uses public fields directly)
         self._ray_actor = self._create_ray_actor()
@@ -252,7 +259,13 @@ class RayWorkerProxy(WorkerProxy):
         # rather than being wrapped in a future
         ray_method = getattr(self._ray_actor, method_name)
         object_ref = ray_method.remote(*args, **kwargs)
-        return RayFuture(object_ref=object_ref)
+        future = RayFuture(object_ref=object_ref)
+
+        # Store future for cancellation on stop()
+        with self._futures_lock:
+            self._futures[future.uuid] = future
+
+        return future
 
     def _execute_task(self, fn, *args: Any, **kwargs: Any):
         """Execute an arbitrary function on the Ray actor.
@@ -305,7 +318,13 @@ class RayWorkerProxy(WorkerProxy):
             remote_fn = remote_fn.options(**options)
 
         object_ref = remote_fn.remote(*args, **kwargs)
-        return RayFuture(object_ref=object_ref)
+        future = RayFuture(object_ref=object_ref)
+
+        # Store future for cancellation on stop()
+        with self._futures_lock:
+            self._futures[future.uuid] = future
+
+        return future
 
     def stop(self, timeout: float = 30) -> None:
         """Stop the Ray actor.
@@ -314,6 +333,12 @@ class RayWorkerProxy(WorkerProxy):
             timeout: Maximum time to wait for actor to stop (currently ignored for Ray)
         """
         super().stop(timeout)
+
+        # Cancel all pending futures
+        with self._futures_lock:
+            for future in self._futures.values():
+                future.cancel()
+            self._futures.clear()
 
         try:
             import ray

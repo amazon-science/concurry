@@ -8,6 +8,7 @@ from morphic.structs import map_collection
 from pydantic import ConfigDict, PrivateAttr
 
 from ..config import ExecutionMode
+from ..future import BaseFuture
 
 T = TypeVar("T")
 
@@ -21,7 +22,6 @@ def _unwrap_future_value(obj: Any) -> Any:
     Returns:
         Materialized value if obj is a BaseFuture, otherwise obj unchanged
     """
-    from ..future import BaseFuture
 
     if isinstance(obj, BaseFuture):
         return obj.result()

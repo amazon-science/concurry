@@ -19,7 +19,11 @@ def ray_cluster():
     import ray
 
     if not ray.is_initialized():
-        ray.init(ignore_reinit_error=True, runtime_env={"py_modules": [concurry, morphic]})
+        ray.init(
+            ignore_reinit_error=True,
+            num_cpus=4,
+            runtime_env={"py_modules": [concurry, morphic]},
+        )
 
     yield
 

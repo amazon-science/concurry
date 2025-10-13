@@ -2,7 +2,7 @@
 
 import asyncio
 import threading
-from typing import Any
+from typing import Any, Dict
 
 from pydantic import PrivateAttr
 
@@ -93,10 +93,16 @@ class AsyncioWorkerProxy(WorkerProxy):
     _worker: Any = PrivateAttr(default=None)
     _loop_thread: Any = PrivateAttr()
     _loop_ready: Any = PrivateAttr()
+    _futures: Dict[str, Any] = PrivateAttr()  # Maps future.uuid -> ConcurrentFuture
+    _futures_lock: Any = PrivateAttr()
 
     def post_initialize(self) -> None:
         """Initialize private attributes after Typed validation."""
         super().post_initialize()
+
+        # Initialize futures tracking
+        self._futures = {}  # future.uuid -> ConcurrentFuture
+        self._futures_lock = threading.Lock()
 
         # Create event loop in a dedicated thread
         self._loop_thread = threading.Thread(target=self._run_event_loop, daemon=True)
@@ -167,7 +173,13 @@ class AsyncioWorkerProxy(WorkerProxy):
         # run_coroutine_threadsafe returns a concurrent.futures.Future
         from ..future import ConcurrentFuture
 
-        return ConcurrentFuture(future=asyncio_future)
+        future = ConcurrentFuture(future=asyncio_future)
+
+        # Store future for cancellation on stop()
+        with self._futures_lock:
+            self._futures[future.uuid] = future
+
+        return future
 
     def _execute_task(self, fn, *args: Any, **kwargs: Any):
         """Execute an arbitrary function in the asyncio event loop.
@@ -201,7 +213,13 @@ class AsyncioWorkerProxy(WorkerProxy):
         # Wrap the asyncio future
         from ..future import ConcurrentFuture
 
-        return ConcurrentFuture(future=asyncio_future)
+        future = ConcurrentFuture(future=asyncio_future)
+
+        # Store future for cancellation on stop()
+        with self._futures_lock:
+            self._futures[future.uuid] = future
+
+        return future
 
     def stop(self, timeout: float = 30) -> None:
         """Stop the worker and event loop.
@@ -210,6 +228,12 @@ class AsyncioWorkerProxy(WorkerProxy):
             timeout: Maximum time to wait for cleanup in seconds
         """
         super().stop(timeout)
+
+        # Cancel all pending futures
+        with self._futures_lock:
+            for future in self._futures.values():
+                future.cancel()
+            self._futures.clear()
 
         if self._loop is not None:
             self._loop.call_soon_threadsafe(self._loop.stop)

@@ -4,7 +4,6 @@ import asyncio
 import inspect
 import queue
 import threading
-import uuid
 from typing import Any, Dict
 
 from pydantic import PrivateAttr
@@ -75,8 +74,8 @@ class ThreadWorkerProxy(WorkerProxy):
 
     # Private attributes (use Any for non-serializable types)
     _command_queue: Any = PrivateAttr()
-    _result_queues: Dict[str, Any] = PrivateAttr()
-    _result_queues_lock: Any = PrivateAttr()
+    _futures: Dict[str, Any] = PrivateAttr()  # Maps future.uuid -> ConcurrentFuture
+    _futures_lock: Any = PrivateAttr()
     _thread: Any = PrivateAttr()
 
     def post_initialize(self) -> None:
@@ -85,8 +84,8 @@ class ThreadWorkerProxy(WorkerProxy):
 
         # Create queues for communication
         self._command_queue = queue.Queue()
-        self._result_queues = {}  # request_id -> result_queue
-        self._result_queues_lock = threading.Lock()
+        self._futures = {}  # future.uuid -> ConcurrentFuture
+        self._futures_lock = threading.Lock()
 
         # Start worker thread
         self._thread = threading.Thread(target=self._worker_thread_main, daemon=True)
@@ -97,21 +96,21 @@ class ThreadWorkerProxy(WorkerProxy):
 
     def _wait_for_initialization(self):
         """Wait for worker thread to initialize."""
-        init_id = str(uuid.uuid4())
-        result_queue = queue.Queue()
+        from concurrent.futures import Future as PyFuture
 
-        with self._result_queues_lock:
-            self._result_queues[init_id] = result_queue
+        # Create future and wrap in ConcurrentFuture
+        py_future = PyFuture()
+        future = ConcurrentFuture(future=py_future)
 
-        self._command_queue.put((init_id, "__initialize__", (), {}))
+        with self._futures_lock:
+            self._futures[future.uuid] = future
+
+        self._command_queue.put((future.uuid, "__initialize__", (), {}))
 
         try:
-            status, payload = result_queue.get(timeout=30)
-            if status == "error":
-                raise RuntimeError(f"Worker initialization failed: {payload}")
-        finally:
-            with self._result_queues_lock:
-                del self._result_queues[init_id]
+            future.result(timeout=30)
+        except Exception as e:
+            raise RuntimeError(f"Worker initialization failed: {e}")
 
     def _worker_thread_main(self):
         """Main function for the worker thread."""
@@ -130,51 +129,62 @@ class ThreadWorkerProxy(WorkerProxy):
 
                 request_id, method_name, args, kwargs = command
 
-                # Get result queue for this request
-                with self._result_queues_lock:
-                    result_queue = self._result_queues.get(request_id)
+                # Get future for this request
+                with self._futures_lock:
+                    future = self._futures.get(request_id)
 
-                if result_queue is None:
+                if future is None:
                     continue
 
                 try:
                     if method_name == "__initialize__":
                         worker = self.worker_cls(*self.init_args, **self.init_kwargs)
-                        result_queue.put(("ok", None))
+                        future._future.set_result(None)
+                        with self._futures_lock:
+                            self._futures.pop(request_id, None)
                         continue
 
                     if method_name == "__task__":
                         # Execute arbitrary function
                         fn, task_args, task_kwargs = args
                         if not callable(fn):
-                            result_queue.put(
-                                ("error", TypeError(f"fn must be callable, got {type(fn).__name__}"))
+                            future._future.set_exception(
+                                TypeError(f"fn must be callable, got {type(fn).__name__}")
                             )
+                            with self._futures_lock:
+                                self._futures.pop(request_id, None)
                             continue
                         result = _invoke_function(fn, *task_args, **task_kwargs)
-                        result_queue.put(("ok", result))
+                        future._future.set_result(result)
+                        with self._futures_lock:
+                            self._futures.pop(request_id, None)
                         continue
 
                     if worker is None:
-                        result_queue.put(("error", RuntimeError("Worker not initialized")))
+                        future._future.set_exception(RuntimeError("Worker not initialized"))
+                        with self._futures_lock:
+                            self._futures.pop(request_id, None)
                         continue
 
                     method = getattr(worker, method_name)
                     if not callable(method):
-                        result_queue.put(
-                            (
-                                "error",
-                                AttributeError(
-                                    f"'{self.worker_cls.__name__}' has no callable method '{method_name}'"
-                                ),
+                        future._future.set_exception(
+                            AttributeError(
+                                f"'{self.worker_cls.__name__}' has no callable method '{method_name}'"
                             )
                         )
+                        with self._futures_lock:
+                            self._futures.pop(request_id, None)
                         continue
 
                     result = _invoke_function(method, *args, **kwargs)
-                    result_queue.put(("ok", result))
+                    future._future.set_result(result)
+                    with self._futures_lock:
+                        self._futures.pop(request_id, None)
                 except Exception as e:
-                    result_queue.put(("error", e))
+                    future._future.set_exception(e)
+                    with self._futures_lock:
+                        self._futures.pop(request_id, None)
 
             except Exception:
                 # Catch any unexpected exceptions to keep thread alive
@@ -194,36 +204,18 @@ class ThreadWorkerProxy(WorkerProxy):
         # Unwrap any BaseFuture instances in args/kwargs
         args, kwargs = _unwrap_futures_in_args(args, kwargs, self.unwrap_futures)
 
-        request_id = str(uuid.uuid4())
-        result_queue = queue.Queue()
-
-        with self._result_queues_lock:
-            self._result_queues[request_id] = result_queue
-
-        self._command_queue.put((request_id, method_name, args, kwargs))
-
-        # Create a future that will wait for the result
         from concurrent.futures import Future as PyFuture
 
+        # Create future and wrap in ConcurrentFuture immediately
         py_future = PyFuture()
+        future = ConcurrentFuture(future=py_future)
 
-        def get_result():
-            try:
-                status, payload = result_queue.get()
-                with self._result_queues_lock:
-                    self._result_queues.pop(request_id, None)
+        with self._futures_lock:
+            self._futures[future.uuid] = future
 
-                if status == "ok":
-                    py_future.set_result(payload)
-                else:
-                    py_future.set_exception(payload)
-            except Exception as e:
-                py_future.set_exception(e)
+        self._command_queue.put((future.uuid, method_name, args, kwargs))
 
-        # Start a thread to wait for the result
-        threading.Thread(target=get_result, daemon=True).start()
-
-        return ConcurrentFuture(future=py_future)
+        return future
 
     def _execute_task(self, fn, *args: Any, **kwargs: Any):
         """Execute an arbitrary function in the worker thread.
@@ -239,37 +231,19 @@ class ThreadWorkerProxy(WorkerProxy):
         # Unwrap any BaseFuture instances in args/kwargs
         args, kwargs = _unwrap_futures_in_args(args, kwargs, self.unwrap_futures)
 
-        request_id = str(uuid.uuid4())
-        result_queue = queue.Queue()
-
-        with self._result_queues_lock:
-            self._result_queues[request_id] = result_queue
-
-        # Send task command with special marker
-        self._command_queue.put((request_id, "__task__", (fn, args, kwargs), {}))
-
-        # Create a future that will wait for the result
         from concurrent.futures import Future as PyFuture
 
+        # Create future and wrap in ConcurrentFuture immediately
         py_future = PyFuture()
+        future = ConcurrentFuture(future=py_future)
 
-        def get_result():
-            try:
-                status, payload = result_queue.get()
-                with self._result_queues_lock:
-                    self._result_queues.pop(request_id, None)
+        with self._futures_lock:
+            self._futures[future.uuid] = future
 
-                if status == "ok":
-                    py_future.set_result(payload)
-                else:
-                    py_future.set_exception(payload)
-            except Exception as e:
-                py_future.set_exception(e)
+        # Send task command with special marker
+        self._command_queue.put((future.uuid, "__task__", (fn, args, kwargs), {}))
 
-        # Start a thread to wait for the result
-        threading.Thread(target=get_result, daemon=True).start()
-
-        return ConcurrentFuture(future=py_future)
+        return future
 
     def stop(self, timeout: float = 30) -> None:
         """Stop the worker thread.
@@ -278,5 +252,12 @@ class ThreadWorkerProxy(WorkerProxy):
             timeout: Maximum time to wait for thread to stop in seconds
         """
         super().stop(timeout)
+
+        # Cancel all pending futures
+        with self._futures_lock:
+            for future in self._futures.values():
+                future.cancel()
+            self._futures.clear()
+
         self._command_queue.put(None)
         self._thread.join(timeout=timeout)

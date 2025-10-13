@@ -617,7 +617,11 @@ class TestRayWorker:
         import ray
 
         if not ray.is_initialized():
-            ray.init(ignore_reinit_error=True, runtime_env={"py_modules": [concurry, morphic]})
+            ray.init(
+                ignore_reinit_error=True,
+                num_cpus=4,
+                runtime_env={"py_modules": [concurry, morphic]},
+            )
 
         w = SimpleWorker.options(mode="ray", num_cpus=1, num_gpus=0).init(10)
 

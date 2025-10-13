@@ -3,8 +3,10 @@
 import time
 from typing import Any, Dict, List
 
+import morphic
 import pytest
 
+import concurry
 from concurry.core.future import BaseFuture
 from concurry.core.worker import Worker
 from concurry.utils import _IS_RAY_INSTALLED
@@ -89,7 +91,11 @@ def worker_mode(request):
         import ray
 
         if not ray.is_initialized():
-            ray.init(ignore_reinit_error=True, num_cpus=4)
+            ray.init(
+                ignore_reinit_error=True,
+                num_cpus=4,
+                runtime_env={"py_modules": [concurry, morphic]},
+            )
 
     yield request.param
 
@@ -375,7 +381,11 @@ class TestRayZeroCopyOptimization:
         import ray
 
         if not ray.is_initialized():
-            ray.init(ignore_reinit_error=True, num_cpus=4)
+            ray.init(
+                ignore_reinit_error=True,
+                num_cpus=4,
+                runtime_env={"py_modules": [concurry, morphic]},
+            )
 
         producer = SimpleWorker.options(mode="ray").init(value=100)
         consumer = SimpleWorker.options(mode="ray").init(value=0)
@@ -396,7 +406,11 @@ class TestRayZeroCopyOptimization:
         import ray
 
         if not ray.is_initialized():
-            ray.init(ignore_reinit_error=True, num_cpus=4)
+            ray.init(
+                ignore_reinit_error=True,
+                num_cpus=4,
+                runtime_env={"py_modules": [concurry, morphic]},
+            )
 
         producer = SimpleWorker.options(mode="ray").init(value=10)
         consumer = NestedDataWorker.options(mode="ray").init()
@@ -420,7 +434,11 @@ class TestRayZeroCopyOptimization:
         import ray
 
         if not ray.is_initialized():
-            ray.init(ignore_reinit_error=True, num_cpus=4)
+            ray.init(
+                ignore_reinit_error=True,
+                num_cpus=4,
+                runtime_env={"py_modules": [concurry, morphic]},
+            )
 
         producer = SimpleWorker.options(mode="ray").init(value=100)
         consumer = SimpleWorker.options(mode="process").init(value=0)
@@ -462,4 +480,3 @@ class TestPerformance:
 
         producer.stop()
         consumer.stop()
-

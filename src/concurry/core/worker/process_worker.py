@@ -6,7 +6,6 @@ import multiprocessing as mp
 import queue
 import threading
 import traceback
-import uuid
 from typing import Any, Literal
 
 import cloudpickle
@@ -196,8 +195,16 @@ class ProcessWorkerProxy(WorkerProxy):
 
     def _wait_for_initialization(self):
         """Wait for worker process to initialize."""
-        init_id = str(uuid.uuid4())
-        self._command_queue.put((init_id, "__initialize__", (), {}))
+        from concurrent.futures import Future as PyFuture
+
+        # Create future and wrap in ConcurrentFuture
+        py_future = PyFuture()
+        future = ConcurrentFuture(future=py_future)
+
+        with self._futures_lock:
+            self._futures[future.uuid] = py_future
+
+        self._command_queue.put((future.uuid, "__initialize__", (), {}))
 
         try:
             request_id, status, payload = self._result_queue.get(timeout=30)
@@ -258,15 +265,16 @@ class ProcessWorkerProxy(WorkerProxy):
 
         from concurrent.futures import Future as PyFuture
 
-        request_id = str(uuid.uuid4())
+        # Create future and wrap in ConcurrentFuture
         py_future = PyFuture()
+        future = ConcurrentFuture(future=py_future)
 
         with self._futures_lock:
-            self._futures[request_id] = py_future
+            self._futures[future.uuid] = py_future
 
-        self._command_queue.put((request_id, method_name, args, kwargs))
+        self._command_queue.put((future.uuid, method_name, args, kwargs))
 
-        return ConcurrentFuture(future=py_future)
+        return future
 
     def _execute_task(self, fn, *args: Any, **kwargs: Any):
         """Execute an arbitrary function in the worker process.
@@ -284,17 +292,18 @@ class ProcessWorkerProxy(WorkerProxy):
 
         from concurrent.futures import Future as PyFuture
 
-        request_id = str(uuid.uuid4())
+        # Create future and wrap in ConcurrentFuture
         py_future = PyFuture()
+        future = ConcurrentFuture(future=py_future)
 
         with self._futures_lock:
-            self._futures[request_id] = py_future
+            self._futures[future.uuid] = py_future
 
         # Serialize the function with cloudpickle
         fn_bytes = cloudpickle.dumps(fn)
-        self._command_queue.put((request_id, "__task__", (fn_bytes, args, kwargs), {}))
+        self._command_queue.put((future.uuid, "__task__", (fn_bytes, args, kwargs), {}))
 
-        return ConcurrentFuture(future=py_future)
+        return future
 
     def stop(self, timeout: float = 30) -> None:
         """Stop the worker process.
@@ -330,9 +339,10 @@ class ProcessWorkerProxy(WorkerProxy):
         except (ValueError, OSError):
             pass
 
-        # Fail any remaining futures
+        # Cancel any remaining futures
         with self._futures_lock:
             for py_future in self._futures.values():
+                # Try to cancel; if already running/done, this will return False
                 if not py_future.done():
-                    py_future.set_exception(RuntimeError("Worker stopped before completion"))
+                    py_future.cancel()
             self._futures.clear()

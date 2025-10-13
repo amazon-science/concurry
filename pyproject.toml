@@ -43,6 +43,7 @@ dev = [
     "black>=21.0",
     "flake8>=3.8",
     "mypy>=0.900",
+    "aiofiles>=25.0",
 ]
 docs = [
     "mkdocs>=1.6.0",

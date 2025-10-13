@@ -625,6 +625,8 @@ class AsyncioFuture(BaseFuture):
         ```
     """
 
+    ASYNCIO_POLL_INTERVAL: ClassVar[float] = 1e-6
+
     __slots__ = (
         "uuid",
         "_future",
@@ -642,7 +644,7 @@ class AsyncioFuture(BaseFuture):
         """Initialize AsyncioFuture with an asyncio.Future.
 
         Args:
-            future: An asyncio.Future instance
+            future: An asyncio.Future instance. Must be a valid asyncio.Future object.
 
         Raises:
             TypeError: If future is not an asyncio.Future instance
@@ -666,16 +668,33 @@ class AsyncioFuture(BaseFuture):
         self._lock = threading.Lock()
 
     def result(self, timeout: Optional[float] = None) -> Any:
+        """Get the result of the future.
+
+        This method uses polling to wait for the asyncio.Future to complete.
+        Note: This is less efficient than concurrent.futures.Future blocking.
+        For better performance in worker proxies, use ConcurrentFuture instead.
+
+        Args:
+            timeout: Maximum time to wait for result in seconds
+
+        Returns:
+            The result of the computation
+
+        Raises:
+            CancelledError: If the future was cancelled
+            TimeoutError: If timeout is exceeded
+            Exception: Any exception from the computation
+        """
         if not self.done():
             if timeout is not None:
                 start_time = time.time()
                 while not self.done() and (time.time() - start_time) < timeout:
-                    time.sleep(0.01)
+                    time.sleep(self.ASYNCIO_POLL_INTERVAL)
                 if not self.done():
                     raise TimeoutError("Future did not complete within timeout")
             else:
                 while not self.done():
-                    time.sleep(0.01)
+                    time.sleep(self.ASYNCIO_POLL_INTERVAL)
 
         if self._future.cancelled():
             # Raise concurrent.futures.CancelledError, not asyncio.CancelledError
@@ -725,12 +744,12 @@ class AsyncioFuture(BaseFuture):
             if timeout is not None:
                 start_time = time.time()
                 while not self.done() and (time.time() - start_time) < timeout:
-                    time.sleep(0.01)
+                    time.sleep(self.ASYNCIO_POLL_INTERVAL)
                 if not self.done():
                     raise TimeoutError("Future did not complete within timeout")
             else:
                 while not self.done():
-                    time.sleep(0.01)
+                    time.sleep(self.ASYNCIO_POLL_INTERVAL)
 
         if self._future.cancelled():
             # Raise concurrent.futures.CancelledError, not asyncio.CancelledError

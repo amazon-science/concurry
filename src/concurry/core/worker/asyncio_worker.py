@@ -1,12 +1,13 @@
 """Asyncio-based worker implementation for concurry."""
 
 import asyncio
+import queue
 import threading
 from typing import Any, Dict
 
 from pydantic import PrivateAttr
 
-from ..future import AsyncioFuture
+from ..future import ConcurrentFuture
 from .base_worker import WorkerProxy, _unwrap_futures_in_args
 
 
@@ -94,6 +95,9 @@ class AsyncioWorkerProxy(WorkerProxy):
     _worker: Any = PrivateAttr(default=None)
     _loop_thread: Any = PrivateAttr()
     _loop_ready: Any = PrivateAttr()
+    _sync_thread: Any = PrivateAttr()  # Dedicated thread for sync methods
+    _sync_queue: Any = PrivateAttr()  # Queue for sync method calls
+    _sync_thread_ready: Any = PrivateAttr()
     _futures: Dict[str, Any] = PrivateAttr()  # Maps future.uuid -> AsyncioFuture
     _futures_lock: Any = PrivateAttr()
 
@@ -113,6 +117,16 @@ class AsyncioWorkerProxy(WorkerProxy):
         # Wait for event loop to be ready
         if not self._loop_ready.wait(timeout=30):
             raise RuntimeError("Failed to start asyncio event loop")
+
+        # Create dedicated thread for sync methods
+        self._sync_queue = queue.Queue()
+        self._sync_thread_ready = threading.Event()
+        self._sync_thread = threading.Thread(target=self._run_sync_thread, daemon=True)
+        self._sync_thread.start()
+
+        # Wait for sync thread to be ready
+        if not self._sync_thread_ready.wait(timeout=30):
+            raise RuntimeError("Failed to start sync worker thread")
 
         # Initialize the worker
         self._initialize_worker()
@@ -140,8 +154,62 @@ class AsyncioWorkerProxy(WorkerProxy):
         """Async initialization of the worker."""
         self._worker = self.worker_cls(*self.init_args, **self.init_kwargs)
 
+    def _run_sync_thread(self):
+        """Run the dedicated thread for sync method execution.
+
+        This thread processes sync methods without blocking the event loop,
+        allowing for better concurrency when mixing sync and async operations.
+        """
+        # Signal that thread is ready
+        self._sync_thread_ready.set()
+
+        while not self._stopped:
+            try:
+                # Get command with timeout to allow checking stopped flag
+                try:
+                    command = self._sync_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+
+                if command is None:
+                    break
+
+                future, method_name, args, kwargs = command
+
+                try:
+                    if method_name == "__sync_task__":
+                        # Execute arbitrary sync function
+                        execute_fn = args[0]
+                        result = execute_fn()
+                        future._future.set_result(result)
+                    else:
+                        # Execute the sync method
+                        method = getattr(self._worker, method_name)
+                        if not callable(method):
+                            future._future.set_exception(
+                                AttributeError(
+                                    f"'{self.worker_cls.__name__}' has no callable method '{method_name}'"
+                                )
+                            )
+                        else:
+                            result = method(*args, **kwargs)
+                            future._future.set_result(result)
+                except Exception as e:
+                    future._future.set_exception(e)
+                finally:
+                    # Remove from futures tracking
+                    with self._futures_lock:
+                        self._futures.pop(future.uuid, None)
+
+            except Exception:
+                # Catch any unexpected exceptions to keep thread alive
+                break
+
     def _execute_method(self, method_name: str, *args: Any, **kwargs: Any):
-        """Execute a method in the asyncio event loop.
+        """Execute a method - routes to sync thread or async event loop.
+
+        Sync methods are executed in a dedicated thread to avoid blocking the event loop.
+        Async methods are executed in the event loop for true concurrent execution.
 
         Args:
             method_name: Name of the method to invoke
@@ -149,44 +217,69 @@ class AsyncioWorkerProxy(WorkerProxy):
             **kwargs: Keyword arguments
 
         Returns:
-            AsyncioFuture for the method execution
+            ConcurrentFuture for the method execution
         """
         # Unwrap futures if needed (fast-path handled in _unwrap_futures_in_args)
         unwrapped_args, unwrapped_kwargs = _unwrap_futures_in_args(args, kwargs, self.unwrap_futures)
 
-        # Create and execute method in the event loop
-        async def _run_method():
+        # Check if method is async or sync
+        # We need to check this on the worker instance
+        try:
             method = getattr(self._worker, method_name)
-            if not callable(method):
-                raise AttributeError(f"'{self.worker_cls.__name__}' has no callable method '{method_name}'")
+            is_async = asyncio.iscoroutinefunction(method)
+        except AttributeError:
+            # Method doesn't exist - will be caught later
+            is_async = False
 
-            if asyncio.iscoroutinefunction(method):
-                result = await method(*unwrapped_args, **unwrapped_kwargs)
-            else:
-                result = method(*unwrapped_args, **unwrapped_kwargs)
+        # Use concurrent.futures.Future for efficient blocking
+        from concurrent.futures import Future as PyFuture
 
-            return result
+        result_future = PyFuture()
+        future = ConcurrentFuture(future=result_future)
 
-        # Use asyncio.ensure_future to schedule coroutine and get asyncio.Future
-        # We need to call this from within the event loop thread
-        async def _create_future_and_run():
-            return asyncio.ensure_future(_run_method())
-
-        # Schedule and get the asyncio.Future
-        sync_future = asyncio.run_coroutine_threadsafe(_create_future_and_run(), self._loop)
-        loop_future = sync_future.result()  # Get the asyncio.Future (fast, just returns the future object)
-
-        # Wrap the asyncio.Future
-        future = AsyncioFuture(future=loop_future)
-
-        # Store future for cancellation on stop() - minimize locked section
+        # Store future for cancellation on stop()
         with self._futures_lock:
             self._futures[future.uuid] = future
+
+        if is_async:
+            # Route to event loop for async methods
+            def create_and_schedule():
+                """Runs in event loop thread - schedules work and manages result."""
+
+                # Schedule actual work as a task
+                async def _run_method():
+                    try:
+                        method = getattr(self._worker, method_name)
+                        if not callable(method):
+                            raise AttributeError(
+                                f"'{self.worker_cls.__name__}' has no callable method '{method_name}'"
+                            )
+
+                        result = await method(*unwrapped_args, **unwrapped_kwargs)
+                        result_future.set_result(result)
+                    except Exception as e:
+                        result_future.set_exception(e)
+                    finally:
+                        # Remove from futures tracking
+                        with self._futures_lock:
+                            self._futures.pop(future.uuid, None)
+
+                # Schedule coroutine on event loop
+                asyncio.ensure_future(_run_method(), loop=self._loop)
+
+            # Schedule callback in event loop (fast, ~5-10µs)
+            self._loop.call_soon_threadsafe(create_and_schedule)
+        else:
+            # Route to sync thread for sync methods
+            self._sync_queue.put((future, method_name, unwrapped_args, unwrapped_kwargs))
 
         return future
 
     def _execute_task(self, fn, *args: Any, **kwargs: Any):
-        """Execute an arbitrary function in the asyncio event loop.
+        """Execute an arbitrary function - routes to sync thread or async event loop.
+
+        Sync functions are executed in a dedicated thread to avoid blocking the event loop.
+        Async functions are executed in the event loop for true concurrent execution.
 
         Args:
             fn: Callable function to execute
@@ -194,42 +287,65 @@ class AsyncioWorkerProxy(WorkerProxy):
             **kwargs: Keyword arguments
 
         Returns:
-            AsyncioFuture for the task execution
+            ConcurrentFuture for the task execution
         """
         # Unwrap futures if needed (fast-path handled in _unwrap_futures_in_args)
         unwrapped_args, unwrapped_kwargs = _unwrap_futures_in_args(args, kwargs, self.unwrap_futures)
 
-        # Create and execute task in the event loop
-        async def _run_task():
-            if not callable(fn):
-                raise TypeError(f"fn must be callable, got {type(fn).__name__}")
+        # Check if function is async or sync
+        is_async = asyncio.iscoroutinefunction(fn)
 
-            if asyncio.iscoroutinefunction(fn):
-                result = await fn(*unwrapped_args, **unwrapped_kwargs)
-            else:
-                result = fn(*unwrapped_args, **unwrapped_kwargs)
+        # Use concurrent.futures.Future for efficient blocking
+        from concurrent.futures import Future as PyFuture
 
-            return result
+        result_future = PyFuture()
+        future = ConcurrentFuture(future=result_future)
 
-        # Use asyncio.ensure_future to schedule coroutine and get asyncio.Future
-        async def _create_future_and_run():
-            return asyncio.ensure_future(_run_task())
-
-        # Schedule and get the asyncio.Future
-        sync_future = asyncio.run_coroutine_threadsafe(_create_future_and_run(), self._loop)
-        loop_future = sync_future.result()  # Get the asyncio.Future (fast, just returns the future object)
-
-        # Wrap the asyncio.Future
-        future = AsyncioFuture(future=loop_future)
-
-        # Store future for cancellation on stop() - minimize locked section
+        # Store future for cancellation on stop()
         with self._futures_lock:
             self._futures[future.uuid] = future
+
+        if is_async:
+            # Route to event loop for async functions
+            def create_and_schedule():
+                """Runs in event loop thread - schedules work and manages result."""
+
+                # Schedule actual work as a task
+                async def _run_task():
+                    try:
+                        if not callable(fn):
+                            raise TypeError(f"fn must be callable, got {type(fn).__name__}")
+
+                        result = await fn(*unwrapped_args, **unwrapped_kwargs)
+                        result_future.set_result(result)
+                    except Exception as e:
+                        result_future.set_exception(e)
+                    finally:
+                        # Remove from futures tracking
+                        with self._futures_lock:
+                            self._futures.pop(future.uuid, None)
+
+                # Schedule coroutine on event loop
+                asyncio.ensure_future(_run_task(), loop=self._loop)
+
+            # Schedule callback in event loop (fast, ~5-10µs)
+            self._loop.call_soon_threadsafe(create_and_schedule)
+        else:
+            # Route to sync thread for sync functions
+            # Create a wrapper that executes the function
+            def execute_sync_task():
+                if not callable(fn):
+                    raise TypeError(f"fn must be callable, got {type(fn).__name__}")
+                return fn(*unwrapped_args, **unwrapped_kwargs)
+
+            # Queue task to sync thread
+            # We use a special marker "__sync_task__" to indicate this is a task, not a method
+            self._sync_queue.put((future, "__sync_task__", (execute_sync_task,), {}))
 
         return future
 
     def stop(self, timeout: float = 30) -> None:
-        """Stop the worker and event loop.
+        """Stop the worker, sync thread, and event loop.
 
         Args:
             timeout: Maximum time to wait for cleanup in seconds
@@ -242,6 +358,12 @@ class AsyncioWorkerProxy(WorkerProxy):
                 future.cancel()
             self._futures.clear()
 
+        # Stop sync thread
+        if self._sync_queue is not None:
+            self._sync_queue.put(None)
+            self._sync_thread.join(timeout=timeout / 2)
+
+        # Stop event loop
         if self._loop is not None:
             self._loop.call_soon_threadsafe(self._loop.stop)
-            self._loop_thread.join(timeout=timeout)
+            self._loop_thread.join(timeout=timeout / 2)

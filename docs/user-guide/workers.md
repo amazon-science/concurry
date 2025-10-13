@@ -282,7 +282,7 @@ class FileReader(Worker):
                 return await f.read()
         except ImportError:
             # Fallback to simulate async I/O
-            await asyncio.sleep(0.001)
+            await asyncio.sleep(1e-6)
             with open(file_path, 'r') as f:
                 return f.read()
     

@@ -12,6 +12,9 @@ nav:
   - Installation: installation.md
   - User Guide:
     - Getting Started: user-guide/getting-started.md
+    - Workers: user-guide/workers.md
+    - Worker Pools: user-guide/pools.md
+    - Limits: user-guide/limits.md
     - Futures: user-guide/futures.md
     - Progress Tracking: user-guide/progress.md
   - API Reference:

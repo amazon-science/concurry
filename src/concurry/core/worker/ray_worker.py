@@ -3,12 +3,11 @@
 import asyncio
 import inspect
 import threading
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional
 
 from morphic.structs import map_collection
 from pydantic import PrivateAttr
 
-from ..config import ExecutionMode
 from ..future import RayFuture
 from .base_worker import WorkerProxy, _create_worker_wrapper
 
@@ -167,21 +166,19 @@ class RayWorkerProxy(WorkerProxy):
         result = w.async_method(5).result()  # Works with Ray's native async support
 
         # Override resources
-        w = MyWorker.options(mode="ray", num_cpus=2, num_gpus=1).init()
+        w = MyWorker.options(mode="ray", actor_options={"num_cpus": 2, "num_gpus": 1}).init()
 
         # Specify custom resources
         w = MyWorker.options(
             mode="ray",
-            resources={"special_hardware": 1}
+            actor_options={"resources": {"special_hardware": 1}}
         ).init()
 
         w.stop()
         ```
     """
 
-    num_cpus: float = 1  # Default to 1 CPU
-    num_gpus: float = 0  # Default to 0 GPUs
-    resources: Optional[Dict[str, Union[int, float]]] = None
+    actor_options: Optional[Dict[str, Any]] = None  # Ray actor resource options
 
     # Private attributes
     _ray_actor: Any = PrivateAttr()
@@ -214,34 +211,21 @@ class RayWorkerProxy(WorkerProxy):
         if not ray.is_initialized():
             raise RuntimeError("Ray is not initialized. Call ray.init() before creating Ray workers.")
 
-        # Create Ray actor options using public fields
-        actor_options = {}
-        if self.num_cpus is not None:
-            actor_options["num_cpus"] = self.num_cpus
-        if self.num_gpus is not None:
-            actor_options["num_gpus"] = self.num_gpus
-        if self.resources is not None:
-            actor_options["resources"] = self.resources
-
-        # Add any additional options from kwargs
-        for key, value in self._options.items():
-            actor_options[key] = value
-
         # Process limits for worker
-        processed_limits = self._process_limits_for_worker(worker_mode=ExecutionMode.Ray)
+        # Limits already processed by WorkerBuilder
 
         # If limits are provided, create a wrapper class
-        if processed_limits is not None:
+        if self.limits is not None:
             # Create a wrapper class that injects limits
-            worker_cls_to_use = _create_worker_wrapper(self.worker_cls, processed_limits)
+            worker_cls_to_use = _create_worker_wrapper(self.worker_cls, self.limits)
         else:
             worker_cls_to_use = self.worker_cls
 
-        # Create the Ray actor
+        # Create the Ray actor. Use actor_options if provided, otherwise use defaults.
         # Note: Ray 2.50+ doesn't accept ray.remote(**{}) with an empty dict
-        # so we only pass options if the dict is not empty
-        if actor_options:
-            ray_actor_cls = ray.remote(**actor_options)(worker_cls_to_use)
+        # so we only pass actor_options if the dict is not empty
+        if isinstance(self.actor_options, dict) and len(self.actor_options) > 0:
+            ray_actor_cls = ray.remote(**self.actor_options)(worker_cls_to_use)
         else:
             ray_actor_cls = ray.remote(worker_cls_to_use)
 
@@ -316,17 +300,9 @@ class RayWorkerProxy(WorkerProxy):
         # We'll use ray.remote to make the function remote, then call it
         remote_fn = ray.remote(fn)
 
-        # Execute with the same resources as the actor (use public fields)
-        options = {}
-        if self.num_cpus is not None:
-            options["num_cpus"] = self.num_cpus
-        if self.num_gpus is not None:
-            options["num_gpus"] = self.num_gpus
-        if self.resources is not None:
-            options["resources"] = self.resources
-
-        if options:
-            remote_fn = remote_fn.options(**options)
+        # Execute with the same resources as the actor
+        if isinstance(self.actor_options, dict) and len(self.actor_options) > 0:
+            remote_fn = remote_fn.options(**self.actor_options)
 
         object_ref = remote_fn.remote(*args, **kwargs)
         future = RayFuture(object_ref=object_ref)

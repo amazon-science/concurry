@@ -21,6 +21,15 @@ class ExecutionMode(AutoEnum):
     Ray = auto()  # Ray distributed execution (good for distributed tasks)
 
 
+class LoadBalancingAlgorithm(AutoEnum):
+    """Load balancing algorithms for worker pools."""
+
+    RoundRobin = alias("rr")  # Distribute requests in round-robin fashion
+    LeastActiveLoad = alias("active")  # Select worker with fewest active calls
+    LeastTotalLoad = alias("total")  # Select worker with fewest total calls
+    Random = alias("rand")  # Random worker selection
+
+
 class RateLimitAlgorithm(AutoEnum):
     """Rate limiting algorithms."""
 

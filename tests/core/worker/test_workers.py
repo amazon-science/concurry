@@ -537,14 +537,6 @@ class TestTaskWorkerSubmit:
         assert results == [0, 2, 4, 6, 8]
         w.stop()
 
-
-# Additional TaskWorker tests (old API - should be removed or use new submit() API)
-class TestTaskWorkerOldTests:
-    """Test TaskWorker - a concrete worker for submitting arbitrary tasks.
-
-    Note: These tests duplicate TestTaskWorkerSubmit above but are kept for compatibility.
-    Consider removing this test class in favor of TestTaskWorkerSubmit."""
-
     def test_basic_task_submission(self, worker_mode):
         """Test basic task submission with TaskWorker."""
 
@@ -661,7 +653,7 @@ class TestRayWorker:
                 runtime_env={"py_modules": [concurry, morphic]},
             )
 
-        w = SimpleWorker.options(mode="ray", num_cpus=1, num_gpus=0).init(10)
+        w = SimpleWorker.options(mode="ray", actor_options={"num_cpus": 1, "num_gpus": 0}).init(10)
 
         result = w.add(5).result(timeout=5)
         assert result == 15

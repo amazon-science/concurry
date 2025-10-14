@@ -3,6 +3,7 @@
 from .config import (
     ExecutionMode,
     ExecutorConfig,
+    LoadBalancingAlgorithm,
     RateLimitAlgorithm,
     RateLimitConfig,
     RetryConfig,
@@ -35,6 +36,7 @@ __all__ = [
     "wrap_future",
     # Config types
     "ExecutionMode",
+    "LoadBalancingAlgorithm",
     "RateLimitAlgorithm",
     "RateLimitConfig",
     "RetryConfig",
@@ -43,7 +45,7 @@ __all__ = [
     "TaskWorker",
     "Worker",
     "worker",
-    # Rate limiter
+    # Algorithms
     "RateLimiterAlgorithm",
     # Limit types
     "Limit",

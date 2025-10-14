@@ -1,5 +1,6 @@
 """Worker implementation for concurry."""
 
+import warnings
 from abc import ABC
 from typing import Any, Callable, Optional, Type, TypeVar
 
@@ -13,36 +14,188 @@ from ..future import BaseFuture
 T = TypeVar("T")
 
 
+def _transform_worker_limits(
+    limits: Any,
+    mode: ExecutionMode,
+    is_pool: bool,
+) -> Optional[Any]:
+    """Process limits parameter and return appropriate LimitSet or list of Limits.
+
+    This function handles the common logic for processing limits for both
+    WorkerProxy and WorkerProxyPool:
+    - Converting list of Limits to LimitSet (for pools or in-memory workers)
+    - Keeping list of Limits as-is (for Ray/Process single workers - to be created remotely)
+    - Validating shared LimitSets
+    - Checking mode compatibility
+
+    Args:
+        limits: The limits parameter (None, List[Limit], or LimitSet)
+        mode: Execution mode (ExecutionMode enum)
+        is_pool: True if processing for WorkerProxyPool, False for WorkerProxy
+
+    Returns:
+        - For pools: Processed LimitSet instance
+        - For Ray/Process single workers: List of Limit objects (to be created remotely)
+        - For in-memory single workers: LimitSet instance
+        - None if no limits
+
+    Raises:
+        ValueError: If limits configuration is invalid
+    """
+    if limits is None:
+        return None
+
+    # Import here to avoid circular imports
+    from ..limit import Limit
+    from ..limit.limit_set import (
+        BaseLimitSet,
+        InMemorySharedLimitSet,
+        LimitSet,
+        MultiprocessSharedLimitSet,
+        RaySharedLimitSet,
+    )
+
+    # Case 1: List of Limits
+    if isinstance(limits, list):
+        # Validate all items are Limit instances
+        if len(limits) == 0 or not all(isinstance(item, Limit) for item in limits):
+            raise ValueError("limits parameter must be either a LimitSet or a list of Limit objects")
+
+        if is_pool:
+            # WorkerProxyPool: create shared LimitSet with pool's mode
+            return LimitSet(limits=limits, shared=True, mode=mode)
+        else:
+            # Single worker
+            if mode in (ExecutionMode.Ray, ExecutionMode.Processes):
+                # Ray/Process: Keep as list - LimitSet will be created inside the actor/process
+                # This avoids serialization issues with threading locks
+                return limits
+            else:
+                # Sync/Asyncio/Thread: Create LimitSet now (in-memory, non-shared)
+                return LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync)
+
+    # Case 2: Already a BaseLimitSet
+    elif isinstance(limits, BaseLimitSet):
+        # Check if it's a shared LimitSet
+        assert limits.shared in {True, False}
+        if limits.shared is False:
+            if is_pool:
+                # WorkerProxyPool: must be shared
+                raise ValueError(
+                    "WorkerProxyPool requires a shared LimitSet. "
+                    "Create with: LimitSet(limits=[...], shared=True, mode='...')"
+                )
+
+            # WorkerProxy: if not shared, extract limits and handle based on mode
+            limits_list = getattr(limits, "limits", [])
+
+            if mode in (ExecutionMode.Ray, ExecutionMode.Processes):
+                # Ray/Process: Keep as list
+                warnings.warn(
+                    "Passing non-shared LimitSet to Ray/Process worker. "
+                    "The limits will be extracted and recreated inside the actor/process.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                return limits_list
+            else:
+                # Sync/Asyncio/Thread: Create new LimitSet
+                warnings.warn(
+                    "Passing non-shared LimitSet to WorkerProxy. "
+                    "The limits will be copied as a new private LimitSet with shared=False and mode='sync'.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                return LimitSet(limits=limits_list, shared=False, mode=ExecutionMode.Sync)
+
+        assert limits.shared is True
+        # Validate mode compatibility for shared LimitSets:
+        if isinstance(limits, InMemorySharedLimitSet):
+            # InMemory backend - compatible with sync, asyncio, thread
+            if mode not in (ExecutionMode.Sync, ExecutionMode.Asyncio, ExecutionMode.Threads):
+                raise ValueError(
+                    f"InMemorySharedLimitSet is not compatible with worker mode '{mode}'. "
+                    f"Use mode='sync', 'asyncio', or 'thread' workers."
+                )
+        elif isinstance(limits, MultiprocessSharedLimitSet):
+            # Multiprocess backend - only compatible with process
+            if mode != ExecutionMode.Processes:
+                raise ValueError(
+                    f"MultiprocessSharedLimitSet is not compatible with worker mode '{mode}'. "
+                    f"Use mode='process' workers."
+                )
+        elif isinstance(limits, RaySharedLimitSet):
+            # Ray backend - only compatible with ray
+            if mode != ExecutionMode.Ray:
+                raise ValueError(
+                    f"RaySharedLimitSet is not compatible with worker mode '{mode}'. Use mode='ray' workers."
+                )
+
+        return limits
+
+    else:
+        raise ValueError(
+            f"limits parameter must be either a LimitSet or a list of Limit objects, "
+            f"got {type(limits).__name__}"
+        )
+
+
+def _validate_shared_limitset_mode_compatibility(limit_set: Any, worker_mode: ExecutionMode) -> None:
+    """Validate that a LimitSet is compatible with the worker mode.
+
+    Args:
+        limit_set: The LimitSet to validate
+        worker_mode: The worker's execution mode
+
+    Raises:
+        ValueError: If the LimitSet is not compatible with the worker mode
+    """
+
+
 def _create_worker_wrapper(worker_cls: Type, limits: Any) -> Type:
     """Create a wrapper class that injects limits after worker initialization.
 
     This wrapper dynamically inherits from the user's worker class and adds
-    a limits attribute after calling the parent's __init__. This avoids the
-    messiness of trying to set attributes on an already-instantiated object.
+    a limits attribute after calling the parent's __init__.
+
+    If limits is a list of Limit objects (for Ray/Process workers), it creates
+    a LimitSet inside the worker (in the remote actor/process context). This
+    avoids serialization issues with threading locks in LimitSet.
 
     Args:
         worker_cls: The original worker class
-        limits: LimitSet instance to inject
+        limits: LimitSet instance OR list of Limit objects
 
     Returns:
         Wrapper class that sets limits attribute
 
     Example:
         ```python
-        # Instead of:
-        worker = MyWorker(*args, **kwargs)
-        worker.limits = limits  # Messy attribute injection
-
-        # Use:
-        wrapper_cls = _create_worker_wrapper(MyWorker, limits)
+        # For in-memory workers (limits is LimitSet):
+        wrapper_cls = _create_worker_wrapper(MyWorker, limit_set)
         worker = wrapper_cls(*args, **kwargs)
-        # worker.limits is already set
+        # worker.limits is the LimitSet
+
+        # For Ray/Process workers (limits is list):
+        wrapper_cls = _create_worker_wrapper(MyWorker, [CallLimit(...)])
+        worker = wrapper_cls(*args, **kwargs)
+        # worker.limits is a new LimitSet created inside the actor/process
         ```
     """
 
     class WorkerWithLimits(worker_cls):
         def __init__(self, *args, **kwargs):
-            self.limits = limits
+            # If limits is a list, create LimitSet here (inside the actor/process)
+            if isinstance(limits, list):
+                # Import here to avoid circular imports
+                from ..limit.limit_set import LimitSet
+
+                # Create private LimitSet with mode=sync (uses threading.Lock, works everywhere)
+                self.limits = LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync)
+            else:
+                # Already a LimitSet, use it directly
+                self.limits = limits
+
             super().__init__(*args, **kwargs)
 
     # Preserve original class name for debugging
@@ -141,7 +294,9 @@ class WorkerBuilder:
         worker_cls: Type["Worker"],
         mode: str,
         blocking: bool = False,
-        is_pool: bool = False,
+        max_workers: Optional[int] = None,
+        load_balancing: Optional[str] = None,
+        on_demand: bool = False,
         **options: Any,
     ):
         """Initialize the worker builder.
@@ -150,13 +305,14 @@ class WorkerBuilder:
             worker_cls: The worker class to instantiate
             mode: Execution mode (sync, thread, process, asyncio, ray)
             blocking: If True, method calls return results directly instead of futures
-            is_pool: If True, create a worker pool instead of single worker
+            max_workers: Maximum number of workers in pool (None = single worker)
+            load_balancing: Load balancing algorithm for pool
+            on_demand: If True, create workers on-demand
             **options: Additional options for the worker/pool
 
         Raises:
-            ValueError: If deprecated init_args or init_kwargs are passed
+            ValueError: If deprecated init_args/init_kwargs are passed or invalid configuration
         """
-        # Reject old API explicitly
         if "init_args" in options:
             raise ValueError(
                 "The 'init_args' parameter is no longer supported. "
@@ -173,10 +329,98 @@ class WorkerBuilder:
         self._worker_cls = worker_cls
         self._mode = mode
         self._blocking = blocking
-        self._is_pool = is_pool
+        self._max_workers = max_workers
+        self._load_balancing = load_balancing
+        self._on_demand = on_demand
         self._options = options
 
-    def init(self, *args: Any, **kwargs: Any) -> "WorkerProxy":
+        # Validate configuration
+        self._validate_pool_config()
+
+    def _validate_pool_config(self) -> None:
+        """Validate pool configuration parameters.
+
+        Raises:
+            ValueError: If configuration is invalid
+        """
+        from ..config import ExecutionMode
+
+        execution_mode = ExecutionMode(self._mode)
+
+        # Validate max_workers for different modes
+        if self._max_workers is not None:
+            if self._max_workers < 0:
+                raise ValueError("max_workers must be non-negative")
+
+            # Sync and Asyncio must have max_workers=1 or None
+            if execution_mode in (ExecutionMode.Sync, ExecutionMode.Asyncio):
+                if self._max_workers != 1:
+                    raise ValueError(
+                        f"max_workers must be 1 for {execution_mode.value} mode, got {self._max_workers}"
+                    )
+
+        # Validate on_demand for different modes
+        if self._on_demand:
+            # Sync and Asyncio don't support on_demand
+            if execution_mode in (ExecutionMode.Sync, ExecutionMode.Asyncio):
+                raise ValueError(f"on_demand mode is not supported for {execution_mode.value} execution")
+
+            # With on_demand and max_workers=0, validate limits
+            if self._max_workers == 0:
+                # This is valid for Thread, Process, and Ray
+                pass
+
+    def _get_default_max_workers(self) -> int:
+        """Get default max_workers for pool based on mode.
+
+        Returns:
+            Default number of workers for the mode
+        """
+        from ..config import ExecutionMode
+
+        execution_mode = ExecutionMode(self._mode)
+
+        if execution_mode == ExecutionMode.Sync:
+            return 1
+        elif execution_mode == ExecutionMode.Asyncio:
+            return 1
+        elif execution_mode == ExecutionMode.Threads:
+            return 24
+        elif execution_mode == ExecutionMode.Processes:
+            return 4
+        elif execution_mode == ExecutionMode.Ray:
+            return 0  # Unlimited for on-demand
+        else:
+            return 1
+
+    def _get_default_load_balancing(self) -> str:
+        """Get default load balancing algorithm.
+
+        Returns:
+            Default load balancing algorithm name
+        """
+        if self._on_demand:
+            return "random"  # Random is best for ephemeral workers
+        else:
+            return "round_robin"  # Round-robin is best for persistent pools
+
+    def _should_create_pool(self) -> bool:
+        """Determine if a pool should be created.
+
+        Returns:
+            True if pool should be created, False for single worker
+        """
+        # On-demand always creates pool
+        if self._on_demand:
+            return True
+
+        # max_workers > 1 creates pool
+        if self._max_workers is not None and self._max_workers > 1:
+            return True
+
+        return False
+
+    def init(self, *args: Any, **kwargs: Any) -> Any:
         """Initialize the worker instance with initialization arguments.
 
         Args:
@@ -184,23 +428,36 @@ class WorkerBuilder:
             **kwargs: Keyword arguments for worker __init__
 
         Returns:
-            WorkerProxy configured and initialized with the given arguments
+            WorkerProxy (single worker) or WorkerProxyPool (pool)
 
         Example:
             ```python
             # Initialize single worker
             worker = MyWorker.options(mode="thread").init(multiplier=3)
 
+            # Initialize worker pool
+            pool = MyWorker.options(mode="thread", max_workers=10).init(multiplier=3)
+
             # Initialize with positional and keyword args
             worker = MyWorker.options(mode="process").init(10, name="processor")
             ```
         """
-        if self._is_pool:
-            raise NotImplementedError(
-                "Worker pools will be implemented in a future update. "
-                "For now, use .options() to create individual workers."
-            )
+        # Determine if we should create a pool
+        if self._should_create_pool():
+            return self._create_pool(args, kwargs)
+        else:
+            return self._create_single_worker(args, kwargs)
 
+    def _create_single_worker(self, args: tuple, kwargs: dict) -> "WorkerProxy":
+        """Create a single worker instance.
+
+        Args:
+            args: Positional arguments for worker __init__
+            kwargs: Keyword arguments for worker __init__
+
+        Returns:
+            WorkerProxy instance
+        """
         from .asyncio_worker import AsyncioWorkerProxy
         from .process_worker import ProcessWorkerProxy
         from .sync_worker import SyncWorkerProxy
@@ -238,6 +495,15 @@ class WorkerBuilder:
                 {},
             )
 
+        # Process limits if present
+        processed_options = dict(self._options)
+        if "limits" in processed_options and processed_options["limits"] is not None:
+            processed_options["limits"] = _transform_worker_limits(
+                limits=processed_options["limits"],
+                mode=execution_mode,
+                is_pool=False,
+            )
+
         # Create proxy with init args/kwargs
         # Typed expects all parameters as keyword arguments
         return proxy_cls(
@@ -245,7 +511,76 @@ class WorkerBuilder:
             init_args=args,
             init_kwargs=kwargs,
             blocking=self._blocking,
-            **self._options,
+            **processed_options,
+        )
+
+    def _create_pool(self, args: tuple, kwargs: dict) -> Any:
+        """Create a worker pool.
+
+        Args:
+            args: Positional arguments for worker __init__
+            kwargs: Keyword arguments for worker __init__
+
+        Returns:
+            WorkerProxyPool instance
+        """
+        from ..config import ExecutionMode, LoadBalancingAlgorithm
+        from .worker_pool import (
+            InMemoryWorkerProxyPool,
+            MultiprocessWorkerProxyPool,
+            RayWorkerProxyPool,
+        )
+
+        # Convert mode string to ExecutionMode
+        execution_mode = ExecutionMode(self._mode)
+
+        # Determine max_workers (use defaults if not specified)
+        max_workers = self._max_workers
+        if max_workers is None:
+            max_workers = self._get_default_max_workers()
+
+        # Determine load_balancing algorithm
+        load_balancing_str = self._load_balancing
+        if load_balancing_str is None:
+            load_balancing_str = self._get_default_load_balancing()
+        load_balancing = LoadBalancingAlgorithm(load_balancing_str)
+
+        # Process limits for pool using common function
+        limits = self._options.get("limits")
+        if limits is not None:
+            limits = _transform_worker_limits(
+                limits=limits,
+                mode=execution_mode,
+                is_pool=True,
+            )
+
+        # Update options with processed limits
+        pool_options = dict(self._options)
+        pool_options["limits"] = limits
+
+        # Select appropriate pool class
+        if execution_mode in (ExecutionMode.Sync, ExecutionMode.Asyncio, ExecutionMode.Threads):
+            pool_cls = InMemoryWorkerProxyPool
+        elif execution_mode == ExecutionMode.Processes:
+            pool_cls = MultiprocessWorkerProxyPool
+        elif execution_mode == ExecutionMode.Ray:
+            pool_cls = RayWorkerProxyPool
+        else:
+            raise ValueError(f"Unsupported execution mode for pool: {execution_mode}")
+
+        # Create pool instance
+        return pool_cls(
+            worker_cls=self._worker_cls,
+            mode=execution_mode,
+            max_workers=max_workers,
+            load_balancing=load_balancing,
+            on_demand=self._on_demand,
+            blocking=self._blocking,
+            unwrap_futures=self._options.get("unwrap_futures", True),
+            limits=limits,
+            init_args=args,
+            init_kwargs=kwargs,
+            **{k: v for k, v in pool_options.items() if k not in ("limits", "unwrap_futures")},
         )
 
 
@@ -314,7 +649,7 @@ class Worker:
         # Ray-based (distributed computing)
         import ray
         ray.init()
-        worker = DataProcessor.options(mode="ray", num_cpus=1).init(2)
+        worker = DataProcessor.options(mode="ray", actor_options={"num_cpus": 1}).init(2)
         ```
 
     Async Function Support:
@@ -476,6 +811,9 @@ class Worker:
         cls: Type[T],
         mode: str = "sync",
         blocking: bool = False,
+        max_workers: Optional[int] = None,
+        load_balancing: Optional[str] = None,
+        on_demand: bool = False,
         **kwargs: Any,
     ) -> WorkerBuilder:
         """Configure worker execution options.
@@ -496,12 +834,30 @@ class Worker:
                 Accepts string or ExecutionMode enum value
             blocking: If True, method calls return results directly instead of futures
                 Accepts bool or string representation ("true", "false", "1", "0")
+            max_workers: Maximum number of workers in pool (optional)
+                - If None or 1: Creates single worker
+                - If > 1: Creates worker pool with specified size
+                - Sync/Asyncio: Must be 1 or None (raises error otherwise)
+                - Thread: Default 24 when pool requested
+                - Process: Default 4 when pool requested
+                - Ray: Default 0 (unlimited for on-demand)
+            load_balancing: Load balancing algorithm (optional)
+                - "round_robin": Distribute requests evenly (default for pools)
+                - "least_active": Select worker with fewest active calls
+                - "least_total": Select worker with fewest total calls
+                - "random": Random selection (default for on-demand)
+            on_demand: If True, create workers on-demand per request (default: False)
+                - Workers are created for each request and destroyed after completion
+                - Useful for bursty workloads or resource-constrained environments
+                - Cannot be used with Sync/Asyncio modes
+                - With max_workers=0: Unlimited concurrent workers (Ray) or
+                  limited to cpu_count()-1 (Thread/Process)
             unwrap_futures: If True (default), automatically unwrap BaseFuture arguments
                 by calling .result() on them before passing to worker methods. This enables
                 seamless composition of workers. Set to False to pass futures as-is.
             limits: Resource protection and rate limiting (optional)
                 - Pass LimitSet: Workers share the same limit pool
-                - Pass List[Limit]: Each worker gets private limits
+                - Pass List[Limit]: Each worker gets private limits (creates shared LimitSet for pools)
                 See Worker docstring "Resource Protection with Limits" section for details.
             **kwargs: Additional options passed to the worker implementation
                 - For ray: num_cpus, num_gpus, resources, etc.
@@ -553,8 +909,37 @@ class Worker:
                 worker = MyWorker.options(mode="thread", unwrap_futures=False).init()
                 result = worker.inspect_future(future).result()  # Receives BaseFuture object
                 ```
+
+            Worker Pools:
+                ```python
+                # Create a thread pool with 10 workers
+                pool = MyWorker.options(mode="thread", max_workers=10).init(multiplier=3)
+                future = pool.process(10)  # Dispatched to one of 10 workers
+
+                # Process pool with load balancing
+                pool = MyWorker.options(
+                    mode="process",
+                    max_workers=4,
+                    load_balancing="least_active"
+                ).init(multiplier=3)
+
+                # On-demand workers for bursty workloads
+                pool = MyWorker.options(
+                    mode="ray",
+                    on_demand=True,
+                    max_workers=0  # Unlimited
+                ).init(multiplier=3)
+                ```
         """
-        return WorkerBuilder(worker_cls=cls, mode=mode, blocking=blocking, is_pool=False, **kwargs)
+        return WorkerBuilder(
+            worker_cls=cls,
+            mode=mode,
+            blocking=blocking,
+            max_workers=max_workers,
+            load_balancing=load_balancing,
+            on_demand=on_demand,
+            **kwargs,
+        )
 
     @classmethod
     @validate
@@ -697,7 +1082,7 @@ class WorkerProxy(Typed, ABC):
     unwrap_futures: bool = True
     init_args: tuple = ()
     init_kwargs: dict = {}
-    limits: Optional[Any] = None  # LimitSet instance or list of Limit objects
+    limits: Optional[Any] = None  # LimitSet instance (processed by WorkerBuilder)
 
     # Private attributes (defined with PrivateAttr, initialized in post_initialize)
     _stopped: bool = PrivateAttr(default=False)
@@ -713,92 +1098,6 @@ class WorkerProxy(Typed, ABC):
 
         # Initialize method cache for performance
         self._method_cache = {}
-
-    def _process_limits_for_worker(self, worker_mode: ExecutionMode):
-        """Process limits parameter and return appropriate LimitSet for worker.
-
-        This method handles:
-        - Converting list of Limits to private LimitSet
-        - Validating shared LimitSets match worker mode
-        - Warning about non-shared LimitSets
-
-        Args:
-            worker_mode: Execution mode of the worker (ExecutionMode enum)
-
-        Returns:
-            LimitSet instance or None
-
-        Raises:
-            ValueError: If shared=False with non-sync mode, or if mode mismatch
-        """
-        if self.limits is None:
-            return None
-
-        # Import here to avoid circular imports
-        import warnings
-
-        from ..limit import Limit
-        from ..limit.limit_set import (
-            BaseLimitSet,
-            InMemorySharedLimitSet,
-            LimitSet,
-            MultiprocessSharedLimitSet,
-            RaySharedLimitSet,
-        )
-
-        # If it's a list of Limits, create a private LimitSet
-        if isinstance(self.limits, list):
-            # Check if all items are Limit instances
-            if len(self.limits) > 0 and all(isinstance(item, Limit) for item in self.limits):
-                # For Ray workers, we need to create a RaySharedLimitSet to avoid serialization issues
-                # Ray cannot serialize threading.Lock, so we can't use InMemorySharedLimitSet
-                if worker_mode == ExecutionMode.Ray:
-                    warnings.warn(
-                        "Creating private RaySharedLimitSet for Ray worker from list of Limits. "
-                        "For better performance with multiple Ray workers, consider creating a shared "
-                        "LimitSet: LimitSet(limits=[...], shared=True, mode='ray')",
-                        UserWarning,
-                        stacklevel=3,
-                    )
-                    return LimitSet(limits=self.limits, shared=True, mode=ExecutionMode.Ray)
-                else:
-                    # Create private LimitSet with mode="sync" (non-shared, thread-safe via Lock)
-                    return LimitSet(limits=self.limits, shared=False, mode=ExecutionMode.Sync)
-            else:
-                raise ValueError("limits parameter must be either a LimitSet or a list of Limit objects")
-
-        # If it's already a BaseLimitSet instance (from LimitSet factory), validate mode compatibility
-        elif isinstance(self.limits, BaseLimitSet):
-            # Validate compatibility
-            if isinstance(self.limits, InMemorySharedLimitSet):
-                # InMemory backend - compatible with sync, asyncio, thread
-                if worker_mode not in (ExecutionMode.Sync, ExecutionMode.Asyncio, ExecutionMode.Threads):
-                    raise ValueError(
-                        f"InMemorySharedLimitSet is not compatible with worker mode '{worker_mode}'. "
-                        f"Use mode='sync', 'asyncio', or 'thread' workers."
-                    )
-            elif isinstance(self.limits, MultiprocessSharedLimitSet):
-                # Multiprocess backend - only compatible with process
-                if worker_mode != ExecutionMode.Processes:
-                    raise ValueError(
-                        f"MultiprocessSharedLimitSet is not compatible with worker mode '{worker_mode}'. "
-                        f"Use mode='process' workers."
-                    )
-            elif isinstance(self.limits, RaySharedLimitSet):
-                # Ray backend - only compatible with ray
-                if worker_mode != ExecutionMode.Ray:
-                    raise ValueError(
-                        f"RaySharedLimitSet is not compatible with worker mode '{worker_mode}'. "
-                        f"Use mode='ray' workers."
-                    )
-
-            return self.limits
-
-        else:
-            raise ValueError(
-                f"limits parameter must be either a LimitSet or a list of Limit objects, "
-                f"got {type(self.limits).__name__}"
-            )
 
     def __getattr__(self, name: str) -> Callable:
         """Intercept method calls and dispatch them appropriately.

@@ -12,7 +12,6 @@ from typing import Any, Literal
 import cloudpickle
 from pydantic import PrivateAttr
 
-from ..config import ExecutionMode
 from ..future import ConcurrentFuture
 from .base_worker import WorkerProxy, _unwrap_futures_in_args
 
@@ -186,7 +185,7 @@ class ProcessWorkerProxy(WorkerProxy):
         worker_cls_bytes = cloudpickle.dumps(self.worker_cls)
 
         # Process limits for worker
-        processed_limits = self._process_limits_for_worker(worker_mode=ExecutionMode.Processes)
+        # Limits already processed by WorkerBuilder
 
         # Start worker process using public fields
         self._process = ctx.Process(
@@ -195,7 +194,7 @@ class ProcessWorkerProxy(WorkerProxy):
                 worker_cls_bytes,
                 self.init_args,
                 self.init_kwargs,
-                processed_limits,
+                self.limits,
                 self._command_queue,
                 self._result_queue,
             ),

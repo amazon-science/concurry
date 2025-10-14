@@ -16,6 +16,7 @@ from .core import (
     Limit,
     LimitSet,
     LimitSetAcquisition,
+    LoadBalancingAlgorithm,
     RateLimit,
     RateLimiterAlgorithm,
     ResourceLimit,
@@ -25,6 +26,9 @@ from .core import (
     worker,
     wrap_future,
 )
+
+# Executor function
+from .executor import Executor
 
 # Utilities
 from .utils.progress import ProgressBar
@@ -39,11 +43,13 @@ __all__ = [
     "wrap_future",
     # Config types
     "ExecutionMode",
+    "LoadBalancingAlgorithm",
     # Worker types
     "TaskWorker",
     "Worker",
     "worker",
-    # Rate limiter
+    "Executor",
+    # Algorithms
     "RateLimiterAlgorithm",
     # Limit types
     "Limit",

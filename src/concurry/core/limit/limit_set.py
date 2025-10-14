@@ -9,6 +9,23 @@ Architecture:
     - MultiprocessSharedLimitSet: Multiprocess-safe implementation for process workers
     - RaySharedLimitSet: Distributed implementation for Ray workers
     - LimitSet: Factory function that returns appropriate implementation
+
+Shared State Management:
+
+    InMemorySharedLimitSet:
+        - Workers share the same process memory
+        - Limit objects (_impl instances) are naturally shared
+        - Uses threading.Lock for synchronization
+        - Base class _can_acquire_all() works correctly
+
+    MultiprocessSharedLimitSet & RaySharedLimitSet:
+        - Each worker/actor has its OWN copy of Limit objects after pickling
+        - Limit._impl instances are NOT shared across processes/actors
+        - Problem: Base class _can_acquire_all() calls local limit.can_acquire()
+        - Solution: Override _can_acquire_all() to use centralized shared state
+            * MultiprocessSharedLimitSet: Manager-managed dicts for rate/call limit history
+            * RaySharedLimitSet: LimitTrackerActor maintains all state centrally
+        - This ensures all workers check against the SAME shared state, not local copies
 """
 
 import threading
@@ -28,7 +45,7 @@ class BaseLimitSet(ABC):
     Subclasses implement specific synchronization mechanisms.
     """
 
-    def __init__(self, limits: List[Limit]):
+    def __init__(self, limits: List[Limit], shared: bool):
         """Initialize the base limit set.
 
         Args:
@@ -36,7 +53,7 @@ class BaseLimitSet(ABC):
         """
         self.limits = limits
         self._limits_by_key: Dict[str, Limit] = {}
-
+        self.shared = shared
         # Build internal index of limits by key
         for limit in self.limits:
             if limit.key in self._limits_by_key:
@@ -256,13 +273,13 @@ class InMemorySharedLimitSet(BaseLimitSet):
     Suitable for sync, asyncio, and thread workers within the same process.
     """
 
-    def __init__(self, limits: List[Limit]):
+    def __init__(self, limits: List[Limit], shared: bool):
         """Initialize in-memory shared limit set.
 
         Args:
             limits: List of Limit instances
         """
-        super().__init__(limits)
+        super().__init__(limits, shared=shared)
         self._lock = threading.Lock()
         self._resource_semaphores: Dict[str, threading.Semaphore] = {}
 
@@ -344,25 +361,134 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
 
     Uses multiprocessing.Manager for shared state across processes.
     Suitable for process workers.
+
+    Architecture:
+        Unlike InMemorySharedLimitSet which can rely on shared Limit objects
+        in memory, MultiprocessSharedLimitSet must maintain all limit state
+        in Manager-managed shared data structures since each process has its
+        own copy of the Limit objects after pickling.
+
+    State Management:
+        - Resource limits: Use Manager.Semaphore (already shared)
+        - Rate limits: Store token counts and timestamps in Manager dicts
+        - Call limits: Store call counts and timestamps in Manager dicts
     """
 
-    def __init__(self, limits: List[Limit]):
+    def __init__(self, limits: List[Limit], shared: bool = True):
         """Initialize multiprocess shared limit set.
 
         Args:
             limits: List of Limit instances
         """
-        super().__init__(limits)
+        assert shared is True
+        super().__init__(limits, shared=True)
         import multiprocessing
 
         self._manager = multiprocessing.Manager()
         self._lock = self._manager.Lock()
         self._resource_semaphores: Dict[str, Any] = {}
 
-        # Initialize resource semaphores
+        # Shared state for rate/call limits (Manager-managed)
+        # Each limit gets: {tokens: int, history: [(timestamp, amount), ...]}
+        self._rate_limit_state: Dict[str, Any] = self._manager.dict()
+
+        # Initialize resource semaphores and rate limit state
         for limit in self.limits:
             if isinstance(limit, ResourceLimit):
                 self._resource_semaphores[limit.key] = self._manager.Semaphore(limit.capacity)
+            elif isinstance(limit, (RateLimit, CallLimit)):
+                # Initialize shared state for this rate/call limit
+                self._rate_limit_state[limit.key] = self._manager.dict(
+                    {
+                        "available_tokens": limit.capacity,
+                        "history": self._manager.list(),
+                    }
+                )
+
+    def _can_acquire_all(self, requested_amounts: Dict[str, int]) -> bool:
+        """Check if all limits can be acquired using shared state.
+
+        Override parent to use Manager-managed shared state instead of
+        local Limit objects, since each process has its own copy after pickling.
+
+        Args:
+            requested_amounts: Amount to acquire for each limit
+
+        Returns:
+            True if all can be acquired
+        """
+        current_time = time.time()
+
+        for key, amount in requested_amounts.items():
+            limit = self._limits_by_key[key]
+
+            if isinstance(limit, ResourceLimit):
+                # Resource limits use semaphore (already shared)
+                # Just check if capacity allows it
+                if limit._current_usage + amount > limit.capacity:
+                    return False
+
+            elif isinstance(limit, (RateLimit, CallLimit)):
+                # Use shared state to check availability
+                state = self._rate_limit_state[key]
+
+                # Clean old history entries outside window
+                window_start = current_time - limit.window_seconds
+                history = list(state["history"])
+                active_history = [(ts, amt) for ts, amt in history if ts >= window_start]
+
+                # Calculate current usage in window
+                current_usage = sum(amt for ts, amt in active_history)
+
+                # Check if we can accommodate the request
+                if current_usage + amount > limit.capacity:
+                    return False
+
+        return True
+
+    def _acquire_all(self, requested_amounts: Dict[str, int]) -> Dict[str, Acquisition]:
+        """Acquire all limits using shared state.
+
+        Override parent to update Manager-managed shared state instead of
+        local Limit objects.
+
+        Args:
+            requested_amounts: Amount to acquire for each limit
+
+        Returns:
+            Mapping of limit key to Acquisition
+        """
+        acquisitions = {}
+        current_time = time.time()
+
+        try:
+            for key, amount in requested_amounts.items():
+                limit = self._limits_by_key[key]
+
+                if isinstance(limit, ResourceLimit):
+                    # For ResourceLimit, acquire from semaphore if available
+                    self._acquire_resource(limit, amount)
+                    limit._current_usage += amount
+                    acquisitions[key] = Acquisition(limit=limit, requested=amount, successful=True)
+
+                elif isinstance(limit, (RateLimit, CallLimit)):
+                    # For Rate/Call limits, update shared state
+                    state = self._rate_limit_state[key]
+
+                    # Add to history
+                    state["history"].append((current_time, amount))
+
+                    acquisitions[key] = Acquisition(limit=limit, requested=amount, successful=True)
+
+                else:
+                    acquisitions[key] = Acquisition(limit=limit, requested=amount, successful=True)
+
+            return acquisitions
+
+        except Exception:
+            # Rollback: release any acquired limits
+            self._release_acquisitions(acquisitions, requested_amounts)
+            raise
 
     def acquire(
         self, requested: Optional[Dict[str, int]] = None, timeout: Optional[float] = None
@@ -421,6 +547,47 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
         semaphore = self._resource_semaphores[limit.key]
         for i in range(amount):
             semaphore.release()
+
+    def _release_acquisitions(
+        self, acquisitions: Dict[str, Acquisition], requested_amounts: Dict[str, int]
+    ) -> None:
+        """Release acquired limits using shared state.
+
+        Override parent to update Manager-managed shared state instead of
+        local Limit objects.
+
+        Args:
+            acquisitions: Mapping of limit key to acquisition
+            requested_amounts: Original requested amounts
+        """
+        current_time = time.time()
+
+        for key, acq in acquisitions.items():
+            limit = acq.limit
+            requested = acq.requested
+            used = acq.used if acq.used is not None else requested
+
+            if isinstance(limit, ResourceLimit):
+                # Release resources
+                self._release_resource(limit, requested)
+                limit._current_usage -= requested
+
+            elif isinstance(limit, (RateLimit, CallLimit)):
+                # For Rate/Call limits, clean up history in shared state
+                state = self._rate_limit_state[key]
+
+                # Clean old history entries outside window
+                window_start = current_time - limit.window_seconds
+                history = list(state["history"])
+
+                # Keep only entries within window
+                active_history = [(ts, amt) for ts, amt in history if ts >= window_start]
+
+                # Update shared history
+                state["history"][:] = active_history
+
+                # If there's a difference between used and requested (for RateLimits),
+                # we don't need to do anything special since we're tracking actual history
 
     def release_limit_set_acquisition(self, acquisition: LimitSetAcquisition) -> None:
         """Release a LimitSetAcquisition."""
@@ -488,24 +655,39 @@ try:
             self._resource_usage: Dict[str, int] = {}  # Track resource usage
             self._resource_capacity: Dict[str, int] = {}  # Track resource capacity
 
+            # Track rate/call limit state: {key: {'history': [(ts, amount), ...], 'window': seconds, 'capacity': int}}
+            self._rate_limit_state: Dict[str, Dict[str, Any]] = {}
+
         def register_limits(self, limit_configs: Dict[str, Dict[str, Any]]) -> None:
             """Register limit configurations.
 
             Args:
                 limit_configs: Dict mapping limit keys to their config
-                    Config contains: {'type': 'call'|'rate'|'resource', 'capacity': int, ...}
+                    Config contains: {'type': 'call'|'rate'|'resource', 'capacity': int, 'window_seconds': float, ...}
             """
             for key, config in limit_configs.items():
                 if key not in self._limits:
+                    limit_type = config.get("type", "call")
+                    capacity = config.get("capacity", 0)
+                    window_seconds = config.get("window_seconds", 60.0)
+
                     self._limits[key] = {
                         "current_usage": 0,
                         "history": [],
-                        "type": config.get("type", "call"),
-                        "capacity": config.get("capacity", 0),
+                        "type": limit_type,
+                        "capacity": capacity,
+                        "window_seconds": window_seconds,
                     }
-                    if config.get("type") == "resource":
-                        self._resource_capacity[key] = config.get("capacity", 0)
+
+                    if limit_type == "resource":
+                        self._resource_capacity[key] = capacity
                         self._resource_usage[key] = 0
+                    elif limit_type in ("rate", "call"):
+                        self._rate_limit_state[key] = {
+                            "history": [],
+                            "window_seconds": window_seconds,
+                            "capacity": capacity,
+                        }
 
         def _ensure_limit(self, limit_key: str) -> None:
             """Ensure limit tracking exists."""
@@ -528,12 +710,28 @@ try:
             Returns:
                 True if all can be acquired
             """
-            # Check resource limits
+            current_time = time.time()
+
             for key, amount in requested_amounts.items():
+                # Check resource limits
                 if key in self._resource_capacity:
                     current = self._resource_usage.get(key, 0)
                     if current + amount > self._resource_capacity[key]:
                         return False
+
+                # Check rate/call limits
+                elif key in self._rate_limit_state:
+                    state = self._rate_limit_state[key]
+                    window_start = current_time - state["window_seconds"]
+
+                    # Clean old history and calculate current usage
+                    active_history = [(ts, amt) for ts, amt in state["history"] if ts >= window_start]
+                    current_usage = sum(amt for ts, amt in active_history)
+
+                    # Check if we can accommodate the request
+                    if current_usage + amount > state["capacity"]:
+                        return False
+
             return True
 
         def acquire_all(self, requested_amounts: Dict[str, int]) -> bool:
@@ -551,15 +749,22 @@ try:
             if not self.can_acquire_all(requested_amounts):
                 return False
 
+            current_time = time.time()
+
             # Atomically acquire all
             for key, amount in requested_amounts.items():
                 self._ensure_limit(key)
                 self._limits[key]["current_usage"] += amount
-                self._limits[key]["history"].append((time.time(), amount))
+                self._limits[key]["history"].append((current_time, amount))
 
                 # Update resource usage if this is a resource limit
                 if key in self._resource_capacity:
                     self._resource_usage[key] = self._resource_usage.get(key, 0) + amount
+
+                # Update rate/call limit state
+                elif key in self._rate_limit_state:
+                    state = self._rate_limit_state[key]
+                    state["history"].append((current_time, amount))
 
             return True
 
@@ -594,6 +799,8 @@ try:
                 requested_amounts: Dict mapping limit keys to requested amounts
                 used_amounts: Dict mapping limit keys to used amounts
             """
+            current_time = time.time()
+
             for key, requested in requested_amounts.items():
                 used = used_amounts.get(key, requested)
                 self._ensure_limit(key)
@@ -604,6 +811,14 @@ try:
                 # Update resource usage if this is a resource limit
                 if key in self._resource_capacity:
                     self._resource_usage[key] = self._resource_usage.get(key, 0) - requested
+
+                # Clean up rate/call limit state history
+                elif key in self._rate_limit_state:
+                    state = self._rate_limit_state[key]
+                    window_start = current_time - state["window_seconds"]
+
+                    # Keep only entries within window
+                    state["history"] = [(ts, amt) for ts, amt in state["history"] if ts >= window_start]
 
         def get_stats(self, limit_key: str) -> Dict[str, Any]:
             """Get statistics for a limit."""
@@ -625,14 +840,14 @@ class RaySharedLimitSet(BaseLimitSet):
     Suitable for Ray workers.
     """
 
-    def __init__(self, limits: List[Limit]):
+    def __init__(self, limits: List[Limit], shared: bool = True):
         """Initialize Ray shared limit set.
 
         Args:
             limits: List of Limit instances
         """
-        super().__init__(limits)
-
+        assert shared is True
+        super().__init__(limits, shared=True)
         try:
             import ray
         except ImportError:
@@ -647,11 +862,22 @@ class RaySharedLimitSet(BaseLimitSet):
         limit_configs = {}
         for limit in limits:
             if isinstance(limit, ResourceLimit):
-                limit_configs[limit.key] = {"type": "resource", "capacity": limit.capacity}
+                limit_configs[limit.key] = {
+                    "type": "resource",
+                    "capacity": limit.capacity,
+                }
             elif isinstance(limit, CallLimit):
-                limit_configs[limit.key] = {"type": "call", "capacity": limit.capacity}
+                limit_configs[limit.key] = {
+                    "type": "call",
+                    "capacity": limit.capacity,
+                    "window_seconds": limit.window_seconds,
+                }
             elif isinstance(limit, RateLimit):
-                limit_configs[limit.key] = {"type": "rate", "capacity": limit.capacity}
+                limit_configs[limit.key] = {
+                    "type": "rate",
+                    "capacity": limit.capacity,
+                    "window_seconds": limit.window_seconds,
+                }
 
         ray.get(self._actor.register_limits.remote(limit_configs))
 
@@ -789,24 +1015,17 @@ def LimitSet(
     if isinstance(mode, str):
         mode = ExecutionMode(mode)
 
-    # Validate parameters
-    if not shared and mode != ExecutionMode.Sync:
-        raise ValueError(
-            f"Non-shared LimitSets must have mode='sync', got mode='{mode}'. "
-            f"Use shared=True to share limits across workers."
-        )
-
     # Select appropriate implementation
     if mode in (ExecutionMode.Sync, ExecutionMode.Asyncio, ExecutionMode.Threads):
-        return InMemorySharedLimitSet(limits=limits)
+        return InMemorySharedLimitSet(limits=limits, shared=shared)
     elif mode == ExecutionMode.Processes:
-        if not shared:
+        if shared is False:
             raise ValueError("Non-shared LimitSets cannot use mode='process'")
-        return MultiprocessSharedLimitSet(limits=limits)
+        return MultiprocessSharedLimitSet(limits=limits, shared=True)
     elif mode == ExecutionMode.Ray:
-        if not shared:
+        if shared is False:
             raise ValueError("Non-shared LimitSets cannot use mode='ray'")
-        return RaySharedLimitSet(limits=limits)
+        return RaySharedLimitSet(limits=limits, shared=True)
     else:
         raise ValueError(
             f"Unknown execution mode: '{mode}'. Valid modes: sync, asyncio, thread, process, ray"

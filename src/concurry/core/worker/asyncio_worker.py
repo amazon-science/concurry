@@ -8,7 +8,6 @@ from typing import Any, Dict
 
 from pydantic import PrivateAttr
 
-from ..config import ExecutionMode
 from ..future import ConcurrentFuture
 from .base_worker import WorkerProxy, _create_worker_wrapper, _unwrap_futures_in_args
 
@@ -169,11 +168,10 @@ class AsyncioWorkerProxy(WorkerProxy):
 
     async def _async_initialize(self):
         """Async initialization of the worker."""
-        # Process limits and create worker wrapper if needed
-        processed_limits = self._process_limits_for_worker(worker_mode=ExecutionMode.Asyncio)
-        if processed_limits is not None:
+        # Create worker wrapper with limits if needed (limits already processed by WorkerBuilder)
+        if self.limits is not None:
             # Create wrapper class that injects limits
-            worker_cls = _create_worker_wrapper(self.worker_cls, processed_limits)
+            worker_cls = _create_worker_wrapper(self.worker_cls, self.limits)
         else:
             worker_cls = self.worker_cls
 

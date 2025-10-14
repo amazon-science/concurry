@@ -334,7 +334,7 @@ class TestLimitSetSharedModes:
         assert isinstance(limits, InMemorySharedLimitSet)
 
         # Invalid: shared=False, mode="thread"
-        with pytest.raises(ValueError, match="Non-shared LimitSets must have mode='sync'"):
+        with pytest.raises(ValueError, match="Non-shared LimitSets cannot use mode='process'"):
             LimitSet(
                 limits=[
                     RateLimit(
@@ -345,7 +345,7 @@ class TestLimitSetSharedModes:
                     )
                 ],
                 shared=False,
-                mode="thread",
+                mode="process",
             )
 
     def test_limitset_shared_sync_mode(self):

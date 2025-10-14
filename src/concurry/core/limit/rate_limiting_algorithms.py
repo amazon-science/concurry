@@ -1,10 +1,11 @@
 """Rate limiting algorithms for resource protection."""
 
 import time
+from abc import ABC, abstractmethod
 from collections import deque
-from typing import Deque, List, NoReturn, Optional
+from typing import Deque, List, Optional
 
-from morphic import AutoEnum, Typed, auto
+from morphic import AutoEnum, auto
 
 
 class RateLimiterAlgorithm(AutoEnum):
@@ -17,38 +18,14 @@ class RateLimiterAlgorithm(AutoEnum):
     GCRA = auto()
 
 
-class RateLimiter(Typed):
-    """Base class for rate limiting implementations.
+class BaseRateLimiter(ABC):
+    """Abstract base class for rate limiting implementations.
 
     Provides a unified interface for different rate limiting algorithms.
+    All algorithm implementations should inherit from this class.
     """
 
-    algorithm: RateLimiterAlgorithm
-    max_rate: float  # Maximum rate (requests per second)
-    capacity: Optional[int] = None  # Capacity for burst handling
-
-    def post_initialize(self) -> NoReturn:
-        self._initialize_algorithm()
-
-    def _initialize_algorithm(self):
-        """Initialize the specific algorithm implementation."""
-        if self.algorithm == RateLimiterAlgorithm.TokenBucket:
-            self._impl = TokenBucketLimiter(
-                max_rate=self.max_rate, capacity=self.capacity or int(self.max_rate)
-            )
-        elif self.algorithm == RateLimiterAlgorithm.LeakyBucket:
-            self._impl = LeakyBucketLimiter(
-                max_rate=self.max_rate, capacity=self.capacity or int(self.max_rate * 2)
-            )
-        elif self.algorithm == RateLimiterAlgorithm.SlidingWindow:
-            self._impl = SlidingWindowLimiter(max_rate=self.max_rate, window_seconds=1.0)
-        elif self.algorithm == RateLimiterAlgorithm.FixedWindow:
-            self._impl = FixedWindowLimiter(max_rate=self.max_rate, window_seconds=1.0)
-        elif self.algorithm == RateLimiterAlgorithm.GCRA:
-            self._impl = GCRALimiter(max_rate=self.max_rate, capacity=self.capacity or int(self.max_rate))
-        else:
-            raise ValueError(f"Unknown algorithm: {self.algorithm}")
-
+    @abstractmethod
     def acquire(self, tokens: int = 1, timeout: Optional[float] = None) -> bool:
         """Acquire tokens from the rate limiter.
 
@@ -59,8 +36,9 @@ class RateLimiter(Typed):
         Returns:
             True if tokens were acquired, False if timeout
         """
-        return self._impl.acquire(tokens, timeout)
+        pass
 
+    @abstractmethod
     def try_acquire(self, tokens: int = 1) -> bool:
         """Try to acquire tokens without blocking.
 
@@ -70,14 +48,46 @@ class RateLimiter(Typed):
         Returns:
             True if tokens were acquired immediately
         """
-        return self._impl.try_acquire(tokens)
+        pass
 
+    @abstractmethod
+    def can_acquire(self, tokens: int = 1) -> bool:
+        """Check if tokens can be acquired without consuming them.
+
+        This is a non-consuming check used by LimitSet to validate
+        that all limits can be satisfied before atomically acquiring them.
+
+        Args:
+            tokens: Number of tokens to check
+
+        Returns:
+            True if tokens could be acquired
+        """
+        pass
+
+    @abstractmethod
     def get_stats(self) -> dict:
-        """Get current rate limiter statistics."""
-        return self._impl.get_stats()
+        """Get current rate limiter statistics.
+
+        Returns:
+            Dictionary containing algorithm-specific statistics
+        """
+        pass
+
+    @abstractmethod
+    def refund(self, tokens: int) -> None:
+        """Refund tokens back to the limiter.
+
+        This is used when actual usage is less than requested.
+        Not all algorithms support refunding.
+
+        Args:
+            tokens: Number of tokens to refund
+        """
+        pass
 
 
-class TokenBucketLimiter:
+class TokenBucketLimiter(BaseRateLimiter):
     """Token Bucket rate limiting algorithm.
 
     Tokens are added to a bucket at a fixed rate. Requests consume tokens.
@@ -107,6 +117,11 @@ class TokenBucketLimiter:
         tokens_to_add = elapsed * self.max_rate
         self.tokens = min(self.capacity, self.tokens + tokens_to_add)
         self.last_update = now
+
+    def can_acquire(self, tokens: int = 1) -> bool:
+        """Check if tokens can be acquired without consuming them."""
+        self._refill()
+        return self.tokens >= tokens
 
     def try_acquire(self, tokens: int = 1) -> bool:
         """Try to acquire tokens without blocking."""
@@ -153,8 +168,18 @@ class TokenBucketLimiter:
             "utilization": 1.0 - (self.tokens / self.capacity),
         }
 
+    def refund(self, tokens: int) -> None:
+        """Refund tokens back to the bucket.
 
-class LeakyBucketLimiter:
+        TokenBucket supports refunding unused tokens.
+
+        Args:
+            tokens: Number of tokens to refund
+        """
+        self.tokens = min(self.capacity, self.tokens + tokens)
+
+
+class LeakyBucketLimiter(BaseRateLimiter):
     """Leaky Bucket rate limiting algorithm.
 
     Requests are added to a queue and processed at a fixed rate.
@@ -187,6 +212,11 @@ class LeakyBucketLimiter:
             self.queue.popleft()
 
         self.last_leak = now
+
+    def can_acquire(self, tokens: int = 1) -> bool:
+        """Check if tokens can be acquired without consuming them."""
+        self._leak()
+        return len(self.queue) + tokens <= self.capacity
 
     def try_acquire(self, tokens: int = 1) -> bool:
         """Try to add to the queue."""
@@ -234,8 +264,20 @@ class LeakyBucketLimiter:
             "utilization": len(self.queue) / self.capacity if self.capacity > 0 else 0,
         }
 
+    def refund(self, tokens: int) -> None:
+        """Refund tokens (no-op for LeakyBucket).
 
-class SlidingWindowLimiter:
+        LeakyBucket doesn't support refunding as it uses a queue-based approach.
+        Once tokens are added to the queue, they count against the limit.
+
+        Args:
+            tokens: Number of tokens to refund (ignored)
+        """
+        # LeakyBucket doesn't support refunding
+        pass
+
+
+class SlidingWindowLimiter(BaseRateLimiter):
     """Sliding Window rate limiting algorithm.
 
     Maintains a rolling window of request timestamps.
@@ -259,6 +301,11 @@ class SlidingWindowLimiter:
         """Remove requests outside the current window."""
         cutoff_time = time.time() - self.window_seconds
         self.requests = [ts for ts in self.requests if ts > cutoff_time]
+
+    def can_acquire(self, tokens: int = 1) -> bool:
+        """Check if tokens can be acquired without consuming them."""
+        self._cleanup_old_requests()
+        return len(self.requests) + tokens <= self.max_rate
 
     def try_acquire(self, tokens: int = 1) -> bool:
         """Try to acquire without blocking."""
@@ -314,8 +361,20 @@ class SlidingWindowLimiter:
             "utilization": len(self.requests) / self.max_rate if self.max_rate > 0 else 0,
         }
 
+    def refund(self, tokens: int) -> None:
+        """Refund tokens (no-op for SlidingWindow).
 
-class FixedWindowLimiter:
+        SlidingWindow doesn't support refunding as it tracks timestamps.
+        Once a request is recorded, it counts against the limit.
+
+        Args:
+            tokens: Number of tokens to refund (ignored)
+        """
+        # SlidingWindow doesn't support refunding
+        pass
+
+
+class FixedWindowLimiter(BaseRateLimiter):
     """Fixed Window rate limiting algorithm.
 
     Counts requests in fixed time windows. Simple but can have edge case issues
@@ -342,6 +401,11 @@ class FixedWindowLimiter:
         if now - self.window_start >= self.window_seconds:
             self.window_start = now
             self.request_count = 0
+
+    def can_acquire(self, tokens: int = 1) -> bool:
+        """Check if tokens can be acquired without consuming them."""
+        self._check_window_reset()
+        return self.request_count + tokens <= self.max_rate
 
     def try_acquire(self, tokens: int = 1) -> bool:
         """Try to acquire without blocking."""
@@ -390,8 +454,20 @@ class FixedWindowLimiter:
             "utilization": self.request_count / self.max_rate if self.max_rate > 0 else 0,
         }
 
+    def refund(self, tokens: int) -> None:
+        """Refund tokens (no-op for FixedWindow).
 
-class GCRALimiter:
+        FixedWindow doesn't support refunding as it uses a counter approach.
+        Once requests are counted, they count against the limit.
+
+        Args:
+            tokens: Number of tokens to refund (ignored)
+        """
+        # FixedWindow doesn't support refunding
+        pass
+
+
+class GCRALimiter(BaseRateLimiter):
     """Generic Cell Rate Algorithm (GCRA) rate limiter.
 
     Also known as Virtual Scheduling algorithm. Tracks a theoretical arrival
@@ -419,6 +495,12 @@ class GCRALimiter:
 
         # Theoretical Arrival Time - tracks when next request should arrive
         self.tat = 0.0
+
+    def can_acquire(self, tokens: int = 1) -> bool:
+        """Check if tokens can be acquired without consuming them."""
+        now = time.time()
+        new_tat = max(self.tat, now) + (tokens * self.emission_interval)
+        return new_tat - now <= self.tau
 
     def try_acquire(self, tokens: int = 1) -> bool:
         """Try to acquire tokens without blocking."""
@@ -484,3 +566,57 @@ class GCRALimiter:
             "emission_interval": self.emission_interval,
             "utilization": 1.0 - (available / self.capacity) if self.capacity > 0 else 0,
         }
+
+    def refund(self, tokens: int) -> None:
+        """Refund tokens by adjusting TAT backwards.
+
+        GCRA supports refunding by moving the Theoretical Arrival Time backwards.
+
+        Args:
+            tokens: Number of tokens to refund
+        """
+        emission_interval = self.emission_interval
+        self.tat = max(time.time(), self.tat - (tokens * emission_interval))
+
+
+def RateLimiter(
+    algorithm: RateLimiterAlgorithm,
+    max_rate: float,
+    capacity: int,
+    window_seconds: Optional[float] = None,
+) -> BaseRateLimiter:
+    """Factory function to create the appropriate rate limiter.
+
+    Args:
+        algorithm: The rate limiting algorithm to use
+        max_rate: Maximum rate (requests per second)
+        capacity: Maximum capacity (burst size or window size)
+        window_seconds: Window duration in seconds (for window-based algorithms)
+
+    Returns:
+        BaseRateLimiter instance of the appropriate type
+
+    Raises:
+        ValueError: If algorithm is not recognized
+
+    Example:
+        ```python
+        limiter = RateLimiter(
+            algorithm=RateLimiterAlgorithm.TokenBucket,
+            max_rate=10,
+            capacity=20
+        )
+        ```
+    """
+    if algorithm == RateLimiterAlgorithm.TokenBucket:
+        return TokenBucketLimiter(max_rate=max_rate, capacity=capacity)
+    elif algorithm == RateLimiterAlgorithm.LeakyBucket:
+        return LeakyBucketLimiter(max_rate=max_rate, capacity=capacity)
+    elif algorithm == RateLimiterAlgorithm.SlidingWindow:
+        return SlidingWindowLimiter(max_rate=capacity, window_seconds=window_seconds or 1.0)
+    elif algorithm == RateLimiterAlgorithm.FixedWindow:
+        return FixedWindowLimiter(max_rate=capacity, window_seconds=window_seconds or 1.0)
+    elif algorithm == RateLimiterAlgorithm.GCRA:
+        return GCRALimiter(max_rate=max_rate, capacity=capacity)
+    else:
+        raise ValueError(f"Unknown algorithm: {algorithm}")

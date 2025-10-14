@@ -212,18 +212,10 @@ class BaseLimitSet(ABC):
                 limit._current_usage -= requested
 
             elif isinstance(limit, RateLimit):
-                # Refund unused tokens (algorithm-specific)
+                # Refund unused tokens using the BaseRateLimiter interface
                 if used < requested:
                     refund = requested - used
-                    from .rate_limiting_algorithms import GCRALimiter, TokenBucketLimiter
-
-                    if isinstance(limit._impl, TokenBucketLimiter):
-                        limit._impl.tokens = min(limit._impl.capacity, limit._impl.tokens + refund)
-                    elif isinstance(limit._impl, GCRALimiter):
-                        import time
-
-                        emission_interval = limit._impl.emission_interval
-                        limit._impl.tat = max(time.time(), limit._impl.tat - (refund * emission_interval))
+                    limit._impl.refund(tokens=refund)
 
     @abstractmethod
     def _release_resource(self, limit: ResourceLimit, amount: int) -> None:

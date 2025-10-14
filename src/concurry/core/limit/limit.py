@@ -42,14 +42,7 @@ from typing import ClassVar, Dict, NoReturn
 from morphic import Typed
 from pydantic import confloat, conint
 
-from .rate_limiting_algorithms import (
-    FixedWindowLimiter,
-    GCRALimiter,
-    LeakyBucketLimiter,
-    RateLimiterAlgorithm,
-    SlidingWindowLimiter,
-    TokenBucketLimiter,
-)
+from .rate_limiting_algorithms import RateLimiterAlgorithm, RateLimiter
 
 
 class Limit(Typed, ABC):
@@ -213,18 +206,13 @@ class RateLimit(Limit):
         # Convert max_rate from capacity per window to per second
         max_rate = self.capacity / self.window_seconds if self.window_seconds > 0 else 0
 
-        if self.algorithm == RateLimiterAlgorithm.TokenBucket:
-            self._impl = TokenBucketLimiter(max_rate=max_rate, capacity=self.capacity)
-        elif self.algorithm == RateLimiterAlgorithm.LeakyBucket:
-            self._impl = LeakyBucketLimiter(max_rate=max_rate, capacity=self.capacity)
-        elif self.algorithm == RateLimiterAlgorithm.SlidingWindow:
-            self._impl = SlidingWindowLimiter(max_rate=self.capacity, window_seconds=self.window_seconds)
-        elif self.algorithm == RateLimiterAlgorithm.FixedWindow:
-            self._impl = FixedWindowLimiter(max_rate=self.capacity, window_seconds=self.window_seconds)
-        elif self.algorithm == RateLimiterAlgorithm.GCRA:
-            self._impl = GCRALimiter(max_rate=max_rate, capacity=self.capacity)
-        else:
-            raise ValueError(f"Unknown algorithm: {self.algorithm}")
+        # Use factory to create the appropriate limiter
+        self._impl = RateLimiter(
+            algorithm=self.algorithm,
+            max_rate=max_rate,
+            capacity=self.capacity,
+            window_seconds=self.window_seconds,
+        )
 
     def can_acquire(self, requested: int) -> bool:
         """Check if tokens can be acquired without consuming them.
@@ -232,39 +220,7 @@ class RateLimit(Limit):
         Warning:
             This method is NOT thread-safe. Only call from within LimitSet.
         """
-        # Check if requested tokens are available without consuming them
-        # For TokenBucket/LeakyBucket: check current tokens
-        # For window-based: check current count
-        from .rate_limiting_algorithms import (
-            FixedWindowLimiter,
-            GCRALimiter,
-            LeakyBucketLimiter,
-            SlidingWindowLimiter,
-            TokenBucketLimiter,
-        )
-
-        if isinstance(self._impl, TokenBucketLimiter):
-            self._impl._refill()
-            return self._impl.tokens >= requested
-        elif isinstance(self._impl, LeakyBucketLimiter):
-            self._impl._leak()
-            return len(self._impl.queue) + requested <= self._impl.capacity
-        elif isinstance(self._impl, SlidingWindowLimiter):
-            self._impl._cleanup_old_requests()
-            return len(self._impl.requests) + requested <= self._impl.max_rate
-        elif isinstance(self._impl, FixedWindowLimiter):
-            self._impl._check_window_reset()
-            return self._impl.request_count + requested <= self._impl.max_rate
-        elif isinstance(self._impl, GCRALimiter):
-            # For GCRA, check if TAT (Theoretical Arrival Time) would be acceptable
-            import time
-
-            now = time.time()
-            new_tat = max(self._impl.tat, now) + (requested * self._impl.emission_interval)
-            return new_tat - now <= self._impl.tau
-        else:
-            # Fallback: try with 0 tokens (always succeeds)
-            return True
+        return self._impl.can_acquire(tokens=requested)
 
     def validate_usage(self, requested: int, used: int) -> None:
         """Validate that usage doesn't exceed requested."""

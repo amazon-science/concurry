@@ -7,15 +7,23 @@ across asyncio, threads, processes and distributed systems.
 
 # Core types
 from .core import (
-    BaseFuture,
-    SyncFuture,
-    ConcurrentFuture,
+    Acquisition,
     AsyncioFuture,
-    wrap_future,
+    BaseFuture,
+    CallLimit,
+    ConcurrentFuture,
     ExecutionMode,
+    Limit,
+    LimitSet,
+    LimitSetAcquisition,
+    RateLimit,
+    RateLimiterAlgorithm,
+    ResourceLimit,
+    SyncFuture,
     TaskWorker,
     Worker,
     worker,
+    wrap_future,
 )
 
 # Utilities
@@ -35,6 +43,16 @@ __all__ = [
     "TaskWorker",
     "Worker",
     "worker",
+    # Rate limiter
+    "RateLimiterAlgorithm",
+    # Limit types
+    "Limit",
+    "RateLimit",
+    "CallLimit",
+    "ResourceLimit",
+    "Acquisition",
+    "LimitSetAcquisition",
+    "LimitSet",
     # Utilities
     "ProgressBar",
 ]

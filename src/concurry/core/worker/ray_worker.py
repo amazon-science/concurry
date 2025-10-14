@@ -8,8 +8,9 @@ from typing import Any, Dict, Optional, Union
 from morphic.structs import map_collection
 from pydantic import PrivateAttr
 
+from ..config import ExecutionMode
 from ..future import RayFuture
-from .base_worker import WorkerProxy
+from .base_worker import WorkerProxy, _create_worker_wrapper
 
 # Note: Ray has native support for async methods in actors.
 # When you define an async method in a Ray actor and call it with .remote(),
@@ -226,13 +227,23 @@ class RayWorkerProxy(WorkerProxy):
         for key, value in self._options.items():
             actor_options[key] = value
 
+        # Process limits for worker
+        processed_limits = self._process_limits_for_worker(worker_mode=ExecutionMode.Ray)
+
+        # If limits are provided, create a wrapper class
+        if processed_limits is not None:
+            # Create a wrapper class that injects limits
+            worker_cls_to_use = _create_worker_wrapper(self.worker_cls, processed_limits)
+        else:
+            worker_cls_to_use = self.worker_cls
+
         # Create the Ray actor
         # Note: Ray 2.50+ doesn't accept ray.remote(**{}) with an empty dict
         # so we only pass options if the dict is not empty
         if actor_options:
-            ray_actor_cls = ray.remote(**actor_options)(self.worker_cls)
+            ray_actor_cls = ray.remote(**actor_options)(worker_cls_to_use)
         else:
-            ray_actor_cls = ray.remote(self.worker_cls)
+            ray_actor_cls = ray.remote(worker_cls_to_use)
 
         return ray_actor_cls.remote(*self.init_args, **self.init_kwargs)
 

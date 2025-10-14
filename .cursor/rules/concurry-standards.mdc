@@ -82,3 +82,20 @@ if value is not None:
 - Explain the "why" behind design decisions
 - Keep documentation (user-guide and docstrings) in sync with code changes
 - DO NOT ADD SEPARATE DEMO SCRIPTS OR DEMO MARKDOWN FILES. Add these examples to the testcases or documentation (user-guide and docstrings). Prefer to add edge-cases to testcases and typical use-case to documentation.
+
+## Testcases
+### Testcases with Ray
+When writing testcases that use a Ray cluster, always have use ray.init like this:
+```
+import morphic
+import concurry
+ray.init(
+    ignore_reinit_error=True,
+    num_cpus=4,
+    runtime_env={"py_modules": [concurry, morphic]},
+)
+```
+If you do not have this, the test will NOT run, since the necessary dependencies are not passed to it.
+
+### Executing testcases
+Whenever you run testcases for concurry, set a timeout of 5 minutes (300 seconds).

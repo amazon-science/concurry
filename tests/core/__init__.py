@@ -1,1 +1,1 @@
-"""Tests for concurry.core module.""" 
+"""Tests for concurry.core module."""

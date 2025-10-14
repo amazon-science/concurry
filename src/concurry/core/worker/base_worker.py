@@ -13,6 +13,45 @@ from ..future import BaseFuture
 T = TypeVar("T")
 
 
+def _create_worker_wrapper(worker_cls: Type, limits: Any) -> Type:
+    """Create a wrapper class that injects limits after worker initialization.
+
+    This wrapper dynamically inherits from the user's worker class and adds
+    a limits attribute after calling the parent's __init__. This avoids the
+    messiness of trying to set attributes on an already-instantiated object.
+
+    Args:
+        worker_cls: The original worker class
+        limits: LimitSet instance to inject
+
+    Returns:
+        Wrapper class that sets limits attribute
+
+    Example:
+        ```python
+        # Instead of:
+        worker = MyWorker(*args, **kwargs)
+        worker.limits = limits  # Messy attribute injection
+
+        # Use:
+        wrapper_cls = _create_worker_wrapper(MyWorker, limits)
+        worker = wrapper_cls(*args, **kwargs)
+        # worker.limits is already set
+        ```
+    """
+
+    class WorkerWithLimits(worker_cls):
+        def __init__(self, *args, **kwargs):
+            self.limits = limits
+            super().__init__(*args, **kwargs)
+
+    # Preserve original class name for debugging
+    WorkerWithLimits.__name__ = f"{worker_cls.__name__}_WithLimits"
+    WorkerWithLimits.__qualname__ = f"{worker_cls.__qualname__}_WithLimits"
+
+    return WorkerWithLimits
+
+
 def _unwrap_future_value(obj: Any) -> Any:
     """Unwrap a single future or return object as-is.
 
@@ -369,6 +408,66 @@ class Worker:
         worker1.stop()
         worker2.stop()
         ```
+
+    Resource Protection with Limits:
+        Workers support resource protection and rate limiting via the `limits` parameter.
+        Limits enable control over API rates, resource pools, and call frequency.
+
+        ```python
+        from concurry import Worker, LimitSet, RateLimit, CallLimit, ResourceLimit
+        from concurry import RateLimiterAlgorithm
+
+        # Define limits
+        limits = LimitSet(limits=[
+            CallLimit(window_seconds=60, capacity=100),  # 100 calls/min
+            RateLimit(
+                key="api_tokens",
+                window_seconds=60,
+                algorithm=RateLimiterAlgorithm.TokenBucket,
+                capacity=1000
+            ),
+            ResourceLimit(key="connections", capacity=10)
+        ])
+
+        class APIWorker(Worker):
+            def __init__(self, api_key: str):
+                self.api_key = api_key
+
+            def call_api(self, prompt: str):
+                # Acquire limits before operation
+                # CallLimit automatically acquired with default of 1
+                with self.limits.acquire(requested={"api_tokens": 100}) as acq:
+                    result = external_api_call(prompt)
+                    # Update with actual usage
+                    acq.update(usage={"api_tokens": result.tokens_used})
+                    return result.response
+
+        # Option 1: Share limits across workers
+        worker1 = APIWorker.options(mode="thread", limits=limits).init("key1")
+        worker2 = APIWorker.options(mode="thread", limits=limits).init("key2")
+        # Both workers share the 1000 token/min pool
+
+        # Option 2: Private limits per worker
+        limit_defs = [
+            RateLimit(key="tokens", window_seconds=60, capacity=1000)
+        ]
+        worker = APIWorker.options(mode="thread", limits=limit_defs).init("key")
+        # This worker has its own private 1000 token/min pool
+        ```
+
+        **Limit Types:**
+        - `CallLimit`: Count calls (usage always 1, no update needed)
+        - `RateLimit`: Token/bandwidth limiting (requires update() call)
+        - `ResourceLimit`: Semaphore-based resources (no update needed)
+
+        **Key Behaviors:**
+        - Passing `LimitSet`: Workers share the same limit pool
+        - Passing `List[Limit]`: Each worker gets private limits
+        - CallLimit/ResourceLimit auto-acquired with default of 1
+        - RateLimits must be explicitly specified in `requested` dict
+        - RateLimits require `update()` call (raises RuntimeError if missing)
+
+        See user guide for more: `/docs/user-guide/limits.md`
     """
 
     @classmethod
@@ -400,6 +499,10 @@ class Worker:
             unwrap_futures: If True (default), automatically unwrap BaseFuture arguments
                 by calling .result() on them before passing to worker methods. This enables
                 seamless composition of workers. Set to False to pass futures as-is.
+            limits: Resource protection and rate limiting (optional)
+                - Pass LimitSet: Workers share the same limit pool
+                - Pass List[Limit]: Each worker gets private limits
+                See Worker docstring "Resource Protection with Limits" section for details.
             **kwargs: Additional options passed to the worker implementation
                 - For ray: num_cpus, num_gpus, resources, etc.
                 - For process: mp_context (fork, spawn, forkserver)
@@ -594,6 +697,7 @@ class WorkerProxy(Typed, ABC):
     unwrap_futures: bool = True
     init_args: tuple = ()
     init_kwargs: dict = {}
+    limits: Optional[Any] = None  # LimitSet instance or list of Limit objects
 
     # Private attributes (defined with PrivateAttr, initialized in post_initialize)
     _stopped: bool = PrivateAttr(default=False)
@@ -609,6 +713,92 @@ class WorkerProxy(Typed, ABC):
 
         # Initialize method cache for performance
         self._method_cache = {}
+
+    def _process_limits_for_worker(self, worker_mode: ExecutionMode):
+        """Process limits parameter and return appropriate LimitSet for worker.
+
+        This method handles:
+        - Converting list of Limits to private LimitSet
+        - Validating shared LimitSets match worker mode
+        - Warning about non-shared LimitSets
+
+        Args:
+            worker_mode: Execution mode of the worker (ExecutionMode enum)
+
+        Returns:
+            LimitSet instance or None
+
+        Raises:
+            ValueError: If shared=False with non-sync mode, or if mode mismatch
+        """
+        if self.limits is None:
+            return None
+
+        # Import here to avoid circular imports
+        import warnings
+
+        from ..limit import Limit
+        from ..limit.limit_set import (
+            BaseLimitSet,
+            InMemorySharedLimitSet,
+            LimitSet,
+            MultiprocessSharedLimitSet,
+            RaySharedLimitSet,
+        )
+
+        # If it's a list of Limits, create a private LimitSet
+        if isinstance(self.limits, list):
+            # Check if all items are Limit instances
+            if len(self.limits) > 0 and all(isinstance(item, Limit) for item in self.limits):
+                # For Ray workers, we need to create a RaySharedLimitSet to avoid serialization issues
+                # Ray cannot serialize threading.Lock, so we can't use InMemorySharedLimitSet
+                if worker_mode == ExecutionMode.Ray:
+                    warnings.warn(
+                        "Creating private RaySharedLimitSet for Ray worker from list of Limits. "
+                        "For better performance with multiple Ray workers, consider creating a shared "
+                        "LimitSet: LimitSet(limits=[...], shared=True, mode='ray')",
+                        UserWarning,
+                        stacklevel=3,
+                    )
+                    return LimitSet(limits=self.limits, shared=True, mode=ExecutionMode.Ray)
+                else:
+                    # Create private LimitSet with mode="sync" (non-shared, thread-safe via Lock)
+                    return LimitSet(limits=self.limits, shared=False, mode=ExecutionMode.Sync)
+            else:
+                raise ValueError("limits parameter must be either a LimitSet or a list of Limit objects")
+
+        # If it's already a BaseLimitSet instance (from LimitSet factory), validate mode compatibility
+        elif isinstance(self.limits, BaseLimitSet):
+            # Validate compatibility
+            if isinstance(self.limits, InMemorySharedLimitSet):
+                # InMemory backend - compatible with sync, asyncio, thread
+                if worker_mode not in (ExecutionMode.Sync, ExecutionMode.Asyncio, ExecutionMode.Threads):
+                    raise ValueError(
+                        f"InMemorySharedLimitSet is not compatible with worker mode '{worker_mode}'. "
+                        f"Use mode='sync', 'asyncio', or 'thread' workers."
+                    )
+            elif isinstance(self.limits, MultiprocessSharedLimitSet):
+                # Multiprocess backend - only compatible with process
+                if worker_mode != ExecutionMode.Processes:
+                    raise ValueError(
+                        f"MultiprocessSharedLimitSet is not compatible with worker mode '{worker_mode}'. "
+                        f"Use mode='process' workers."
+                    )
+            elif isinstance(self.limits, RaySharedLimitSet):
+                # Ray backend - only compatible with ray
+                if worker_mode != ExecutionMode.Ray:
+                    raise ValueError(
+                        f"RaySharedLimitSet is not compatible with worker mode '{worker_mode}'. "
+                        f"Use mode='ray' workers."
+                    )
+
+            return self.limits
+
+        else:
+            raise ValueError(
+                f"limits parameter must be either a LimitSet or a list of Limit objects, "
+                f"got {type(self.limits).__name__}"
+            )
 
     def __getattr__(self, name: str) -> Callable:
         """Intercept method calls and dispatch them appropriately.

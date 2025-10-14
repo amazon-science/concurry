@@ -6,8 +6,9 @@ from typing import Any
 
 from pydantic import PrivateAttr
 
+from ..config import ExecutionMode
 from ..future import SyncFuture
-from .base_worker import WorkerProxy, _unwrap_futures_in_args
+from .base_worker import WorkerProxy, _create_worker_wrapper, _unwrap_futures_in_args
 
 
 def _invoke_function(fn, *args, **kwargs):
@@ -76,8 +77,16 @@ class SyncWorkerProxy(WorkerProxy):
         """Initialize private attributes after Typed validation."""
         super().post_initialize()
 
-        # Create the worker instance directly using public fields
-        self._worker = self.worker_cls(*self.init_args, **self.init_kwargs)
+        # Process limits and create worker wrapper if needed
+        processed_limits = self._process_limits_for_worker(worker_mode=ExecutionMode.Sync)
+        if processed_limits is not None:
+            # Create wrapper class that injects limits
+            worker_cls = _create_worker_wrapper(self.worker_cls, processed_limits)
+        else:
+            worker_cls = self.worker_cls
+
+        # Create the worker instance directly
+        self._worker = worker_cls(*self.init_args, **self.init_kwargs)
 
     def __getattr__(self, name: str):
         """Intercept method calls with caching for maximum performance.

@@ -12,6 +12,7 @@ from typing import Any, Literal
 import cloudpickle
 from pydantic import PrivateAttr
 
+from ..config import ExecutionMode
 from ..future import ConcurrentFuture
 from .base_worker import WorkerProxy, _unwrap_futures_in_args
 
@@ -34,13 +35,14 @@ def _invoke_function(fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
 
-def _process_worker_main(worker_cls_bytes, init_args, init_kwargs, command_queue, result_queue):
+def _process_worker_main(worker_cls_bytes, init_args, init_kwargs, limits, command_queue, result_queue):
     """Main function for the worker process.
 
     Args:
         worker_cls_bytes: Cloudpickle-serialized worker class
         init_args: Positional arguments for worker initialization
         init_kwargs: Keyword arguments for worker initialization
+        limits: LimitSet instance (or None)
         command_queue: Queue for receiving commands
         result_queue: Queue for sending results
     """
@@ -57,7 +59,16 @@ def _process_worker_main(worker_cls_bytes, init_args, init_kwargs, command_queue
 
             try:
                 if method_name == "__initialize__":
-                    worker = worker_cls(*init_args, **init_kwargs)
+                    # Create wrapper class if limits provided
+                    if limits is not None:
+                        # Need to import here since this is in a subprocess
+                        from .base_worker import _create_worker_wrapper
+
+                        actual_worker_cls = _create_worker_wrapper(worker_cls, limits)
+                    else:
+                        actual_worker_cls = worker_cls
+
+                    worker = actual_worker_cls(*init_args, **init_kwargs)
                     result_queue.put((request_id, "ok", None))
                     continue
 
@@ -174,6 +185,9 @@ class ProcessWorkerProxy(WorkerProxy):
         # Serialize the worker class
         worker_cls_bytes = cloudpickle.dumps(self.worker_cls)
 
+        # Process limits for worker
+        processed_limits = self._process_limits_for_worker(worker_mode=ExecutionMode.Processes)
+
         # Start worker process using public fields
         self._process = ctx.Process(
             target=_process_worker_main,
@@ -181,6 +195,7 @@ class ProcessWorkerProxy(WorkerProxy):
                 worker_cls_bytes,
                 self.init_args,
                 self.init_kwargs,
+                processed_limits,
                 self._command_queue,
                 self._result_queue,
             ),

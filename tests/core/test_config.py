@@ -456,7 +456,12 @@ class TestTypedFeatures:
 
         rate_limit_params = RateLimitConfig.param_names
         expected_rate_limit_params = {
-            "max_calls", "time_window", "algorithm", "burst_capacity", "refill_rate", "leak_rate"
+            "max_calls",
+            "time_window",
+            "algorithm",
+            "burst_capacity",
+            "refill_rate",
+            "leak_rate",
         }
         assert rate_limit_params == expected_rate_limit_params
 
@@ -470,7 +475,9 @@ class TestTypedFeatures:
         # Test RateLimitConfig defaults
         rate_limit_defaults = RateLimitConfig.param_default_values
         assert "algorithm" in rate_limit_defaults
-        assert rate_limit_defaults["algorithm"] == "SlidingWindow"  # JSON schema returns string representation
+        assert (
+            rate_limit_defaults["algorithm"] == "SlidingWindow"
+        )  # JSON schema returns string representation
 
         # Test RetryConfig defaults
         retry_defaults = RetryConfig.param_default_values
@@ -502,7 +509,7 @@ class TestTypedFeatures:
         config_with_nested = ExecutorConfig.of(
             mode="threads",
             max_workers=4,
-            rate_limit={"max_calls": 50, "time_window": 30.0, "algorithm": "sliding"}
+            rate_limit={"max_calls": 50, "time_window": 30.0, "algorithm": "sliding"},
         )
         assert config_with_nested.rate_limit.max_calls == 50
         assert config_with_nested.rate_limit.algorithm == RateLimitAlgorithm.SlidingWindow
@@ -544,6 +551,7 @@ class TestTypedFeatures:
 
         # Should be valid JSON
         import json
+
         parsed = json.loads(json_str)
         assert parsed["max_calls"] == 100
         assert parsed["time_window"] == 60.0
@@ -574,8 +582,7 @@ class TestTypedFeatures:
 
         # Dict to nested object conversion
         config = ExecutorConfig(
-            mode="auto",
-            rate_limit={"max_calls": "100", "time_window": "60.0", "algorithm": "sliding"}
+            mode="auto", rate_limit={"max_calls": "100", "time_window": "60.0", "algorithm": "sliding"}
         )
         assert isinstance(config.rate_limit, RateLimitConfig)
         assert config.rate_limit.max_calls == 100

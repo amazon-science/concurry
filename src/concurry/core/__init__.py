@@ -1,18 +1,28 @@
 """Core functionality for concurry."""
 
-from .future import (
-    BaseFuture,
-    SyncFuture,
-    ConcurrentFuture,
-    AsyncioFuture,
-    wrap_future,
-)
 from .config import (
     ExecutionMode,
+    ExecutorConfig,
     RateLimitAlgorithm,
     RateLimitConfig,
     RetryConfig,
-    ExecutorConfig,
+)
+from .future import (
+    AsyncioFuture,
+    BaseFuture,
+    ConcurrentFuture,
+    SyncFuture,
+    wrap_future,
+)
+from .limit import (
+    Acquisition,
+    CallLimit,
+    Limit,
+    LimitSet,
+    LimitSetAcquisition,
+    RateLimit,
+    RateLimiterAlgorithm,
+    ResourceLimit,
 )
 from .worker import TaskWorker, Worker, worker
 
@@ -33,6 +43,16 @@ __all__ = [
     "TaskWorker",
     "Worker",
     "worker",
+    # Rate limiter
+    "RateLimiterAlgorithm",
+    # Limit types
+    "Limit",
+    "RateLimit",
+    "CallLimit",
+    "ResourceLimit",
+    "Acquisition",
+    "LimitSetAcquisition",
+    "LimitSet",
 ]
 
 # Conditionally export RayFuture if Ray is installed

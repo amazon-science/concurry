@@ -6,10 +6,8 @@ of the same execution mode, and that limits are enforced correctly.
 
 import time
 
-import morphic
 import pytest
 
-import concurry
 from concurry import Worker
 from concurry.core.limit import (
     CallLimit,
@@ -270,14 +268,7 @@ class TestRayWorkerLimits:
     def test_shared_limitset_across_ray_workers(self):
         """Test that shared RaySharedLimitSet works across Ray workers."""
         pytest.importorskip("ray")
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
+        # Ray is initialized by conftest.py initialize_ray fixture
 
         class Counter(Worker):
             def __init__(self):
@@ -371,14 +362,7 @@ class TestMixedLimitTypes:
     def test_worker_with_call_and_rate_limits_ray(self):
         """Test Ray worker with both CallLimit and RateLimit."""
         pytest.importorskip("ray")
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
+        # Ray is initialized by conftest.py initialize_ray fixture
 
         class APIWorker(Worker):
             def __init__(self):

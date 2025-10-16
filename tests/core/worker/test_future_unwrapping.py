@@ -3,10 +3,8 @@
 import time
 from typing import Any, Dict, List
 
-import morphic
 import pytest
 
-import concurry
 from concurry.core.future import BaseFuture
 from concurry.core.worker import Worker
 from concurry.utils import _IS_RAY_INSTALLED
@@ -75,29 +73,7 @@ class FutureAwareWorker(Worker):
         return type(obj).__name__
 
 
-# Test modes to parametrize
-WORKER_MODES = ["sync", "thread", "process", "asyncio"]
-
-# Add Ray if it's installed
-if _IS_RAY_INSTALLED:
-    WORKER_MODES.append("ray")
-
-
-@pytest.fixture(params=WORKER_MODES)
-def worker_mode(request):
-    """Fixture providing different worker modes."""
-    # Initialize Ray if needed
-    if request.param == "ray":
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
-
-    yield request.param
+# Worker mode fixture and cleanup are provided by tests/conftest.py
 
 
 class TestBasicFutureUnwrapping:
@@ -378,15 +354,7 @@ class TestRayZeroCopyOptimization:
 
     def test_ray_to_ray_future_passing(self):
         """Test that Ray futures can be passed between Ray workers."""
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
-
+        # Ray is initialized by conftest.py initialize_ray fixture
         producer = SimpleWorker.options(mode="ray").init(value=100)
         consumer = SimpleWorker.options(mode="ray").init(value=0)
 
@@ -403,15 +371,7 @@ class TestRayZeroCopyOptimization:
 
     def test_ray_nested_futures(self):
         """Test Ray zero-copy with nested futures."""
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
-
+        # Ray is initialized by conftest.py initialize_ray fixture
         producer = SimpleWorker.options(mode="ray").init(value=10)
         consumer = NestedDataWorker.options(mode="ray").init()
 
@@ -431,15 +391,7 @@ class TestRayZeroCopyOptimization:
 
     def test_cross_worker_ray_to_process(self):
         """Test passing Ray future to process worker (should materialize)."""
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
-
+        # Ray is initialized by conftest.py initialize_ray fixture
         producer = SimpleWorker.options(mode="ray").init(value=100)
         consumer = SimpleWorker.options(mode="process").init(value=0)
 

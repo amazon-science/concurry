@@ -2,29 +2,14 @@
 
 import time
 
-import morphic
 import pytest
 
-import concurry
 from concurry import CallLimit, Worker
 
-# Test modes: thread, process, ray (skip sync/asyncio as they don't support pools)
-POOL_MODES = ["thread", "process"]
+# Import POOL_MODES from conftest for pool-related tests
+from tests.conftest import POOL_MODES
 
-# Add ray if available and initialize it
-try:
-    import ray
-
-    POOL_MODES.append("ray")
-    # Initialize Ray for tests
-    if not ray.is_initialized():
-        ray.init(
-            ignore_reinit_error=True,
-            num_cpus=4,
-            runtime_env={"py_modules": [concurry, morphic]},
-        )
-except ImportError:
-    pass
+# Ray initialization is handled by conftest.py initialize_ray fixture
 
 
 class SimpleWorker(Worker):
@@ -268,17 +253,9 @@ class TestSharedLimitState:
         20-capacity limit (80 total). With the fix, all workers share
         a single 20-capacity limit.
         """
+
         # Initialize ray if needed
-        if mode == "ray":
-            import ray
-
-            if not ray.is_initialized():
-                ray.init(
-                    ignore_reinit_error=True,
-                    num_cpus=4,
-                    runtime_env={"py_modules": [concurry, morphic]},
-                )
-
+        # Ray is initialized by conftest.py initialize_ray fixture
         class Counter(Worker):
             def __init__(self, count: int = 0):
                 self.count = count
@@ -316,17 +293,9 @@ class TestSharedLimitState:
     @pytest.mark.parametrize("mode", POOL_MODES)
     def test_single_worker_with_limits_baseline(self, mode):
         """Baseline test: single worker with limits should enforce limit correctly."""
+
         # Initialize ray if needed
-        if mode == "ray":
-            import ray
-
-            if not ray.is_initialized():
-                ray.init(
-                    ignore_reinit_error=True,
-                    num_cpus=4,
-                    runtime_env={"py_modules": [concurry, morphic]},
-                )
-
+        # Ray is initialized by conftest.py initialize_ray fixture
         class Counter(Worker):
             def __init__(self, count: int = 0):
                 self.count = count

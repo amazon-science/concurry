@@ -1,9 +1,7 @@
 """Tests for Worker integration with Limits."""
 
-import morphic
 import pytest
 
-import concurry
 from concurry import (
     CallLimit,
     LimitSet,
@@ -12,31 +10,8 @@ from concurry import (
     ResourceLimit,
     Worker,
 )
-from concurry.utils import _IS_RAY_INSTALLED
 
-# Parametrize modes to test
-WORKER_MODES = ["sync", "thread", "process", "asyncio"]
-
-# Add Ray if it's installed
-if _IS_RAY_INSTALLED:
-    WORKER_MODES.append("ray")
-
-
-@pytest.fixture(params=WORKER_MODES)
-def worker_mode(request):
-    """Fixture providing different worker modes."""
-    # Initialize Ray if needed
-    if request.param == "ray":
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
-
-    yield request.param
+# Worker mode fixture and cleanup are provided by tests/conftest.py
 
 
 class TestWorkerLimits:

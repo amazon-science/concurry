@@ -1,9 +1,7 @@
 """Tests for load balancing algorithms."""
 
-import morphic
 import pytest
 
-import concurry
 from concurry.core.config import LoadBalancingAlgorithm
 from concurry.core.worker.load_balancing import (
     BaseLoadBalancer,
@@ -13,6 +11,9 @@ from concurry.core.worker.load_balancing import (
     RandomBalancer,
     RoundRobinBalancer,
 )
+
+# Import POOL_MODES from conftest for pool-related tests
+from tests.conftest import POOL_MODES
 
 
 class TestRoundRobinBalancer:
@@ -304,33 +305,13 @@ class TestThreadSafety:
 class TestLoadBalancingIntegration:
     """Integration tests for load balancing with worker pools across execution modes."""
 
-    # Test modes: thread, process, ray (skip sync/asyncio as they don't support pools)
-    POOL_MODES = ["thread", "process"]
-
-    try:
-        import ray
-
-        POOL_MODES.append("ray")
-    except ImportError:
-        pass
-
     @pytest.mark.parametrize("mode", POOL_MODES)
     @pytest.mark.parametrize("algorithm", ["round_robin", "active", "total", "random"])
     def test_load_balancing_with_worker_pools(self, mode, algorithm):
         """Test that all load balancing algorithms work with worker pools across modes."""
         from concurry import Worker
 
-        # Initialize ray if needed
-        if mode == "ray":
-            import ray
-
-            if not ray.is_initialized():
-                ray.init(
-                    ignore_reinit_error=True,
-                    num_cpus=4,
-                    runtime_env={"py_modules": [concurry, morphic]},
-                )
-
+        # Ray is initialized by conftest.py initialize_ray fixture
         class SimpleWorker(Worker):
             def __init__(self):
                 self.call_count = 0

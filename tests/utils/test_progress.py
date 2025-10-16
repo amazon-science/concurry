@@ -1,35 +1,12 @@
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-import morphic
 import pytest
 
-import concurry
 from concurry.utils.frameworks import _IS_RAY_INSTALLED, RayContext, ray_context
 from concurry.utils.progress import ProgressBar
 
-
-@pytest.fixture(scope="module", autouse=True)
-def ray_cluster():
-    """Initialize Ray cluster for all tests and cleanup afterward."""
-    if not _IS_RAY_INSTALLED:
-        pytest.skip("Ray is not installed")
-
-    # Initialize Ray if not already initialized
-    import ray
-
-    if not ray.is_initialized():
-        ray.init(
-            ignore_reinit_error=True,
-            num_cpus=4,
-            runtime_env={"py_modules": [concurry, morphic]},
-        )
-
-    yield
-
-    # Cleanup Ray after all tests
-    if ray.is_initialized():
-        ray.shutdown()
+# Ray initialization and cleanup are handled by tests/conftest.py
 
 
 def test_basic_progress_bar():

@@ -4,12 +4,13 @@ import asyncio
 import time
 from typing import List
 
-import morphic
 import pytest
 
-import concurry
 from concurry.core.worker import TaskWorker, Worker, worker
 from concurry.utils import _IS_RAY_INSTALLED
+
+# Import WORKER_MODES from conftest for tests that need it directly
+from tests.conftest import WORKER_MODES
 
 
 # Test worker classes
@@ -75,32 +76,7 @@ class StatefulWorker(Worker):
         return self.history.copy()
 
 
-# Parametrize modes to test
-WORKER_MODES = ["sync", "thread", "process", "asyncio"]
-
-# Add Ray if it's installed
-if _IS_RAY_INSTALLED:
-    WORKER_MODES.append("ray")
-
-
-@pytest.fixture(params=WORKER_MODES)
-def worker_mode(request):
-    """Fixture providing different worker modes."""
-    # Initialize Ray if needed
-    if request.param == "ray":
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
-
-    yield request.param
-
-    # Note: We don't shutdown Ray between tests as it's expensive and causes issues
-    # Ray will be shut down when the test process ends
+# Worker mode fixture and cleanup are provided by tests/conftest.py
 
 
 class TestWorkerBasics:
@@ -628,6 +604,7 @@ class TestTaskWorkerSubmit:
         modes = WORKER_MODES  # Use same modes as other tests (includes Ray if installed)
 
         for mode in modes:
+            # Ray is initialized by conftest.py initialize_ray fixture
             w = TaskWorker.options(mode=mode).init()
             result = w.submit(lambda x: x * 2, 5).result(timeout=5)
             assert result == 10
@@ -644,15 +621,7 @@ class TestRayWorker:
 
     def test_ray_worker_with_resources(self):
         """Test Ray worker with resource specifications."""
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
-
+        # Ray is initialized by conftest.py initialize_ray fixture
         w = SimpleWorker.options(mode="ray", actor_options={"num_cpus": 1, "num_gpus": 0}).init(10)
 
         result = w.add(5).result(timeout=5)

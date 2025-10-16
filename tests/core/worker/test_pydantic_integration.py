@@ -29,79 +29,14 @@ field initialization in `__init__` instead of inheriting from Typed/BaseModel.
 import asyncio
 from typing import List, Optional
 
-import morphic
 import pytest
 from morphic import Typed, validate
 from pydantic import BaseModel, Field, ValidationError, validate_call
 
-import concurry
 from concurry import CallLimit, RateLimit, RateLimiterAlgorithm, ResourceLimit, Worker
 from concurry.utils import _IS_RAY_INSTALLED
 
-# Test modes
-WORKER_MODES = ["sync", "thread", "process", "asyncio"]
-
-if _IS_RAY_INSTALLED:
-    WORKER_MODES.append("ray")
-
-
-@pytest.fixture(params=WORKER_MODES)
-def worker_mode(request):
-    """Fixture providing different worker modes."""
-    if request.param == "ray":
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
-
-    yield request.param
-
-
-@pytest.fixture(scope="session", autouse=True)
-def cleanup_all():
-    """Session-level fixture to ensure all resources are cleaned up after tests."""
-    yield
-
-    # Force cleanup of any remaining processes
-    import gc
-    import multiprocessing
-    import time
-
-    # Force garbage collection to clean up any remaining workers
-    gc.collect()
-
-    # Give a brief moment for cleanup to complete
-    time.sleep(0.2)
-
-    # Terminate any active multiprocessing children
-    try:
-        active_children = multiprocessing.active_children()
-        for child in active_children:
-            try:
-                child.terminate()
-                child.join(timeout=1.0)
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # Shutdown Ray after all tests complete
-    if _IS_RAY_INSTALLED:
-        try:
-            import ray
-
-            if ray.is_initialized():
-                ray.shutdown()
-        except Exception:
-            pass  # Ignore shutdown errors
-
-    # Force another garbage collection after Ray shutdown
-    gc.collect()
-    time.sleep(0.2)
+# Worker mode fixture and cleanup are provided by tests/conftest.py
 
 
 class TestWorkerProxyTypedValidation:
@@ -789,15 +724,7 @@ class TestModelWorkerAdvanced:
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
     def test_typed_worker_serialization_ray_mode(self):
         """Test that Typed worker raises ValueError in Ray mode."""
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
-
+        # Ray is initialized by conftest.py initialize_ray fixture
         # Should raise ValueError because Typed workers are not compatible with Ray
         with pytest.raises(ValueError, match="Cannot create Ray worker with Pydantic-based class"):
             TypedWorkerSimple.options(mode="ray", actor_options={"num_cpus": 0.1}).init(
@@ -816,15 +743,7 @@ class TestModelWorkerAdvanced:
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
     def test_pydantic_worker_serialization_ray_mode(self):
         """Test that Pydantic worker raises ValueError in Ray mode."""
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
-
+        # Ray is initialized by conftest.py initialize_ray fixture
         # Should raise ValueError because Pydantic workers are not compatible with Ray
         with pytest.raises(ValueError, match="Cannot create Ray worker with Pydantic-based class"):
             PydanticWorkerSimple.options(mode="ray", actor_options={"num_cpus": 0.1}).init(
@@ -909,30 +828,14 @@ class TestRayIncompatibility:
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
     def test_typed_worker_ray_mode_raises_error(self):
         """Test that creating Typed worker in Ray mode raises ValueError."""
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
-
+        # Ray is initialized by conftest.py initialize_ray fixture
         with pytest.raises(ValueError, match="Cannot create Ray worker with Pydantic-based class"):
             TypedWorkerSimple.options(mode="ray", actor_options={"num_cpus": 0.1}).init(name="test", value=10)
 
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
     def test_pydantic_worker_ray_mode_raises_error(self):
         """Test that creating Pydantic worker in Ray mode raises ValueError."""
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
-
+        # Ray is initialized by conftest.py initialize_ray fixture
         with pytest.raises(ValueError, match="Cannot create Ray worker with Pydantic-based class"):
             PydanticWorkerSimple.options(mode="ray", actor_options={"num_cpus": 0.1}).init(
                 name="test", value=10
@@ -941,15 +844,7 @@ class TestRayIncompatibility:
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
     def test_typed_worker_ray_pool_raises_error(self):
         """Test that creating Typed worker pool in Ray mode raises ValueError."""
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
-
+        # Ray is initialized by conftest.py initialize_ray fixture
         with pytest.raises(ValueError, match="Cannot create Ray worker with Pydantic-based class"):
             TypedWorkerSimple.options(mode="ray", max_workers=2, actor_options={"num_cpus": 0.1}).init(
                 name="test", value=10
@@ -958,15 +853,7 @@ class TestRayIncompatibility:
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
     def test_pydantic_worker_ray_pool_raises_error(self):
         """Test that creating Pydantic worker pool in Ray mode raises ValueError."""
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
-
+        # Ray is initialized by conftest.py initialize_ray fixture
         with pytest.raises(ValueError, match="Cannot create Ray worker with Pydantic-based class"):
             PydanticWorkerSimple.options(mode="ray", max_workers=2, actor_options={"num_cpus": 0.1}).init(
                 name="test", value=10
@@ -975,15 +862,7 @@ class TestRayIncompatibility:
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
     def test_typed_worker_thread_mode_warns_about_ray(self):
         """Test that creating Typed worker in thread mode warns about Ray incompatibility."""
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
-
+        # Ray is initialized by conftest.py initialize_ray fixture
         # Should warn but not raise
         with pytest.warns(UserWarning, match="will NOT be compatible with Ray mode"):
             worker = TypedWorkerSimple.options(mode="thread").init(name="test", value=10)
@@ -994,15 +873,7 @@ class TestRayIncompatibility:
         if not _IS_RAY_INSTALLED:
             pytest.skip("Ray not installed")
 
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
-
+        # Ray is initialized by conftest.py initialize_ray fixture
         class RegularWorker(Worker):
             def __init__(self, value: int):
                 self.value = value

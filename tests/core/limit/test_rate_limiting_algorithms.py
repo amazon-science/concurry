@@ -2,10 +2,8 @@
 
 import time
 
-import morphic
 import pytest
 
-import concurry
 from concurry import Worker
 from concurry.core.limit import (
     CallLimit,
@@ -723,14 +721,7 @@ class TestRateLimitingAlgorithms:
     def test_token_bucket_rate_limiting_ray(self):
         """Test TokenBucket algorithm on Ray workers."""
         pytest.importorskip("ray")
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
+        # Ray is initialized by conftest.py initialize_ray fixture
 
         class Counter(Worker):
             def __init__(self):
@@ -798,14 +789,7 @@ class TestRateLimitingAlgorithms:
     def test_leaky_bucket_rate_limiting_ray(self):
         """Test LeakyBucket algorithm on Ray workers."""
         pytest.importorskip("ray")
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
+        # Ray is initialized by conftest.py initialize_ray fixture
 
         class Counter(Worker):
             def __init__(self):
@@ -873,14 +857,7 @@ class TestRateLimitingAlgorithms:
     def test_sliding_window_rate_limiting_ray(self):
         """Test SlidingWindow algorithm on Ray workers."""
         pytest.importorskip("ray")
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
+        # Ray is initialized by conftest.py initialize_ray fixture
 
         class Counter(Worker):
             def __init__(self):
@@ -948,14 +925,7 @@ class TestRateLimitingAlgorithms:
     def test_fixed_window_rate_limiting_ray(self):
         """Test FixedWindow algorithm on Ray workers."""
         pytest.importorskip("ray")
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
+        # Ray is initialized by conftest.py initialize_ray fixture
 
         class Counter(Worker):
             def __init__(self):
@@ -1024,14 +994,7 @@ class TestRateLimitingAlgorithms:
     def test_gcra_rate_limiting_ray(self):
         """Test GCRA algorithm on Ray workers."""
         pytest.importorskip("ray")
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(
-                ignore_reinit_error=True,
-                num_cpus=4,
-                runtime_env={"py_modules": [concurry, morphic]},
-            )
+        # Ray is initialized by conftest.py initialize_ray fixture
 
         class Counter(Worker):
             def __init__(self):

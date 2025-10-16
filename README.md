@@ -5,11 +5,11 @@
 </p>
 
 <p align="center">
-  <a href="https://concurry.readthedocs.io/"><img src="https://img.shields.io/badge/docs-latest-blue.svg" alt="Documentation"></a>
+  <a href="https://amazon-science.github.io/concurry/"><img src="https://img.shields.io/badge/docs-latest-blue.svg" alt="Documentation"></a>
   <a href="https://pypi.org/project/concurry/"><img src="https://img.shields.io/pypi/v/concurry.svg" alt="PyPI Version"></a>
   <a href="https://pypi.org/project/concurry/"><img src="https://img.shields.io/pypi/pyversions/concurry.svg" alt="Python Versions"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License"></a>
-  <a href="https://github.com/adivekar/concurry/actions"><img src="https://img.shields.io/github/actions/workflow/status/adivekar/concurry/tests.yml?branch=main" alt="Build Status"></a>
+  <a href="https://github.com/amazon-science/concurry/actions"><img src="https://img.shields.io/github/actions/workflow/status/amazon-science/concurry/tests.yml?branch=main" alt="Build Status"></a>
 </p>
 
 **A unified, delightful Python concurrency library** that makes parallel and distributed computing feel like writing sequential code. Built on the actor model, concurry provides workers, pools, rate limiting, retries, and seamless integration with Ray for distributed execution.
@@ -491,15 +491,15 @@ pool = DatabaseWorker.options(
 
 ## 📚 Documentation
 
-- **[User Guide](https://concurry.readthedocs.io/latest/user-guide/)** - Comprehensive tutorials and examples
-  - [Workers](https://concurry.readthedocs.io/latest/user-guide/workers/) - Actor-based workers
-  - [Worker Pools](https://concurry.readthedocs.io/latest/user-guide/pools/) - Load balancing and pooling
-  - [Limits](https://concurry.readthedocs.io/latest/user-guide/limits/) - Rate limiting and resource management
-  - [Retries](https://concurry.readthedocs.io/latest/user-guide/retries/) - Retry mechanisms
-  - [Futures](https://concurry.readthedocs.io/latest/user-guide/futures/) - Unified future interface
-  - [Progress](https://concurry.readthedocs.io/latest/user-guide/progress/) - Progress tracking
-- **[API Reference](https://concurry.readthedocs.io/latest/api/)** - Detailed API documentation
-- **[Examples](https://concurry.readthedocs.io/latest/examples/)** - Real-world usage patterns
+- **[User Guide](https://amazon-science.github.io/concurry/user-guide/getting-started/)** - Comprehensive tutorials and examples
+  - [Workers](https://amazon-science.github.io/concurry/user-guide/workers/) - Actor-based workers
+  - [Worker Pools](https://amazon-science.github.io/concurry/user-guide/pools/) - Load balancing and pooling
+  - [Limits](https://amazon-science.github.io/concurry/user-guide/limits/) - Rate limiting and resource management
+  - [Retries](https://amazon-science.github.io/concurry/user-guide/retries/) - Retry mechanisms
+  - [Futures](https://amazon-science.github.io/concurry/user-guide/futures/) - Unified future interface
+  - [Progress](https://amazon-science.github.io/concurry/user-guide/progress/) - Progress tracking
+- **[API Reference](https://amazon-science.github.io/concurry/api/)** - Detailed API documentation
+- **[Examples](https://amazon-science.github.io/concurry/examples/)** - Real-world usage patterns
 - **[Contributing](CONTRIBUTING.md)** - How to contribute
 
 ---
@@ -535,5 +535,5 @@ This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENS
 ---
 
 <p align="center">
-  <strong>Made with ❤️ by <a href="https://github.com/adivekar">Abhishek Divekar</a></strong>
+  <strong>Made with ❤️ by the <a href="https://github.com/amazon-science">Amazon Science</a> team</strong>
 </p>

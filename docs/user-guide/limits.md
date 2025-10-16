@@ -816,6 +816,213 @@ except TimeoutError:
     pass
 ```
 
+## Integration with Retry Mechanisms
+
+Limits work seamlessly with Concurry's retry mechanism. When a method is retried, limits are automatically released between attempts to prevent deadlocks and ensure fair resource usage.
+
+### Automatic Limit Release on Retry
+
+When using limits with retry configuration, the system automatically:
+
+1. Acquires limits before method execution
+2. If method fails and should retry:
+   - Releases all acquired limits
+   - Waits for retry delay
+   - Reacquires limits for next attempt
+3. Releases limits after final success or failure
+
+```python
+from concurry import Worker, ResourceLimit
+
+class DatabaseWorker(Worker):
+    def query(self, sql: str) -> list:
+        # Acquire database connection
+        with self.limits.acquire(requested={"connections": 1}) as acq:
+            result = execute_query(sql)
+            acq.update(usage={"connections": 1})
+            return result
+
+worker = DatabaseWorker.options(
+    mode="thread",
+    num_retries=3,
+    retry_on=[DatabaseError],
+    limits=[ResourceLimit(key="connections", capacity=5)]
+).init()
+
+# If query fails:
+# - Connection is automatically released
+# - Wait for retry delay
+# - Connection is reacquired for retry
+# - No deadlocks!
+```
+
+### Rate Limits with Retry
+
+Rate limits are properly managed across retries:
+
+```python
+from concurry import RateLimit
+
+class APIWorker(Worker):
+    def call_api(self, endpoint: str) -> dict:
+        with self.limits.acquire(requested={"requests": 1}) as acq:
+            response = requests.get(f"{self.base_url}/{endpoint}")
+            acq.update(usage={"requests": 1})
+            return response.json()
+
+worker = APIWorker.options(
+    mode="thread",
+    num_retries=5,
+    retry_algorithm="exponential",
+    limits=[RateLimit(key="requests", window_seconds=60, capacity=100)]
+).init()
+
+# Each retry attempt counts as a separate request
+# Limits are released between attempts
+# Total budget is respected across all attempts
+```
+
+### Shared Limits with Retry
+
+When using shared limits across a pool, retries coordinate properly:
+
+```python
+from concurry import LimitSet, ResourceLimit
+
+# Create shared limit
+shared_limits = LimitSet(
+    limits=[ResourceLimit(key="db_connections", capacity=10)],
+    shared=True,
+    mode="thread"
+)
+
+# Pool with shared limits and retry
+pool = DatabaseWorker.options(
+    mode="thread",
+    max_workers=20,  # 20 workers share 10 connections
+    num_retries=3,
+    retry_on=[DatabaseError],
+    limits=shared_limits
+).init()
+
+# Benefits:
+# - Each worker's retries properly release/acquire shared limits
+# - No starvation - limits are freed between attempts
+# - Fair resource distribution across all workers
+```
+
+### Call Limits with Retry
+
+`CallLimit` automatically tracks retry attempts:
+
+```python
+from concurry import CallLimit
+
+worker = MyWorker.options(
+    mode="thread",
+    num_retries=3,
+    limits=[CallLimit(window_seconds=1, capacity=10)]
+).init()
+
+# CallLimit counts each attempt (initial + retries)
+# Each retry attempt is a separate "call" for limit purposes
+# Automatically managed - no manual update needed
+```
+
+### Best Practices for Limits with Retry
+
+**1. Size Limits for Worst-Case Retry Scenarios**
+
+```python
+# If each request can retry 3 times, and you have 10 workers:
+# Worst case: 10 * (1 + 3) = 40 total attempts
+
+# Size rate limits accordingly
+worker = MyWorker.options(
+    mode="thread",
+    max_workers=10,
+    num_retries=3,
+    limits=[RateLimit(
+        key="requests",
+        window_seconds=60,
+        capacity=100  # Accounts for retries
+    )]
+).init()
+```
+
+**2. Use Resource Limits to Prevent Resource Exhaustion**
+
+```python
+# Limit concurrent database connections
+worker = DatabaseWorker.options(
+    mode="thread",
+    num_retries=3,
+    limits=[ResourceLimit(key="connections", capacity=10)]
+).init()
+
+# Even with retries, never exceeds 10 concurrent connections
+```
+
+**3. Combine with Exponential Backoff**
+
+```python
+# Retry with backoff reduces rate limit pressure
+worker = APIWorker.options(
+    mode="thread",
+    num_retries=5,
+    retry_algorithm="exponential",  # Increases wait time
+    retry_wait=1.0,
+    limits=[RateLimit(key="requests", window_seconds=60, capacity=100)]
+).init()
+
+# Later retries have longer delays, spreading out rate limit usage
+```
+
+**4. Monitor Limit Utilization with Retries**
+
+```python
+def should_retry_with_limit_check(exception, attempt, **ctx):
+    """Smart retry that backs off if limits are tight."""
+    if attempt > 3:
+        return False  # Don't retry too many times
+    
+    # Check if we should retry based on exception
+    return isinstance(exception, (ConnectionError, TimeoutError))
+
+worker = MyWorker.options(
+    mode="thread",
+    num_retries=5,
+    retry_on=should_retry_with_limit_check,
+    limits=[RateLimit(key="requests", window_seconds=60, capacity=100)]
+).init()
+```
+
+**5. Use Shared Limits for Pool-Wide Retry Coordination**
+
+```python
+# Shared limits ensure fair resource distribution even with retries
+shared_limits = LimitSet(
+    limits=[
+        ResourceLimit(key="resources", capacity=20),
+        RateLimit(key="requests", window_seconds=60, capacity=200)
+    ],
+    shared=True,
+    mode="thread"
+)
+
+pool = MyWorker.options(
+    mode="thread",
+    max_workers=10,
+    num_retries=3,
+    limits=shared_limits
+).init()
+
+# All workers share the limits
+# Retries don't cause resource starvation
+```
+
+For comprehensive retry documentation, see the [Retry Mechanisms Guide](retries.md).
+
 ## Performance Considerations
 
 ### Acquisition Overhead
@@ -847,6 +1054,8 @@ except TimeoutError:
 ## See Also
 
 - [Workers Guide](workers.md) - Integrating limits with Workers
+- [Retry Mechanisms Guide](retries.md) - Using retries with limits
+- [Worker Pools Guide](pools.md) - Shared limits across pools
 - [API Reference](../api/limits.md) - Detailed API documentation
 - [Examples](../examples.md) - More limit usage examples
 

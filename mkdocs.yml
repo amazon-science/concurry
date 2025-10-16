@@ -15,6 +15,7 @@ nav:
     - Workers: user-guide/workers.md
     - Worker Pools: user-guide/pools.md
     - Limits: user-guide/limits.md
+    - Retry Mechanisms: user-guide/retries.md
     - Futures: user-guide/futures.md
     - Progress Tracking: user-guide/progress.md
   - API Reference:

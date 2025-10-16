@@ -1096,6 +1096,227 @@ Use **plain Worker** when:
 - You don't need validation
 - You want maximum performance
 
+## Retry Mechanisms with Pools
+
+Worker pools fully support retry configuration, with each worker in the pool using the same retry settings.
+
+### Basic Pool with Retry
+
+```python
+from concurry import Worker
+
+class APIWorker(Worker):
+    def fetch(self, id: int) -> dict:
+        return requests.get(f"https://api.example.com/{id}").json()
+
+# Pool of 10 workers, each with retry configuration
+pool = APIWorker.options(
+    mode="thread",
+    max_workers=10,
+    num_retries=3,
+    retry_algorithm="exponential",
+    retry_on=[ConnectionError, TimeoutError]
+).init()
+
+# Each request to the pool will retry on failure
+futures = [pool.fetch(i) for i in range(100)]
+results = [f.result() for f in futures]
+
+pool.stop()
+```
+
+### How Retries Work in Pools
+
+**Key behaviors**:
+
+1. **Per-Worker Configuration**: Each worker in the pool has the same retry configuration
+2. **Worker-Side Retries**: Retries happen on the worker that received the request
+3. **Load Balancing Before Retry**: Load balancer selects a worker once; retries stay on that worker
+4. **No Retry Statistics**: Pool statistics track successful dispatches, not retry attempts
+
+```python
+# Example: Pool with 5 workers and retries
+pool = MyWorker.options(
+    mode="thread",
+    max_workers=5,
+    num_retries=3,
+    load_balancing="round_robin"
+).init()
+
+# Request goes to worker 0, retries happen on worker 0
+future1 = pool.process(1)
+
+# Request goes to worker 1, retries happen on worker 1
+future2 = pool.process(2)
+```
+
+### Pool with Shared Limits and Retry
+
+Retries automatically coordinate with shared limits:
+
+```python
+from concurry import LimitSet, ResourceLimit
+
+# Create shared limit
+shared_limits = LimitSet(
+    limits=[ResourceLimit(key="db_connections", capacity=10)],
+    shared=True,
+    mode="thread"
+)
+
+# Pool shares the limit across all workers
+pool = DatabaseWorker.options(
+    mode="thread",
+    max_workers=20,  # 20 workers share 10 connections
+    num_retries=3,
+    retry_on=[DatabaseError],
+    limits=shared_limits
+).init()
+
+# Each worker's retries properly release/acquire shared limits
+# No deadlocks - limits are released between retry attempts
+```
+
+### On-Demand Pools with Retry
+
+On-demand pools create and destroy workers dynamically, with retry configuration:
+
+```python
+pool = MyWorker.options(
+    mode="thread",
+    on_demand=True,
+    max_workers=10,
+    num_retries=3,
+    retry_algorithm="exponential"
+).init()
+
+# Each on-demand worker is created with retry configuration
+future = pool.process(data)
+result = future.result()  # Worker retries if needed, then is destroyed
+
+pool.stop()
+```
+
+### TaskWorker Pools with Retry
+
+```python
+from concurry import TaskWorker
+
+def flaky_function(x):
+    if random.random() < 0.5:
+        raise ConnectionError("Transient error")
+    return x * 2
+
+# Pool of task workers with retry
+pool = TaskWorker.options(
+    mode="process",
+    max_workers=4,
+    num_retries=3,
+    retry_on=[ConnectionError]
+).init()
+
+# Each submit/map call can retry
+results = list(pool.map(flaky_function, range(100)))
+
+pool.stop()
+```
+
+### Retry with Different Load Balancing
+
+Retry behavior is independent of load balancing:
+
+```python
+# Least Active Load with Retry
+pool = MyWorker.options(
+    mode="thread",
+    max_workers=10,
+    load_balancing="active",  # Routes to least busy worker
+    num_retries=3  # Each worker retries its own tasks
+).init()
+
+# If a worker receives a task and fails:
+# - It retries locally (doesn't re-dispatch to a different worker)
+# - Load balancer only selects worker for initial dispatch
+```
+
+### Best Practices for Pool Retries
+
+**1. Use Retries for Transient Errors**
+
+```python
+# ✅ Good: Retry on network errors
+pool = APIWorker.options(
+    mode="thread",
+    max_workers=10,
+    num_retries=3,
+    retry_on=[ConnectionError, TimeoutError]
+).init()
+
+# ❌ Bad: Retry on all exceptions (including bugs)
+pool = APIWorker.options(
+    mode="thread",
+    max_workers=10,
+    num_retries=3,
+    retry_on=[Exception]  # Too broad
+).init()
+```
+
+**2. Consider Pool Size vs Retry Count**
+
+```python
+# For high-availability: More workers, fewer retries
+pool = MyWorker.options(
+    mode="thread",
+    max_workers=20,  # More workers available
+    num_retries=2  # Quick failover
+).init()
+
+# For resource-constrained: Fewer workers, more retries
+pool = MyWorker.options(
+    mode="process",
+    max_workers=4,  # Limited workers
+    num_retries=5  # More retries per worker
+).init()
+```
+
+**3. Combine with Shared Limits**
+
+```python
+# Ensure fair resource distribution across pool
+from concurry import RateLimit
+
+pool = APIWorker.options(
+    mode="thread",
+    max_workers=10,
+    num_retries=3,
+    limits=[RateLimit(key="requests", window_seconds=60, capacity=100)]
+).init()
+
+# All workers share 100 requests/min budget
+# Retries count against the budget but are auto-managed
+```
+
+**4. Monitor Retry Behavior**
+
+```python
+import logging
+
+def retry_logger(exception, attempt, worker_class, **ctx):
+    logging.warning(
+        f"Worker {worker_class} retry {attempt}: {exception}"
+    )
+    return isinstance(exception, (ConnectionError, TimeoutError))
+
+pool = MyWorker.options(
+    mode="thread",
+    max_workers=5,
+    num_retries=3,
+    retry_on=retry_logger
+).init()
+```
+
+For comprehensive retry documentation, see the [Retry Mechanisms Guide](retries.md).
+
 ## Best Practices
 
 ### Choosing Pool Size
@@ -1235,6 +1456,7 @@ class HealthCheckedWorker(Worker):
 ## See Also
 
 - [Workers Guide](workers.md) - Detailed worker documentation
+- [Retry Mechanisms Guide](retries.md) - Using retries with pools
 - [Limits Guide](limits.md) - Resource limits and rate limiting
 - [Futures Guide](futures.md) - Working with futures
 - [Getting Started](getting-started.md) - Basic concepts

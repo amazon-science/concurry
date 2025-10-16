@@ -1787,6 +1787,143 @@ inspector = FutureInspector.options(unwrap_futures=False).init()
 worker = Worker.options(unwrap_futures=False).init()  # Why?
 ```
 
+## Retry Mechanisms
+
+Workers support automatic retry of failed operations with configurable strategies, exception filtering, and output validation.
+
+### Basic Retry Configuration
+
+```python
+from concurry import Worker
+
+class APIWorker(Worker):
+    def fetch_data(self, id: int) -> dict:
+        # May fail transiently
+        return requests.get(f"https://api.example.com/{id}").json()
+
+# Retry up to 3 times with exponential backoff
+worker = APIWorker.options(
+    mode="thread",
+    num_retries=3,
+    retry_algorithm="exponential",  # or "linear", "fibonacci"
+    retry_wait=1.0,  # Base wait time in seconds
+    retry_jitter=0.3  # Randomization factor (0-1)
+).init()
+
+result = worker.fetch_data(123).result()
+worker.stop()
+```
+
+### Exception Filtering
+
+Retry only on specific exceptions:
+
+```python
+# Retry only on network errors
+worker = APIWorker.options(
+    mode="thread",
+    num_retries=5,
+    retry_on=[ConnectionError, TimeoutError]
+).init()
+
+# Custom retry logic
+def should_retry(exception, attempt, **ctx):
+    return attempt < 3 and isinstance(exception, APIError)
+
+worker = APIWorker.options(
+    mode="thread",
+    num_retries=5,
+    retry_on=should_retry
+).init()
+```
+
+### Output Validation
+
+Retry when output doesn't meet requirements:
+
+```python
+class LLMWorker(Worker):
+    def generate_json(self, prompt: str) -> dict:
+        response = self.llm.generate(prompt)
+        return json.loads(response)
+
+def is_valid_json(result, **ctx):
+    return isinstance(result, dict) and "data" in result
+
+worker = LLMWorker.options(
+    mode="thread",
+    num_retries=5,
+    retry_until=is_valid_json  # Retry until validation passes
+).init()
+
+result = worker.generate_json("Generate user data").result()
+```
+
+### TaskWorker with Retry
+
+`TaskWorker` fully supports retries for arbitrary functions:
+
+```python
+from concurry import TaskWorker
+
+def flaky_function(x):
+    if random.random() < 0.5:
+        raise ConnectionError("Transient error")
+    return x * 2
+
+worker = TaskWorker.options(
+    mode="process",
+    num_retries=3,
+    retry_on=[ConnectionError]
+).init()
+
+# Automatically retries on failure
+result = worker.submit(flaky_function, 10).result()
+
+# Works with map() too
+results = list(worker.map(flaky_function, range(10)))
+
+worker.stop()
+```
+
+### Retry Algorithms
+
+Three backoff strategies are available:
+
+| Algorithm | Pattern | Best For |
+|-----------|---------|----------|
+| **exponential** (default) | 1s, 2s, 4s, 8s, 16s... | Network requests, API calls |
+| **linear** | 1s, 2s, 3s, 4s, 5s... | Rate-limited APIs |
+| **fibonacci** | 1s, 1s, 2s, 3s, 5s... | Balanced approach |
+
+All strategies apply "Full Jitter" to randomize wait times and prevent thundering herd problems.
+
+### Integration with Limits
+
+Retries automatically release and reacquire resource limits:
+
+```python
+from concurry import ResourceLimit
+
+class DatabaseWorker(Worker):
+    def query(self, sql: str) -> list:
+        with self.limits.acquire(requested={"connections": 1}) as acq:
+            result = execute_query(sql)
+            acq.update(usage={"connections": 1})
+            return result
+
+worker = DatabaseWorker.options(
+    mode="thread",
+    num_retries=3,
+    retry_on=[DatabaseError],
+    limits=[ResourceLimit(key="connections", capacity=5)]
+).init()
+
+# If query fails, connection is automatically released before retry
+```
+
+For comprehensive retry documentation, see the [Retry Mechanisms Guide](retries.md).
+
 ## Performance Considerations
 
 ### Startup Overhead

@@ -13,7 +13,7 @@ import cloudpickle
 from pydantic import PrivateAttr
 
 from ..future import ConcurrentFuture
-from .base_worker import WorkerProxy, _unwrap_futures_in_args
+from .base_worker import WorkerProxy, _create_worker_wrapper, _unwrap_futures_in_args
 
 
 def _invoke_function(fn, *args, **kwargs):
@@ -34,7 +34,9 @@ def _invoke_function(fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
 
-def _process_worker_main(worker_cls_bytes, init_args, init_kwargs, limits, command_queue, result_queue):
+def _process_worker_main(
+    worker_cls_bytes, init_args, init_kwargs, limits, retry_config, command_queue, result_queue
+):
     """Main function for the worker process.
 
     Args:
@@ -42,6 +44,7 @@ def _process_worker_main(worker_cls_bytes, init_args, init_kwargs, limits, comma
         init_args: Positional arguments for worker initialization
         init_kwargs: Keyword arguments for worker initialization
         limits: LimitSet instance (or None)
+        retry_config: RetryConfig instance (or None)
         command_queue: Queue for receiving commands
         result_queue: Queue for sending results
     """
@@ -58,14 +61,8 @@ def _process_worker_main(worker_cls_bytes, init_args, init_kwargs, limits, comma
 
             try:
                 if method_name == "__initialize__":
-                    # Create wrapper class if limits provided
-                    if limits is not None:
-                        # Need to import here since this is in a subprocess
-                        from .base_worker import _create_worker_wrapper
-
-                        actual_worker_cls = _create_worker_wrapper(worker_cls, limits)
-                    else:
-                        actual_worker_cls = worker_cls
+                    # Create wrapper class with limits and retry logic if needed
+                    actual_worker_cls = _create_worker_wrapper(worker_cls, limits, retry_config)
 
                     worker = actual_worker_cls(*init_args, **init_kwargs)
                     result_queue.put((request_id, "ok", None))
@@ -195,6 +192,7 @@ class ProcessWorkerProxy(WorkerProxy):
                 self.init_args,
                 self.init_kwargs,
                 self.limits,
+                self.retry_config,
                 self._command_queue,
                 self._result_queue,
             ),

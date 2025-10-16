@@ -13,9 +13,10 @@ from concurry.core.limit import (
     CallLimit,
     LimitSet,
     RateLimit,
-    RateLimiterAlgorithm,
+    RateLimitAlgorithm,
     ResourceLimit,
 )
+from concurry.core.limit.limit_set import BaseLimitSet
 
 
 class TestBasicLimitEnforcement:
@@ -40,7 +41,7 @@ class TestBasicLimitEnforcement:
         # Create worker with CallLimit: 20 calls per second
         w = Counter.options(
             mode=worker_mode,
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=20)],
+            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=20)],
         ).init(count=5)
 
         # Make 100 calls - should take ~5 seconds (100 calls / 20 per second)
@@ -84,7 +85,7 @@ class TestBasicLimitEnforcement:
             mode=worker_mode,
             limits=[
                 RateLimit(
-                    key="tokens", window_seconds=1.0, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=50
+                    key="tokens", window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=50
                 )
             ],
         ).init()
@@ -168,7 +169,7 @@ class TestSharedLimitSets:
 
         # Create shared LimitSet with small capacity
         shared_limits = LimitSet(
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=10)],
+            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)],
             shared=True,
             mode=worker_mode,
         )
@@ -206,7 +207,7 @@ class TestSharedLimitSets:
 
         # Create shared LimitSet for process mode
         shared_limits = LimitSet(
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=10)],
+            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)],
             shared=True,
             mode="process",
         )
@@ -239,7 +240,7 @@ class TestSharedLimitSets:
                     return 1
 
         # Pass list of limits - each worker gets its own LimitSet
-        limits_list = [CallLimit(window_seconds=1.0, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=10)]
+        limits_list = [CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)]
 
         # Create two workers - each will have separate limits
         w1 = Counter.options(mode="thread", limits=limits_list).init()
@@ -280,7 +281,7 @@ class TestRayWorkerLimits:
 
         # Create shared LimitSet for Ray
         shared_limits = LimitSet(
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=10)],
+            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)],
             shared=True,
             mode="ray",
         )
@@ -330,9 +331,9 @@ class TestMixedLimitTypes:
         w = APIWorker.options(
             mode=worker_mode,
             limits=[
-                CallLimit(window_seconds=1.0, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=5),
+                CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=5),
                 RateLimit(
-                    key="tokens", window_seconds=1.0, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=10
+                    key="tokens", window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10
                 ),
             ],
         ).init()
@@ -380,7 +381,7 @@ class TestMixedLimitTypes:
         # Create Ray worker with CallLimit
         w = APIWorker.options(
             mode="ray",
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=5)],
+            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=5)],
         ).init()
 
         # Make 10 calls
@@ -423,9 +424,9 @@ class TestMixedLimitTypes:
         w = ComplexWorker.options(
             mode=worker_mode,
             limits=[
-                CallLimit(window_seconds=1.0, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=20),
+                CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=20),
                 RateLimit(
-                    key="tokens", window_seconds=1.0, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=50
+                    key="tokens", window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=50
                 ),
                 ResourceLimit(key="connections", capacity=2),
             ],
@@ -453,7 +454,7 @@ class TestLimitValidation:
 
         # Create InMemorySharedLimitSet (for sync/thread/asyncio)
         limits = LimitSet(
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=10)],
+            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)],
             shared=True,
             mode="sync",
         )
@@ -470,15 +471,13 @@ class TestLimitValidation:
         class DummyWorker(Worker):
             def process(self):
                 # Verify limits exist and check type
-                from concurry.core.limit.limit_set import BaseLimitSet
-
                 assert self.limits is not None
                 assert isinstance(self.limits, BaseLimitSet), (
                     f"Expected BaseLimitSet, got {type(self.limits)}"
                 )
                 return 1
 
-        limits_list = [CallLimit(window_seconds=1.0, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=10)]
+        limits_list = [CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)]
 
         # Thread worker should get InMemorySharedLimitSet
         w_thread = DummyWorker.options(mode="thread", limits=limits_list).init()

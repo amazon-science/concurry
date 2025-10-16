@@ -2,11 +2,9 @@
 
 from .config import (
     ExecutionMode,
-    ExecutorConfig,
     LoadBalancingAlgorithm,
     RateLimitAlgorithm,
-    RateLimitConfig,
-    RetryConfig,
+    RetryAlgorithm,
 )
 from .future import (
     AsyncioFuture,
@@ -22,8 +20,15 @@ from .limit import (
     LimitSet,
     LimitSetAcquisition,
     RateLimit,
-    RateLimiterAlgorithm,
     ResourceLimit,
+)
+from .retry import (
+    RetryConfig,
+    RetryValidationError,
+    calculate_retry_wait,
+    create_retry_wrapper,
+    execute_with_retry,
+    execute_with_retry_async,
 )
 from .worker import TaskWorker, Worker, worker
 
@@ -38,15 +43,20 @@ __all__ = [
     "ExecutionMode",
     "LoadBalancingAlgorithm",
     "RateLimitAlgorithm",
-    "RateLimitConfig",
+    "RetryAlgorithm",
+    # Retry functions
     "RetryConfig",
-    "ExecutorConfig",
+    "RetryValidationError",
+    "calculate_retry_wait",
+    "create_retry_wrapper",
+    "execute_with_retry",
+    "execute_with_retry_async",
     # Worker types
     "TaskWorker",
     "Worker",
     "worker",
     # Algorithms
-    "RateLimiterAlgorithm",
+    "RateLimitAlgorithm",
     # Limit types
     "Limit",
     "RateLimit",

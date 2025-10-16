@@ -211,15 +211,10 @@ class RayWorkerProxy(WorkerProxy):
         if not ray.is_initialized():
             raise RuntimeError("Ray is not initialized. Call ray.init() before creating Ray workers.")
 
-        # Process limits for worker
-        # Limits already processed by WorkerBuilder
-
-        # If limits are provided, create a wrapper class
-        if self.limits is not None:
-            # Create a wrapper class that injects limits
-            worker_cls_to_use = _create_worker_wrapper(self.worker_cls, self.limits)
-        else:
-            worker_cls_to_use = self.worker_cls
+        # Create worker wrapper with limits and retry logic if needed
+        # (limits and retry_config already processed by WorkerBuilder)
+        # Use for_ray=True to pre-wrap methods (Ray bypasses __getattribute__)
+        worker_cls_to_use = _create_worker_wrapper(self.worker_cls, self.limits, self.retry_config, for_ray=True)
 
         # Create the Ray actor. Use actor_options if provided, otherwise use defaults.
         # Note: Ray 2.50+ doesn't accept ray.remote(**{}) with an empty dict

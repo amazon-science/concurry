@@ -7,7 +7,7 @@ import pytest
 from concurry import Worker
 from concurry.core.limit import (
     CallLimit,
-    RateLimiterAlgorithm,
+    RateLimitAlgorithm,
 )
 from concurry.core.limit.rate_limiting_algorithms import (
     FixedWindowLimiter,
@@ -702,7 +702,7 @@ class TestRateLimitingAlgorithms:
         # TokenBucket: capacity=20, rate=100/sec (fast for testing)
         w = Counter.options(
             mode=worker_mode,
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=20)],
+            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=20)],
         ).init()
 
         # Make 20 calls - all burst instantly (capacity=20)
@@ -737,7 +737,7 @@ class TestRateLimitingAlgorithms:
 
         w = Counter.options(
             mode="ray",
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=20)],
+            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=20)],
         ).init()
 
         start_time = time.time()
@@ -770,7 +770,7 @@ class TestRateLimitingAlgorithms:
         # LeakyBucket: capacity=20, rate=100/sec (fast for testing)
         w = Counter.options(
             mode=worker_mode,
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimiterAlgorithm.LeakyBucket, capacity=20)],
+            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.LeakyBucket, capacity=20)],
         ).init()
 
         # Make 20 calls - queue holds 20, processes instantly
@@ -805,7 +805,7 @@ class TestRateLimitingAlgorithms:
 
         w = Counter.options(
             mode="ray",
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimiterAlgorithm.LeakyBucket, capacity=20)],
+            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.LeakyBucket, capacity=20)],
         ).init()
 
         start_time = time.time()
@@ -906,7 +906,7 @@ class TestRateLimitingAlgorithms:
         # FixedWindow: capacity=20, rate=100/sec (fast for testing)
         w = Counter.options(
             mode=worker_mode,
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimiterAlgorithm.FixedWindow, capacity=20)],
+            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.FixedWindow, capacity=20)],
         ).init()
 
         # Make 20 calls - all fit in current window instantly
@@ -941,7 +941,7 @@ class TestRateLimitingAlgorithms:
 
         w = Counter.options(
             mode="ray",
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimiterAlgorithm.FixedWindow, capacity=20)],
+            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.FixedWindow, capacity=20)],
         ).init()
 
         start_time = time.time()
@@ -975,7 +975,7 @@ class TestRateLimitingAlgorithms:
         # GCRA: capacity=20, rate=100/sec (fast for testing)
         w = Counter.options(
             mode=worker_mode,
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimiterAlgorithm.GCRA, capacity=20)],
+            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.GCRA, capacity=20)],
         ).init()
 
         # Make 20 calls - all burst instantly (capacity=20)
@@ -1010,7 +1010,7 @@ class TestRateLimitingAlgorithms:
 
         w = Counter.options(
             mode="ray",
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimiterAlgorithm.GCRA, capacity=20)],
+            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.GCRA, capacity=20)],
         ).init()
 
         start_time = time.time()

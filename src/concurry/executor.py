@@ -94,13 +94,13 @@ def Executor(
 
         With Rate Limits:
             ```python
-            from concurry import Executor, RateLimit, RateLimiterAlgorithm
+            from concurry import Executor, RateLimit, RateLimitAlgorithm
 
             limits = [
                 RateLimit(
                     key="api_calls",
                     window_seconds=60,
-                    algorithm=RateLimiterAlgorithm.TokenBucket,
+                    algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=100
                 )
             ]

@@ -19,13 +19,13 @@ Important:
 Example:
     Basic limit definition (used within LimitSet)::
 
-        from concurry import RateLimit, RateLimiterAlgorithm, LimitSet
+        from concurry import RateLimit, RateLimitAlgorithm, LimitSet
 
         # Define a rate limit
         limit = RateLimit(
             key="api_tokens",
             window_seconds=60,
-            algorithm=RateLimiterAlgorithm.TokenBucket,
+            algorithm=RateLimitAlgorithm.TokenBucket,
             capacity=1000
         )
 
@@ -42,7 +42,7 @@ from typing import ClassVar, Dict, NoReturn
 from morphic import Typed
 from pydantic import confloat, conint
 
-from .rate_limiting_algorithms import RateLimiterAlgorithm, RateLimiter
+from .rate_limiting_algorithms import RateLimitAlgorithm, RateLimiter
 
 
 class Limit(Typed, ABC):
@@ -175,13 +175,13 @@ class RateLimit(Limit):
     Example:
         Use within LimitSet::
 
-            from concurry import RateLimit, RateLimiterAlgorithm, LimitSet
+            from concurry import RateLimit, RateLimitAlgorithm, LimitSet
 
             # Define rate limit
             limit = RateLimit(
                 key="api_tokens",
                 window_seconds=60,
-                algorithm=RateLimiterAlgorithm.TokenBucket,
+                algorithm=RateLimitAlgorithm.TokenBucket,
                 capacity=1000
             )
 
@@ -198,7 +198,7 @@ class RateLimit(Limit):
     """
 
     window_seconds: confloat(gt=0)
-    algorithm: RateLimiterAlgorithm = RateLimiterAlgorithm.SlidingWindow
+    algorithm: RateLimitAlgorithm = RateLimitAlgorithm.SlidingWindow
     capacity: conint(gt=0)
 
     def post_initialize(self) -> NoReturn:
@@ -264,18 +264,18 @@ class CallLimit(RateLimit):
     Example:
         Use within LimitSet::
 
-            from concurry import CallLimit, RateLimit, RateLimiterAlgorithm, LimitSet
+            from concurry import CallLimit, RateLimit, RateLimitAlgorithm, LimitSet
 
             limits = LimitSet(limits=[
                 CallLimit(
                     window_seconds=60,
-                    algorithm=RateLimiterAlgorithm.TokenBucket,
+                    algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=100
                 ),
                 RateLimit(
                     key="tokens",
                     window_seconds=60,
-                    algorithm=RateLimiterAlgorithm.TokenBucket,
+                    algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=1000
                 )
             ])
@@ -339,7 +339,7 @@ class ResourceLimit(Limit):
     Example:
         Use within LimitSet::
 
-            from concurry import LimitSet, ResourceLimit, RateLimit, RateLimiterAlgorithm
+            from concurry import LimitSet, ResourceLimit, RateLimit, RateLimitAlgorithm
 
             limits = LimitSet(limits=[
                 ResourceLimit(key="db_connections", capacity=5),
@@ -347,7 +347,7 @@ class ResourceLimit(Limit):
                 RateLimit(
                     key="api_tokens",
                     window_seconds=60,
-                    algorithm=RateLimiterAlgorithm.TokenBucket,
+                    algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=1000
                 )
             ])

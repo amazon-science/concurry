@@ -32,7 +32,7 @@ The limit system has two layers:
 ### Basic Pattern
 
 ```python
-from concurry import LimitSet, RateLimit, CallLimit, ResourceLimit, RateLimiterAlgorithm
+from concurry import LimitSet, RateLimit, CallLimit, ResourceLimit, RateLimitAlgorithm
 
 # 1. Define limits (data containers)
 limits = LimitSet(limits=[
@@ -70,13 +70,13 @@ with limits.acquire(requested={"tokens": 50, "connections": 2}) as acq:
 Always use `LimitSet` to create thread-safe limit executors:
 
 ```python
-from concurry import LimitSet, RateLimit, RateLimiterAlgorithm
+from concurry import LimitSet, RateLimit, RateLimitAlgorithm
 
 # Define limit constraints (data containers)
 rate_limit = RateLimit(
     key="api_tokens",
     window_seconds=60,
-    algorithm=RateLimiterAlgorithm.TokenBucket,
+    algorithm=RateLimitAlgorithm.TokenBucket,
     capacity=1000
 )
 
@@ -106,13 +106,13 @@ with limits.acquire(requested={"api_tokens": 100}) as acq:
 RateLimits enforce time-based constraints on resource usage, such as API tokens, bandwidth, or request rates.
 
 ```python
-from concurry import LimitSet, RateLimit, RateLimiterAlgorithm
+from concurry import LimitSet, RateLimit, RateLimitAlgorithm
 
 # Define rate limit
 rate_limit = RateLimit(
     key="api_tokens",
     window_seconds=60,
-    algorithm=RateLimiterAlgorithm.TokenBucket,
+    algorithm=RateLimitAlgorithm.TokenBucket,
     capacity=1000
 )
 
@@ -130,12 +130,12 @@ with limits.acquire(requested={"api_tokens": 100}) as acq:
 CallLimit is a special RateLimit for counting calls, where usage is always 1.
 
 ```python
-from concurry import LimitSet, CallLimit, RateLimiterAlgorithm
+from concurry import LimitSet, CallLimit, RateLimitAlgorithm
 
 # Define call limit
 call_limit = CallLimit(
     window_seconds=60,
-    algorithm=RateLimiterAlgorithm.SlidingWindow,
+    algorithm=RateLimitAlgorithm.SlidingWindow,
     capacity=100
 )
 
@@ -195,7 +195,7 @@ Allows bursts up to capacity while maintaining average rate. Tokens refill conti
 limit = RateLimit(
     key="tokens",
     window_seconds=60,
-    algorithm=RateLimiterAlgorithm.TokenBucket,
+    algorithm=RateLimitAlgorithm.TokenBucket,
     capacity=1000
 )
 ```
@@ -216,7 +216,7 @@ Processes requests at fixed rate, smoothing traffic.
 limit = RateLimit(
     key="tokens",
     window_seconds=60,
-    algorithm=RateLimiterAlgorithm.LeakyBucket,
+    algorithm=RateLimitAlgorithm.LeakyBucket,
     capacity=1000
 )
 ```
@@ -237,7 +237,7 @@ Precise rate limiting with rolling time window. More accurate than fixed window.
 limit = RateLimit(
     key="tokens",
     window_seconds=60,
-    algorithm=RateLimiterAlgorithm.SlidingWindow,
+    algorithm=RateLimitAlgorithm.SlidingWindow,
     capacity=1000
 )
 ```
@@ -258,7 +258,7 @@ Simple rate limiting with fixed time buckets. Fast but can allow 2x burst at win
 limit = RateLimit(
     key="tokens",
     window_seconds=60,
-    algorithm=RateLimiterAlgorithm.FixedWindow,
+    algorithm=RateLimitAlgorithm.FixedWindow,
     capacity=1000
 )
 ```
@@ -279,7 +279,7 @@ Most precise rate limiting using theoretical arrival time tracking.
 limit = RateLimit(
     key="tokens",
     window_seconds=60,
-    algorithm=RateLimiterAlgorithm.GCRA,
+    algorithm=RateLimitAlgorithm.GCRA,
     capacity=1000
 )
 ```
@@ -301,26 +301,26 @@ LimitSet enables atomic acquisition of multiple limits simultaneously with full 
 ```python
 from concurry import (
     LimitSet, RateLimit, CallLimit, ResourceLimit,
-    RateLimiterAlgorithm
+    RateLimitAlgorithm
 )
 
 # Create LimitSet with multiple limit types
 limits = LimitSet(limits=[
     CallLimit(
         window_seconds=60,
-        algorithm=RateLimiterAlgorithm.SlidingWindow,
+        algorithm=RateLimitAlgorithm.SlidingWindow,
         capacity=100
     ),
     RateLimit(
         key="input_tokens",
         window_seconds=60,
-        algorithm=RateLimiterAlgorithm.GCRA,
+        algorithm=RateLimitAlgorithm.GCRA,
         capacity=10_000
     ),
     RateLimit(
         key="output_tokens",
         window_seconds=60,
-        algorithm=RateLimiterAlgorithm.TokenBucket,
+        algorithm=RateLimitAlgorithm.TokenBucket,
         capacity=1_000
     ),
     ResourceLimit(
@@ -419,7 +419,7 @@ Limits integrate seamlessly with Workers via the `limits` parameter. You can pas
 ### Option 1: Pass LimitSet (Recommended for Sharing)
 
 ```python
-from concurry import Worker, LimitSet, RateLimit, ResourceLimit, RateLimiterAlgorithm
+from concurry import Worker, LimitSet, RateLimit, ResourceLimit, RateLimitAlgorithm
 
 # Create shared LimitSet
 shared_limits = LimitSet(
@@ -427,7 +427,7 @@ shared_limits = LimitSet(
         RateLimit(
             key="api_tokens",
             window_seconds=60,
-            algorithm=RateLimiterAlgorithm.TokenBucket,
+            algorithm=RateLimitAlgorithm.TokenBucket,
             capacity=1000
         ),
         ResourceLimit(
@@ -468,7 +468,7 @@ limit_definitions = [
     RateLimit(
         key="api_tokens",
         window_seconds=60,
-        algorithm=RateLimiterAlgorithm.TokenBucket,
+        algorithm=RateLimitAlgorithm.TokenBucket,
         capacity=1000
     ),
     ResourceLimit(key="db_connections", capacity=5)
@@ -532,7 +532,7 @@ shared_limits = LimitSet(
         RateLimit(
             key="api_tokens",
             window_seconds=60,
-            algorithm=RateLimiterAlgorithm.TokenBucket,
+            algorithm=RateLimitAlgorithm.TokenBucket,
             capacity=1000
         )
     ],

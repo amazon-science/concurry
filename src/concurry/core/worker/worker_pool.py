@@ -101,6 +101,7 @@ class WorkerProxyPool(Typed, ABC):
     blocking: bool
     unwrap_futures: bool
     limits: Optional[Any]  # Shared LimitSet (processed by WorkerBuilder)
+    retry_config: Optional[Any] = None  # RetryConfig instance (processed by WorkerBuilder)
     init_args: tuple
     init_kwargs: dict
 
@@ -471,6 +472,7 @@ class InMemoryWorkerProxyPool(WorkerProxyPool):
             init_args=self.init_args,
             init_kwargs=self.init_kwargs,
             limits=self.limits,
+            retry_config=self.retry_config,
         )
 
     def _get_on_demand_limit(self) -> Optional[int]:
@@ -527,6 +529,7 @@ class MultiprocessWorkerProxyPool(WorkerProxyPool):
             init_args=self.init_args,
             init_kwargs=self.init_kwargs,
             limits=self.limits,
+            retry_config=self.retry_config,
         )
 
     def _get_on_demand_limit(self) -> Optional[int]:
@@ -581,6 +584,7 @@ class RayWorkerProxyPool(WorkerProxyPool):
             init_args=self.init_args,
             init_kwargs=self.init_kwargs,
             limits=self.limits,
+            retry_config=self.retry_config,
             actor_options=self.actor_options,
         )
 

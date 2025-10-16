@@ -18,7 +18,7 @@ Main Components:
         - LimitSetAcquisition: Tracks multi-limit usage
 
     Algorithms:
-        - RateLimiterAlgorithm: Enum of available rate limiting algorithms
+        - RateLimitAlgorithm: Enum of available rate limiting algorithms
 
 Architecture:
     - **Limits**: Simple data containers that define constraints (NOT thread-safe)
@@ -31,13 +31,13 @@ Architecture:
 Quick Start:
     Basic LimitSet usage::
 
-        from concurry import LimitSet, RateLimit, RateLimiterAlgorithm
+        from concurry import LimitSet, RateLimit, RateLimitAlgorithm
 
         limits = LimitSet(limits=[
             RateLimit(
                 key="api_tokens",
                 window_seconds=60,
-                algorithm=RateLimiterAlgorithm.TokenBucket,
+                algorithm=RateLimitAlgorithm.TokenBucket,
                 capacity=1000
             )
         ])
@@ -48,13 +48,13 @@ Quick Start:
 
     Multi-dimensional limiting::
 
-        from concurry import LimitSet, RateLimit, ResourceLimit, RateLimiterAlgorithm
+        from concurry import LimitSet, RateLimit, ResourceLimit, RateLimitAlgorithm
 
         limits = LimitSet(limits=[
             RateLimit(
                 key="tokens",
                 window_seconds=60,
-                algorithm=RateLimiterAlgorithm.TokenBucket,
+                algorithm=RateLimitAlgorithm.TokenBucket,
                 capacity=1000
             ),
             ResourceLimit(key="connections", capacity=10)
@@ -66,7 +66,7 @@ Quick Start:
 
     Worker integration::
 
-        from concurry import Worker, LimitSet, RateLimit, RateLimiterAlgorithm
+        from concurry import Worker, LimitSet, RateLimit, RateLimitAlgorithm
 
         # Non-shared: pass list of Limits (creates private LimitSet per worker)
         worker = MyWorker.options(
@@ -95,7 +95,7 @@ from .limit_set import LimitSet
 from .rate_limiting_algorithms import (
     BaseRateLimiter,
     RateLimiter,
-    RateLimiterAlgorithm,
+    RateLimitAlgorithm,
 )
 
 __all__ = [
@@ -104,7 +104,7 @@ __all__ = [
     "RateLimit",
     "CallLimit",
     "ResourceLimit",
-    "RateLimiterAlgorithm",
+    "RateLimitAlgorithm",
     "BaseRateLimiter",
     # Acquisition
     "Acquisition",

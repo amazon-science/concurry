@@ -138,13 +138,12 @@ class ThreadWorkerProxy(WorkerProxy):
 
                 try:
                     if method_name == "__initialize__":
-                        # Process limits and create worker wrapper if needed
-                        # Create worker wrapper with limits if needed (limits already processed by WorkerBuilder)
-                        if self.limits is not None:
-                            # Create wrapper class that injects limits
-                            worker_cls = _create_worker_wrapper(self.worker_cls, self.limits)
-                        else:
-                            worker_cls = self.worker_cls
+                        # Create worker wrapper with limits and retry logic if needed
+                        # (limits and retry_config already processed by WorkerBuilder)
+
+                        worker_cls = _create_worker_wrapper(
+                            self.worker_cls, self.limits, self.retry_config
+                        )
 
                         worker = worker_cls(*self.init_args, **self.init_kwargs)
                         future._future.set_result(None)

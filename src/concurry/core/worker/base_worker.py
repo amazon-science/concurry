@@ -10,6 +10,8 @@ from pydantic import ConfigDict, PrivateAttr
 
 from ..config import ExecutionMode
 from ..future import BaseFuture
+from ..retry import RetryAlgorithm, RetryConfig, create_retry_wrapper
+from ..limit.limit_set import LimitSet
 
 T = TypeVar("T")
 
@@ -152,11 +154,19 @@ def _validate_shared_limitset_mode_compatibility(limit_set: Any, worker_mode: Ex
     """
 
 
-def _create_worker_wrapper(worker_cls: Type, limits: Any) -> Type:
-    """Create a wrapper class that injects limits after worker initialization.
+def _create_worker_wrapper(worker_cls: Type, limits: Any, retry_config: Optional[Any] = None, for_ray: bool = False) -> Type:
+    """Create a wrapper class that injects limits and retry logic.
 
-    This wrapper dynamically inherits from the user's worker class and adds
-    a limits attribute after calling the parent's __init__.
+    This wrapper dynamically inherits from the user's worker class and:
+    1. Sets self.limits in __init__ (if limits provided)
+    2. Wraps all public methods with retry logic (if retry_config provided and num_retries > 0)
+    3. Handles both sync and async methods automatically
+
+    The wrapper uses `object.__setattr__` to set attributes to support
+    Pydantic BaseModel/Typed workers which have frozen instances by default.
+
+    Retry logic runs inside the actor/process for all execution modes,
+    ensuring efficient retries without client-side round-trips.
 
     If limits is a list of Limit objects (for Ray/Process workers), it creates
     a LimitSet inside the worker (in the remote actor/process context). This
@@ -164,50 +174,174 @@ def _create_worker_wrapper(worker_cls: Type, limits: Any) -> Type:
 
     Args:
         worker_cls: The original worker class
-        limits: LimitSet instance OR list of Limit objects
+        limits: LimitSet instance OR list of Limit objects (optional)
+        retry_config: RetryConfig instance (optional, defaults to None)
+        for_ray: If True, pre-wrap methods on the class (Ray actors need this)
 
     Returns:
-        Wrapper class that sets limits attribute
+        Wrapper class that sets limits attribute and applies retry logic
 
     Example:
         ```python
-        # For in-memory workers (limits is LimitSet):
+        # With limits only:
         wrapper_cls = _create_worker_wrapper(MyWorker, limit_set)
         worker = wrapper_cls(*args, **kwargs)
-        # worker.limits is the LimitSet
+        # worker.limits is accessible
 
-        # For Ray/Process workers (limits is list):
-        wrapper_cls = _create_worker_wrapper(MyWorker, [CallLimit(...)])
+        # With limits and retries:
+        from concurry import RetryConfig
+        config = RetryConfig(num_retries=3, retry_algorithm="exponential")
+        wrapper_cls = _create_worker_wrapper(MyWorker, limit_set, config)
         worker = wrapper_cls(*args, **kwargs)
-        # worker.limits is a new LimitSet created inside the actor/process
+        # worker.limits is accessible
+        # worker methods automatically retry on failure
+
+        # With retries only (no limits):
+        wrapper_cls = _create_worker_wrapper(MyWorker, None, config)
+        worker = wrapper_cls(*args, **kwargs)
+        # worker methods automatically retry on failure
         ```
     """
+    # Import here to avoid circular imports
+    from ..retry import create_retry_wrapper
 
-    class WorkerWithLimits(worker_cls):
+    # Determine if we need to apply any wrapping
+    has_limits = limits is not None
+    has_retry = retry_config is not None and retry_config.num_retries > 0
+
+    # If no limits and no retry, return original class
+    if not has_limits and not has_retry:
+        return worker_cls
+
+    class WorkerWithLimitsAndRetry(worker_cls):
         def __init__(self, *args, **kwargs):
             # Call parent __init__ first to properly initialize Pydantic models
             super().__init__(*args, **kwargs)
 
-            # If limits is a list, create LimitSet here (inside the actor/process)
-            if isinstance(limits, list):
-                # Import here to avoid circular imports
-                from ..limit.limit_set import LimitSet
+            # Set limits if provided
+            if has_limits:
+                # If limits is a list, create LimitSet here (inside the actor/process)
+                if isinstance(limits, list):
+                    # Create private LimitSet with mode=sync (uses threading.Lock, works everywhere)
+                    limit_set = LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync)
+                else:
+                    # Already a LimitSet, use it directly
+                    limit_set = limits
 
-                # Create private LimitSet with mode=sync (uses threading.Lock, works everywhere)
-                limit_set = LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync)
-            else:
-                # Already a LimitSet, use it directly
-                limit_set = limits
+                # Use object.__setattr__ to bypass frozen models (Typed/BaseModel)
+                # This allows limits to work with frozen Pydantic models
+                object.__setattr__(self, "limits", limit_set)
 
-            # Use object.__setattr__ to bypass frozen models (Typed/BaseModel)
-            # This allows limits to work with frozen Pydantic models
-            object.__setattr__(self, "limits", limit_set)
+        def __getattribute__(self, name: str):
+            """Intercept method calls and wrap with retry logic if configured."""
+            # Get the attribute using parent's __getattribute__
+            attr = super().__getattribute__(name)
+
+            # Only wrap public methods if retry is configured AND not for Ray
+            # (Ray mode uses pre-wrapped methods at class level)
+            if has_retry and not for_ray and not name.startswith("_") and callable(attr) and not isinstance(attr, type):
+                # Check if this method has already been wrapped
+                # (to avoid double-wrapping on repeated access)
+                if hasattr(attr, "__wrapped_with_retry__"):
+                    return attr
+
+                # Wrap the method with retry logic
+                wrapped = create_retry_wrapper(
+                    attr,
+                    retry_config,
+                    method_name=name,
+                    worker_class_name=worker_cls.__name__,
+                )
+
+                # Mark as wrapped to avoid double-wrapping
+                wrapped.__wrapped_with_retry__ = True
+
+                return wrapped
+
+            return attr
 
     # Preserve original class name for debugging
-    WorkerWithLimits.__name__ = f"{worker_cls.__name__}_WithLimits"
-    WorkerWithLimits.__qualname__ = f"{worker_cls.__qualname__}_WithLimits"
+    if has_limits and has_retry:
+        WorkerWithLimitsAndRetry.__name__ = f"{worker_cls.__name__}_WithLimitsAndRetry"
+        WorkerWithLimitsAndRetry.__qualname__ = f"{worker_cls.__qualname__}_WithLimitsAndRetry"
+    elif has_limits:
+        WorkerWithLimitsAndRetry.__name__ = f"{worker_cls.__name__}_WithLimits"
+        WorkerWithLimitsAndRetry.__qualname__ = f"{worker_cls.__qualname__}_WithLimits"
+    else:  # has_retry
+        WorkerWithLimitsAndRetry.__name__ = f"{worker_cls.__name__}_WithRetry"
+        WorkerWithLimitsAndRetry.__qualname__ = f"{worker_cls.__qualname__}_WithRetry"
 
-    return WorkerWithLimits
+    # For Ray actors, __getattribute__ doesn't work the same way
+    # Instead, wrap each public method individually at the class level
+    # ONLY wrap methods that are defined directly on the worker class, not inherited ones
+    if for_ray and has_retry:
+        import inspect
+        
+        # Get methods defined directly on the worker class (not inherited)
+        for attr_name in dir(worker_cls):
+            # Skip private/dunder methods
+            if attr_name.startswith("_"):
+                continue
+            
+            # Only process if it's defined directly on worker_cls, not inherited
+            if attr_name not in worker_cls.__dict__:
+                continue
+            
+            try:
+                attr = getattr(worker_cls, attr_name)
+                # Only wrap actual callable methods (not properties, classmethods, staticmethods)
+                if not callable(attr):
+                    continue
+                    
+                # Skip if it's a class or type
+                if isinstance(attr, type):
+                    continue
+                
+                # Check if it's a function/method we should wrap
+                if not (inspect.isfunction(attr) or inspect.ismethod(attr)):
+                    continue
+                
+                # Create a wrapper method that applies retry logic
+                def make_wrapped_method(original_method, method_name):
+                    # Check if it's async
+                    is_async = inspect.iscoroutinefunction(original_method)
+                    
+                    if is_async:
+                        async def async_method_wrapper(self, *args, **kwargs):
+                            from ..retry import execute_with_retry_async
+                            context = {
+                                "method_name": method_name,
+                                "worker_class_name": worker_cls.__name__,
+                            }
+                            # Bind self to the original method
+                            bound_method = original_method.__get__(self, type(self))
+                            return await execute_with_retry_async(
+                                bound_method, args, kwargs, retry_config, context
+                            )
+                        async_method_wrapper.__wrapped_with_retry__ = True
+                        return async_method_wrapper
+                    else:
+                        def sync_method_wrapper(self, *args, **kwargs):
+                            from ..retry import execute_with_retry
+                            context = {
+                                "method_name": method_name,
+                                "worker_class_name": worker_cls.__name__,
+                            }
+                            # Bind self to the original method
+                            bound_method = original_method.__get__(self, type(self))
+                            return execute_with_retry(
+                                bound_method, args, kwargs, retry_config, context
+                            )
+                        sync_method_wrapper.__wrapped_with_retry__ = True
+                        return sync_method_wrapper
+                
+                wrapped = make_wrapped_method(attr, attr_name)
+                setattr(WorkerWithLimitsAndRetry, attr_name, wrapped)
+            except (AttributeError, TypeError):
+                # Skip attributes that can't be wrapped
+                pass
+
+    return WorkerWithLimitsAndRetry
 
 
 def _unwrap_future_value(obj: Any) -> Any:
@@ -302,6 +436,13 @@ class WorkerBuilder:
         max_workers: Optional[int] = None,
         load_balancing: Optional[str] = None,
         on_demand: bool = False,
+        # Retry parameters
+        num_retries: int = 0,
+        retry_on: Optional[Any] = None,
+        retry_algorithm: str = "exponential",
+        retry_wait: float = 1.0,
+        retry_jitter: float = 0.3,
+        retry_until: Optional[Any] = None,
         **options: Any,
     ):
         """Initialize the worker builder.
@@ -313,6 +454,12 @@ class WorkerBuilder:
             max_workers: Maximum number of workers in pool (None = single worker)
             load_balancing: Load balancing algorithm for pool
             on_demand: If True, create workers on-demand
+            num_retries: Maximum number of retry attempts
+            retry_on: Exception types or callables that trigger retries
+            retry_algorithm: Backoff strategy (linear, exponential, fibonacci)
+            retry_wait: Minimum wait time between retries
+            retry_jitter: Jitter factor (0-1)
+            retry_until: Validation functions for output
             **options: Additional options for the worker/pool
 
         Raises:
@@ -337,10 +484,37 @@ class WorkerBuilder:
         self._max_workers = max_workers
         self._load_balancing = load_balancing
         self._on_demand = on_demand
+        self._num_retries = num_retries
+        self._retry_on = retry_on
+        self._retry_algorithm = retry_algorithm
+        self._retry_wait = retry_wait
+        self._retry_jitter = retry_jitter
+        self._retry_until = retry_until
         self._options = options
 
         # Validate configuration
         self._validate_pool_config()
+
+    def _create_retry_config(self) -> Optional[Any]:
+        """Create RetryConfig from retry parameters.
+
+        Returns:
+            RetryConfig instance if num_retries > 0, else None
+        """
+
+        # Fast path: if num_retries is 0, don't create config
+        if self._num_retries == 0:
+            return None
+
+        # Create RetryConfig
+        return RetryConfig(
+            num_retries=self._num_retries,
+            retry_on=self._retry_on if self._retry_on is not None else [Exception],
+            retry_algorithm=RetryAlgorithm(self._retry_algorithm),
+            retry_wait=self._retry_wait,
+            retry_jitter=self._retry_jitter,
+            retry_until=self._retry_until,
+        )
 
     def _validate_pool_config(self) -> None:
         """Validate pool configuration parameters.
@@ -566,6 +740,11 @@ class WorkerBuilder:
                 is_pool=False,
             )
 
+        # Create retry config if needed
+        retry_config = self._create_retry_config()
+        if retry_config is not None:
+            processed_options["retry_config"] = retry_config
+
         # Create proxy with init args/kwargs
         # Typed expects all parameters as keyword arguments
         return proxy_cls(
@@ -625,6 +804,11 @@ class WorkerBuilder:
         # Update options with processed limits
         pool_options = dict(self._options)
         pool_options["limits"] = limits
+
+        # Create retry config if needed
+        retry_config = self._create_retry_config()
+        if retry_config is not None:
+            pool_options["retry_config"] = retry_config
 
         # Select appropriate pool class
         if execution_mode in (ExecutionMode.Sync, ExecutionMode.Asyncio, ExecutionMode.Threads):
@@ -983,7 +1167,7 @@ class Worker:
 
         ```python
         from concurry import Worker, LimitSet, RateLimit, CallLimit, ResourceLimit
-        from concurry import RateLimiterAlgorithm
+        from concurry import RateLimitAlgorithm
 
         # Define limits
         limits = LimitSet(limits=[
@@ -991,7 +1175,7 @@ class Worker:
             RateLimit(
                 key="api_tokens",
                 window_seconds=60,
-                algorithm=RateLimiterAlgorithm.TokenBucket,
+                algorithm=RateLimitAlgorithm.TokenBucket,
                 capacity=1000
             ),
             ResourceLimit(key="connections", capacity=10)
@@ -1047,6 +1231,13 @@ class Worker:
         max_workers: Optional[int] = None,
         load_balancing: Optional[str] = None,
         on_demand: bool = False,
+        # Retry parameters
+        num_retries: int = 0,
+        retry_on: Optional[Any] = None,
+        retry_algorithm: str = "exponential",
+        retry_wait: float = 1.0,
+        retry_jitter: float = 0.3,
+        retry_until: Optional[Any] = None,
         **kwargs: Any,
     ) -> WorkerBuilder:
         """Configure worker execution options.
@@ -1092,6 +1283,27 @@ class Worker:
                 - Pass LimitSet: Workers share the same limit pool
                 - Pass List[Limit]: Each worker gets private limits (creates shared LimitSet for pools)
                 See Worker docstring "Resource Protection with Limits" section for details.
+            num_retries: Maximum number of retry attempts after initial failure (default: 0)
+                Total attempts = num_retries + 1 (initial attempt).
+                Set to 0 to disable retries (zero overhead).
+            retry_on: Exception types or callables that trigger retries (optional)
+                - Single exception class: retry_on=ValueError
+                - List of exceptions: retry_on=[ValueError, ConnectionError]
+                - Callable filter: retry_on=lambda exception, **ctx: "retry" in str(exception)
+                - Mixed list: retry_on=[ValueError, custom_filter]
+                Default: [Exception] (retry on all exceptions when num_retries > 0)
+            retry_algorithm: Backoff strategy for wait times (default: "exponential")
+            retry_wait: Minimum wait time between retries in seconds (default: 1.0)
+                Base wait time before applying strategy and jitter.
+            retry_jitter: Jitter factor between 0 and 1 (default: 0.3)
+                Uses Full Jitter algorithm from AWS: sleep = random(0, calculated_wait).
+                Set to 0 to disable jitter. Prevents thundering herd when many workers retry.
+            retry_until: Validation functions for output (optional)
+                - Single validator: retry_until=lambda result, **ctx: result.get("status") == "success"
+                - List of validators: retry_until=[validator1, validator2] (all must pass)
+                Validators receive result and context as kwargs. Return True for valid output.
+                If validation fails, triggers retry even without exception.
+                Useful for LLM output validation (JSON schema, XML format, etc.)
             **kwargs: Additional options passed to the worker implementation
                 - For ray: num_cpus, num_gpus, resources, etc.
                 - For process: mp_context (fork, spawn, forkserver)
@@ -1163,6 +1375,54 @@ class Worker:
                     max_workers=0  # Unlimited
                 ).init(multiplier=3)
                 ```
+
+            Retries:
+                ```python
+                # Basic retry with exponential backoff
+                worker = APIWorker.options(
+                    mode="thread",
+                    num_retries=3,
+                    retry_algorithm="exponential",
+                    retry_wait=1.0,
+                    retry_jitter=0.3
+                ).init()
+
+                # Retry only on specific exceptions
+                worker = APIWorker.options(
+                    mode="thread",
+                    num_retries=5,
+                    retry_on=[ConnectionError, TimeoutError]
+                ).init()
+
+                # Custom exception filter
+                worker = APIWorker.options(
+                    mode="thread",
+                    num_retries=3,
+                    retry_on=lambda exception, **ctx: (
+                        isinstance(exception, ValueError) and "retry" in str(exception)
+                    )
+                ).init()
+
+                # Output validation for LLM responses
+                worker = LLMWorker.options(
+                    mode="thread",
+                    num_retries=5,
+                    retry_until=lambda result, **ctx: (
+                        isinstance(result, dict) and "data" in result
+                    )
+                ).init()
+
+                # Multiple validators (all must pass)
+                worker = LLMWorker.options(
+                    mode="thread",
+                    num_retries=5,
+                    retry_until=[
+                        lambda result, **ctx: isinstance(result, str),
+                        lambda result, **ctx: result.startswith("{"),
+                        lambda result, **ctx: validate_json(result)
+                    ]
+                ).init()
+                ```
         """
         return WorkerBuilder(
             worker_cls=cls,
@@ -1171,6 +1431,12 @@ class Worker:
             max_workers=max_workers,
             load_balancing=load_balancing,
             on_demand=on_demand,
+            num_retries=num_retries,
+            retry_on=retry_on,
+            retry_algorithm=retry_algorithm,
+            retry_wait=retry_wait,
+            retry_jitter=retry_jitter,
+            retry_until=retry_until,
             **kwargs,
         )
 
@@ -1348,6 +1614,7 @@ class WorkerProxy(Typed, ABC):
     init_args: tuple = ()
     init_kwargs: dict = {}
     limits: Optional[Any] = None  # LimitSet instance (processed by WorkerBuilder)
+    retry_config: Optional[Any] = None  # RetryConfig instance (processed by WorkerBuilder)
 
     # Private attributes (defined with PrivateAttr, initialized in post_initialize)
     _stopped: bool = PrivateAttr(default=False)

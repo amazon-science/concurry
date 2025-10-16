@@ -18,7 +18,7 @@ from .core import (
     LimitSetAcquisition,
     LoadBalancingAlgorithm,
     RateLimit,
-    RateLimiterAlgorithm,
+    RateLimitAlgorithm,
     ResourceLimit,
     SyncFuture,
     TaskWorker,
@@ -50,7 +50,7 @@ __all__ = [
     "worker",
     "Executor",
     # Algorithms
-    "RateLimiterAlgorithm",
+    "RateLimitAlgorithm",
     # Limit types
     "Limit",
     "RateLimit",

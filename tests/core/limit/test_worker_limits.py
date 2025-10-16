@@ -6,7 +6,7 @@ from concurry import (
     CallLimit,
     LimitSet,
     RateLimit,
-    RateLimiterAlgorithm,
+    RateLimitAlgorithm,
     ResourceLimit,
     Worker,
 )
@@ -26,9 +26,7 @@ class TestWorkerLimits:
         """Test that worker can access limits."""
         # Pass list of Limits - each worker will create its own private LimitSet
         limits = [
-            RateLimit(
-                key="tokens", window_seconds=1, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=100
-            ),
+            RateLimit(key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
             ResourceLimit(key="connections", capacity=5),
         ]
 
@@ -50,9 +48,7 @@ class TestWorkerLimits:
         """Test worker actually using limits."""
         # Pass list of Limits - each worker will create its own private LimitSet
         limits = [
-            RateLimit(
-                key="tokens", window_seconds=1, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=100
-            ),
+            RateLimit(key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
         ]
 
         class TokenWorker(Worker):
@@ -102,17 +98,17 @@ class TestWorkerLimits:
         """Test worker using mixed limit types."""
         # Pass list of Limits - each worker will create its own private LimitSet
         limits = [
-            CallLimit(window_seconds=60, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=100),
+            CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
             RateLimit(
                 key="input_tokens",
                 window_seconds=1,
-                algorithm=RateLimiterAlgorithm.TokenBucket,
+                algorithm=RateLimitAlgorithm.TokenBucket,
                 capacity=1000,
             ),
             RateLimit(
                 key="output_tokens",
                 window_seconds=1,
-                algorithm=RateLimiterAlgorithm.TokenBucket,
+                algorithm=RateLimitAlgorithm.TokenBucket,
                 capacity=500,
             ),
             ResourceLimit(key="db_connections", capacity=2),
@@ -150,7 +146,7 @@ class TestWorkerLimits:
         # Pass list of Limits - each worker will create its own private LimitSet
         limits = [
             RateLimit(
-                key="tokens", window_seconds=1, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=1000
+                key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000
             ),
             ResourceLimit(key="connections", capacity=2),
         ]
@@ -190,9 +186,9 @@ class TestWorkerLimits:
     def test_worker_get_limit_by_key(self, worker_mode):
         """Test worker accessing individual limits by key."""
         limits = [
-            CallLimit(window_seconds=60, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=100),
+            CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
             RateLimit(
-                key="tokens", window_seconds=1, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=1000
+                key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000
             ),
             ResourceLimit(key="connections", capacity=5),
         ]
@@ -253,9 +249,7 @@ class TestWorkerSharedLimits:
     def test_worker_with_shared_limits_list_conversion(self):
         """Test that passing list of Limits creates private LimitSet."""
         limits_list = [
-            RateLimit(
-                key="tokens", window_seconds=1, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=100
-            ),
+            RateLimit(key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
             ResourceLimit(key="connections", capacity=5),
         ]
 
@@ -275,7 +269,7 @@ class TestWorkerSharedLimits:
         shared_limits = LimitSet(
             limits=[
                 RateLimit(
-                    key="tokens", window_seconds=1, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=100
+                    key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100
                 )
             ],
             shared=True,
@@ -332,7 +326,7 @@ class TestWorkerSharedLimits:
         thread_limits = LimitSet(
             limits=[
                 RateLimit(
-                    key="tokens", window_seconds=1, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=100
+                    key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100
                 )
             ],
             shared=True,

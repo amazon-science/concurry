@@ -6,7 +6,7 @@ from concurry import (
     CallLimit,
     LimitSet,
     RateLimit,
-    RateLimiterAlgorithm,
+    RateLimitAlgorithm,
     ResourceLimit,
 )
 
@@ -18,11 +18,11 @@ class TestLimitSet:
         """Test creating a LimitSet."""
         limits = LimitSet(
             limits=[
-                CallLimit(window_seconds=60, algorithm=RateLimiterAlgorithm.SlidingWindow, capacity=100),
+                CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.SlidingWindow, capacity=100),
                 RateLimit(
                     key="input_tokens",
                     window_seconds=60,
-                    algorithm=RateLimiterAlgorithm.TokenBucket,
+                    algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=1000,
                 ),
                 ResourceLimit(key="connections", capacity=10),
@@ -40,13 +40,13 @@ class TestLimitSet:
                     RateLimit(
                         key="tokens",
                         window_seconds=60,
-                        algorithm=RateLimiterAlgorithm.TokenBucket,
+                        algorithm=RateLimitAlgorithm.TokenBucket,
                         capacity=100,
                     ),
                     RateLimit(
                         key="tokens",
                         window_seconds=60,
-                        algorithm=RateLimiterAlgorithm.TokenBucket,
+                        algorithm=RateLimitAlgorithm.TokenBucket,
                         capacity=200,
                     ),
                 ]
@@ -56,7 +56,7 @@ class TestLimitSet:
         """Test acquiring LimitSet with default values."""
         limits = LimitSet(
             limits=[
-                CallLimit(window_seconds=60, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=100),
+                CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
                 ResourceLimit(key="connections", capacity=10),
             ]
         )
@@ -74,7 +74,7 @@ class TestLimitSet:
                 RateLimit(
                     key="input_tokens",
                     window_seconds=1,
-                    algorithm=RateLimiterAlgorithm.TokenBucket,
+                    algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=1000,
                 ),
                 ResourceLimit(key="connections", capacity=10),
@@ -95,7 +95,7 @@ class TestLimitSet:
                 RateLimit(
                     key="input_tokens",
                     window_seconds=60,
-                    algorithm=RateLimiterAlgorithm.TokenBucket,
+                    algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=1000,
                 ),
             ]
@@ -132,7 +132,7 @@ class TestLimitSet:
                 RateLimit(
                     key="input_tokens",
                     window_seconds=1,
-                    algorithm=RateLimiterAlgorithm.TokenBucket,
+                    algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=1000,
                 ),
             ]
@@ -153,13 +153,13 @@ class TestLimitSet:
                 RateLimit(
                     key="input_tokens",
                     window_seconds=1,
-                    algorithm=RateLimiterAlgorithm.TokenBucket,
+                    algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=1000,
                 ),
                 RateLimit(
                     key="output_tokens",
                     window_seconds=1,
-                    algorithm=RateLimiterAlgorithm.TokenBucket,
+                    algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=500,
                 ),
             ]
@@ -182,7 +182,7 @@ class TestLimitSet:
     def test_limit_set_no_update_needed_for_call_limit(self):
         """Test that CallLimits don't need explicit updates."""
         limits = LimitSet(
-            limits=[CallLimit(window_seconds=60, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=100)]
+            limits=[CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100)]
         )
 
         # Should not raise error even without update
@@ -193,9 +193,9 @@ class TestLimitSet:
         """Test update requirements with mixed limit types."""
         limits = LimitSet(
             limits=[
-                CallLimit(window_seconds=60, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=100),
+                CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
                 RateLimit(
-                    key="tokens", window_seconds=1, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=1000
+                    key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000
                 ),
                 ResourceLimit(key="connections", capacity=10),
             ]
@@ -226,7 +226,7 @@ class TestLimitSet:
         limits = LimitSet(
             limits=[
                 RateLimit(
-                    key="tokens", window_seconds=1, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=1000
+                    key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000
                 ),
                 ResourceLimit(key="connections", capacity=10),
             ]
@@ -268,7 +268,7 @@ class TestLimitSet:
         limits = LimitSet(
             limits=[
                 RateLimit(
-                    key="tokens", window_seconds=1, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=1000
+                    key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000
                 ),
             ]
         )
@@ -285,7 +285,7 @@ class TestLimitSet:
         limits = LimitSet(
             limits=[
                 RateLimit(
-                    key="tokens", window_seconds=1, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=1000
+                    key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000
                 ),
                 ResourceLimit(key="connections", capacity=10),
             ]
@@ -309,7 +309,7 @@ class TestLimitSetSharedModes:
         limits = LimitSet(
             limits=[
                 RateLimit(
-                    key="tokens", window_seconds=1, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=100
+                    key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100
                 )
             ]
         )
@@ -325,7 +325,7 @@ class TestLimitSetSharedModes:
         limits = LimitSet(
             limits=[
                 RateLimit(
-                    key="tokens", window_seconds=1, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=100
+                    key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100
                 )
             ],
             shared=False,
@@ -340,7 +340,7 @@ class TestLimitSetSharedModes:
                     RateLimit(
                         key="tokens",
                         window_seconds=1,
-                        algorithm=RateLimiterAlgorithm.TokenBucket,
+                        algorithm=RateLimitAlgorithm.TokenBucket,
                         capacity=100,
                     )
                 ],
@@ -359,7 +359,7 @@ class TestLimitSetSharedModes:
                     RateLimit(
                         key="tokens",
                         window_seconds=1,
-                        algorithm=RateLimiterAlgorithm.TokenBucket,
+                        algorithm=RateLimitAlgorithm.TokenBucket,
                         capacity=100,
                     )
                 ],
@@ -375,7 +375,7 @@ class TestLimitSetSharedModes:
         limits = LimitSet(
             limits=[
                 RateLimit(
-                    key="tokens", window_seconds=1, algorithm=RateLimiterAlgorithm.TokenBucket, capacity=100
+                    key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100
                 )
             ],
             shared=True,
@@ -391,7 +391,7 @@ class TestLimitSetSharedModes:
                     RateLimit(
                         key="tokens",
                         window_seconds=1,
-                        algorithm=RateLimiterAlgorithm.TokenBucket,
+                        algorithm=RateLimitAlgorithm.TokenBucket,
                         capacity=100,
                     )
                 ],
@@ -431,7 +431,7 @@ class TestLimitSetSharedModes:
                     RateLimit(
                         key="tokens",
                         window_seconds=1,
-                        algorithm=RateLimiterAlgorithm.TokenBucket,
+                        algorithm=RateLimitAlgorithm.TokenBucket,
                         capacity=100,
                     ),
                     ResourceLimit(key="connections", capacity=5),

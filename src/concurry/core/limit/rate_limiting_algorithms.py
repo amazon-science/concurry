@@ -5,17 +5,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from typing import Deque, List, Optional
 
-from morphic import AutoEnum, auto
-
-
-class RateLimiterAlgorithm(AutoEnum):
-    """Rate limiting algorithms."""
-
-    TokenBucket = auto()
-    LeakyBucket = auto()
-    SlidingWindow = auto()
-    FixedWindow = auto()
-    GCRA = auto()
+from ..config import RateLimitAlgorithm
 
 
 class BaseRateLimiter(ABC):
@@ -580,7 +570,7 @@ class GCRALimiter(BaseRateLimiter):
 
 
 def RateLimiter(
-    algorithm: RateLimiterAlgorithm,
+    algorithm: RateLimitAlgorithm,
     max_rate: float,
     capacity: int,
     window_seconds: Optional[float] = None,
@@ -602,21 +592,21 @@ def RateLimiter(
     Example:
         ```python
         limiter = RateLimiter(
-            algorithm=RateLimiterAlgorithm.TokenBucket,
+            algorithm=RateLimitAlgorithm.TokenBucket,
             max_rate=10,
             capacity=20
         )
         ```
     """
-    if algorithm == RateLimiterAlgorithm.TokenBucket:
+    if algorithm == RateLimitAlgorithm.TokenBucket:
         return TokenBucketLimiter(max_rate=max_rate, capacity=capacity)
-    elif algorithm == RateLimiterAlgorithm.LeakyBucket:
+    elif algorithm == RateLimitAlgorithm.LeakyBucket:
         return LeakyBucketLimiter(max_rate=max_rate, capacity=capacity)
-    elif algorithm == RateLimiterAlgorithm.SlidingWindow:
+    elif algorithm == RateLimitAlgorithm.SlidingWindow:
         return SlidingWindowLimiter(max_rate=capacity, window_seconds=window_seconds or 1.0)
-    elif algorithm == RateLimiterAlgorithm.FixedWindow:
+    elif algorithm == RateLimitAlgorithm.FixedWindow:
         return FixedWindowLimiter(max_rate=capacity, window_seconds=window_seconds or 1.0)
-    elif algorithm == RateLimiterAlgorithm.GCRA:
+    elif algorithm == RateLimitAlgorithm.GCRA:
         return GCRALimiter(max_rate=max_rate, capacity=capacity)
     else:
         raise ValueError(f"Unknown algorithm: {algorithm}")

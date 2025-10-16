@@ -33,7 +33,7 @@ import pytest
 from morphic import Typed, validate
 from pydantic import BaseModel, Field, ValidationError, validate_call
 
-from concurry import CallLimit, RateLimit, RateLimiterAlgorithm, ResourceLimit, Worker
+from concurry import CallLimit, RateLimit, RateLimitAlgorithm, ResourceLimit, Worker
 from concurry.utils import _IS_RAY_INSTALLED
 
 # Worker mode fixture and cleanup are provided by tests/conftest.py
@@ -1693,7 +1693,7 @@ class TestLimitsWithTypedWorkers:
         """Test Typed worker using rate limits."""
         limits = [
             RateLimit(
-                key="api_tokens", window_seconds=1, capacity=1000, algorithm=RateLimiterAlgorithm.TokenBucket
+                key="api_tokens", window_seconds=1, capacity=1000, algorithm=RateLimitAlgorithm.TokenBucket
             )
         ]
 
@@ -1776,9 +1776,7 @@ class TestLimitsWithPydanticWorkers:
                     return {"service": self.service_name, "tokens_used": tokens}
 
         limits = [
-            RateLimit(
-                key="tokens", window_seconds=1, capacity=5000, algorithm=RateLimiterAlgorithm.TokenBucket
-            )
+            RateLimit(key="tokens", window_seconds=1, capacity=5000, algorithm=RateLimitAlgorithm.TokenBucket)
         ]
 
         if worker_mode == "ray":
@@ -1824,9 +1822,7 @@ class TestWorkerPoolsWithTypedWorkers:
     def test_typed_worker_pool_with_limits(self):
         """Test typed worker pool with shared limits."""
         limits = [
-            RateLimit(
-                key="tokens", window_seconds=1, capacity=100, algorithm=RateLimiterAlgorithm.TokenBucket
-            )
+            RateLimit(key="tokens", window_seconds=1, capacity=100, algorithm=RateLimitAlgorithm.TokenBucket)
         ]
 
         pool = LimitedPoolWorker.options(mode="thread", max_workers=3, limits=limits).init(
@@ -2057,7 +2053,7 @@ class TestComplexValidationScenarios:
                         key="tokens",
                         window_seconds=1,
                         capacity=5000,
-                        algorithm=RateLimiterAlgorithm.TokenBucket,
+                        algorithm=RateLimitAlgorithm.TokenBucket,
                     )
                 ]
                 ComplexWorkerWithLimits.options(mode=worker_mode, limits=limits).init(
@@ -2066,9 +2062,7 @@ class TestComplexValidationScenarios:
             return
 
         limits = [
-            RateLimit(
-                key="tokens", window_seconds=1, capacity=5000, algorithm=RateLimiterAlgorithm.TokenBucket
-            )
+            RateLimit(key="tokens", window_seconds=1, capacity=5000, algorithm=RateLimitAlgorithm.TokenBucket)
         ]
 
         worker = ComplexWorkerWithLimits.options(mode=worker_mode, limits=limits).init(

@@ -4,10 +4,14 @@ This guide will walk you through the core concepts and basic usage of Concurry.
 
 ## Core Concepts
 
-Concurry provides two main components:
+Concurry provides five main components:
 
-1. **Unified Future Interface** - A consistent API for working with futures from any framework
-2. **Progress Tracking** - Beautiful, informative progress bars with rich features
+1. **Workers** - Actor pattern for stateful concurrent operations across sync, thread, process, asyncio, and Ray
+2. **Worker Pools** - Scale workers with automatic load balancing and shared resource management
+3. **Limits** - Resource and rate limiting with composable limit types
+4. **Retry Mechanisms** - Automatic retry with configurable strategies and output validation
+5. **Unified Future Interface** - A consistent API for working with futures from any framework
+6. **Progress Tracking** - Beautiful, informative progress bars with rich features
 
 ## Installation
 
@@ -186,8 +190,12 @@ except Exception as e:
 
 ## Next Steps
 
-Now that you understand the basics, dive deeper into:
+Now that you understand the basics, continue your journey with:
 
+- [Workers Guide](workers.md) - **Start here** to learn the actor pattern and build stateful concurrent operations
+- [Worker Pools Guide](pools.md) - Scale workers with pools and load balancing
+- [Limits Guide](limits.md) - Add resource and rate limiting to your workers
+- [Retry Mechanisms Guide](retries.md) - Make your workers fault-tolerant with automatic retries
 - [Futures Guide](futures.md) - Learn advanced future patterns
 - [Progress Guide](progress.md) - Master progress bar customization
 - [Examples](../examples.md) - See real-world usage patterns

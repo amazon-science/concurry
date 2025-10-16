@@ -72,7 +72,7 @@ To install from source:
 
 ```bash
 # Clone the repository
-git clone https://github.com/adivekar-utexas/concurry.git
+git clone https://github.com/amazon-science/concurry.git
 cd concurry
 
 # Install in development mode
@@ -84,7 +84,7 @@ pip install -e .[all]
 
 ## Next Steps
 
-- [Getting Started](user-guide/getting-started.md) - Learn the basics
-- [Futures Guide](user-guide/futures.md) - Understand the unified future interface
-- [Progress Guide](user-guide/progress.md) - Learn about progress tracking
+- [Getting Started](user-guide/getting-started.md) - Learn the basics of Concurry
+- [Workers Guide](user-guide/workers.md) - Build stateful concurrent operations
+- [Worker Pools Guide](user-guide/pools.md) - Scale with worker pools
 

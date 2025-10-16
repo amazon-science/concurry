@@ -628,7 +628,11 @@ pbar = ProgressBar(
 
 ## Next Steps
 
-- [Futures Guide](futures.md) - Learn about the unified future interface
-- [Examples](../examples.md) - See real-world usage patterns
-- [API Reference](../api/progress.md) - Detailed API documentation
+Now that you can track progress, combine it with other Concurry features:
+
+- [Workers Guide](workers.md) - Add progress tracking to stateful workers
+- [Worker Pools Guide](pools.md) - Track progress across worker pools
+- [Futures Guide](futures.md) - Combine progress bars with unified futures
+- [Examples](../examples.md) - See real-world usage patterns with progress
+- [API Reference](../api/progress.md) - Detailed progress API documentation
 

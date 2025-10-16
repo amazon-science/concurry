@@ -1,5 +1,7 @@
 # Concurry
 
+![Concurry](concurry-landscape.png)
+
 Welcome to **Concurry** - a unified, delightful Python concurrency library that simplifies parallel and asynchronous programming.
 
 ## What is Concurry?
@@ -10,9 +12,11 @@ Concurry provides a consistent, framework-agnostic interface for working with co
 
 - 🔄 **Unified Future Interface**: Work with futures from any framework (threading, asyncio, Ray) through a single, consistent API
 - 🎭 **Actor Pattern (Workers)**: Stateful, isolated workers that run across sync, thread, process, asyncio, and Ray backends with a unified interface
+- 🔁 **Automatic Retries**: Built-in retry mechanisms with exponential backoff, exception filtering, and output validation
+- 🚦 **Resource Limits**: Flexible rate limiting and resource management with shared limits across worker pools
 - 📊 **Beautiful Progress Bars**: Feature-rich progress tracking with tqdm integration, including success/failure states and customizable styling
 - 🎯 **Framework Agnostic**: Write code once, run it with any execution backend
-- 🚀 **High Performance**: Optimized frozen dataclass implementation with < 2.5 µs initialization, minimal overhead (~1-2 µs wrapping), and thread-safe UUID generation
+- 🚀 **High Performance**: Optimized implementation with < 2.5 µs initialization, minimal overhead (~1-2 µs wrapping), and efficient actor-side retries
 - 💡 **Intuitive API**: Clean, Pythonic interface that's easy to learn and use
 - 🛡️ **Type Safe**: Runtime validation ensures correct types at construction with clear error messages
 
@@ -72,7 +76,7 @@ class DataProcessor(Worker):
         return value * self.multiplier
 
 # Create worker in any execution mode
-worker = DataProcessor.options(mode="thread").create(multiplier=3)
+worker = DataProcessor.options(mode="thread").init(multiplier=3)
 
 # Call methods (returns futures)
 future = worker.process(10)
@@ -132,17 +136,20 @@ Concurry follows best practices:
 
 - [Installation Guide](installation.md) - Get started with Concurry
 - [Getting Started](user-guide/getting-started.md) - Learn the basics
-- [Futures Guide](user-guide/futures.md) - Master the unified future interface
 - [Workers Guide](user-guide/workers.md) - Learn the actor pattern with Workers
+- [Worker Pools Guide](user-guide/pools.md) - Scale with worker pools
+- [Limits Guide](user-guide/limits.md) - Resource and rate limiting
+- [Retry Mechanisms Guide](user-guide/retries.md) - Automatic retry with backoff
+- [Futures Guide](user-guide/futures.md) - Master the unified future interface
 - [Progress Guide](user-guide/progress.md) - Learn about progress tracking
 - [API Reference](api/index.md) - Detailed API documentation
 - [Examples](examples.md) - Real-world usage examples
 
 ## Community and Support
 
-- 🐛 [Report Issues](https://github.com/adivekar-utexas/concurry/issues)
-- 💬 [Discussions](https://github.com/adivekar-utexas/concurry/discussions)
-- 📖 [Documentation](https://adivekar-utexas.github.io/concurry/)
+- 🐛 [Report Issues](https://github.com/amazon-science/concurry/issues)
+- 💬 [Discussions](https://github.com/amazon-science/concurry/discussions)
+- 📖 [Documentation](https://amazon-science.github.io/concurry/)
 
 !!! tip "Pro Tip"
     Check out the [Futures Guide](user-guide/futures.md) to see how Concurry can unify your concurrency code across different frameworks!

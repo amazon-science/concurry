@@ -20,6 +20,9 @@ nav:
     - Progress Tracking: user-guide/progress.md
   - API Reference:
     - Overview: api/index.md
+    - Workers: api/workers.md
+    - Limits: api/limits.md
+    - Retries: api/retries.md
     - Futures: api/futures.md
     - Progress: api/progress.md
   - Examples: examples.md

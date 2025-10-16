@@ -113,7 +113,7 @@ class ConfiguredPydanticWorker(Worker, BaseModel):
 
     max_retries: int = Field(default=3)
     timeout: float = Field(default=1.0)
-    
+
     model_config = {"arbitrary_types_allowed": True, "extra": "allow"}
 
     def __init__(self, **data):
@@ -132,7 +132,7 @@ class TypedWorkerWithRetry(Worker, Typed):
     """Worker inheriting from Typed with extra fields allowed."""
 
     config_value: int
-    
+
     model_config = {"extra": "allow"}
 
     def __init__(self, config_value: int):
@@ -647,12 +647,12 @@ class TestRetryWithSharedLimits:
 
     def test_retry_shared_limit_no_starvation(self, worker_mode):
         """Test that retry with shared limits doesn't cause starvation.
-        
+
         This test verifies that:
         1. Limits are properly released between retry attempts
         2. Multiple workers competing for limited resources can all eventually succeed
         3. No deadlock occurs when workers are retrying
-        
+
         Setup: 10 workers competing for 3 resource slots, each worker fails once
         before succeeding. With proper limit release, all should complete.
         """
@@ -722,6 +722,7 @@ class TestRetryWithPydantic:
         # Ray wraps exceptions in RayTaskError
         if worker_mode == "ray":
             import ray
+
             with pytest.raises(ray.exceptions.RayTaskError):
                 worker.validated_method("not", "numbers").result(timeout=5)
         else:
@@ -818,11 +819,11 @@ class TestRetryWithWorkerPools:
                 if task_id not in self.task_attempts:
                     self.task_attempts[task_id] = 0
                 self.task_attempts[task_id] += 1
-                
+
                 # Fail on first attempt for each task
                 if self.task_attempts[task_id] == 1:
                     raise ValueError(f"Worker {self.worker_id} task {task_id} first attempt fails")
-                
+
                 return {
                     "worker_id": self.worker_id,
                     "task_id": task_id,
@@ -1099,7 +1100,7 @@ class TestRetryEdgeCases:
 
         worker.stop()
 
-        # Create new worker for second test  
+        # Create new worker for second test
         worker2 = MixedFilterWorker.options(
             mode=worker_mode,
             num_retries=5,
@@ -1180,6 +1181,367 @@ class TestRetryEdgeCases:
         assert result == 20
 
         worker.stop()
+
+
+# =============================================================================
+# Test Retry with TaskWorker
+# =============================================================================
+
+
+class TestRetryWithTaskWorker:
+    """Test retry functionality with TaskWorker (submit and map)."""
+
+    def test_taskworker_submit_with_retry(self, worker_mode):
+        """Test TaskWorker.submit() with retry on exception."""
+        import time
+
+        from concurry import TaskWorker
+
+        # For process/ray modes, closures don't capture state across boundaries
+        # Use time-based approach instead
+        start_time = time.time()
+
+        def flaky_function(value: int) -> int:
+            # Fail for first 0.05 seconds, then succeed
+            if time.time() - start_time < 0.05:
+                raise ValueError("Still failing")
+            return value * 2
+
+        worker = TaskWorker.options(
+            mode=worker_mode,
+            num_retries=10,  # Enough retries to succeed
+            retry_wait=0.01,
+        ).init()
+
+        future = worker.submit(flaky_function, 10)
+        result = future.result(timeout=5)
+
+        assert result == 20  # Verify retry succeeded
+
+        worker.stop()
+
+    def test_taskworker_submit_retry_exhaustion(self, worker_mode):
+        """Test TaskWorker.submit() with retry exhaustion."""
+        from concurry import TaskWorker
+
+        def always_fails(value: int) -> int:
+            raise RuntimeError("Always fails")
+
+        worker = TaskWorker.options(
+            mode=worker_mode,
+            num_retries=2,
+            retry_wait=0.01,
+        ).init()
+
+        future = worker.submit(always_fails, 10)
+        with pytest.raises(RuntimeError, match="Always fails"):
+            future.result(timeout=5)
+
+        worker.stop()
+
+    def test_taskworker_submit_with_retry_until(self, worker_mode):
+        """Test TaskWorker.submit() with output validation."""
+        import time
+
+        from concurry import TaskWorker
+
+        # Use time-based approach for all modes (closures don't work with process/ray)
+        start_time = time.time()
+
+        def incrementing_function() -> int:
+            elapsed = time.time() - start_time
+            # Return incrementing value based on elapsed time
+            # Will fail validation until enough time has passed
+            return int(elapsed / 0.01) + 1
+
+        def validate_gt_3(result: int, **context) -> bool:
+            return result > 3
+
+        worker = TaskWorker.options(
+            mode=worker_mode,
+            num_retries=10,
+            retry_wait=0.01,
+            retry_until=validate_gt_3,
+        ).init()
+
+        future = worker.submit(incrementing_function)
+        result = future.result(timeout=5)
+
+        assert result > 3  # Verify validation succeeded
+
+        worker.stop()
+
+    def test_taskworker_submit_async_with_retry(self, worker_mode):
+        """Test TaskWorker.submit() with async function and retry."""
+        import time
+
+        from concurry import TaskWorker
+
+        # Use time-based approach (closures don't work with process/ray)
+        start_time = time.time()
+
+        async def async_flaky_function(value: int) -> int:
+            import asyncio
+
+            await asyncio.sleep(0.01)
+            # Fail for first 0.05 seconds, then succeed
+            if time.time() - start_time < 0.05:
+                raise ValueError("Still failing")
+            return value * 3
+
+        worker = TaskWorker.options(
+            mode=worker_mode,
+            num_retries=10,
+            retry_wait=0.01,
+        ).init()
+
+        future = worker.submit(async_flaky_function, 10)
+        result = future.result(timeout=5)
+
+        assert result == 30  # Verify retry succeeded
+
+        worker.stop()
+
+    def test_taskworker_map_with_retry(self, worker_mode):
+        """Test TaskWorker.map() with retry."""
+        import random
+
+        from concurry import TaskWorker
+
+        # Use random failures (not closures, since they don't work with process/ray)
+        def flaky_square(x: int) -> int:
+            # Randomly fail with ~50% chance on first few attempts
+            if random.random() < 0.3:
+                raise ValueError(f"Random failure for {x}")
+            return x**2
+
+        worker = TaskWorker.options(
+            mode=worker_mode,
+            num_retries=10,  # Enough retries to eventually succeed
+            retry_wait=0.01,
+        ).init()
+
+        results = list(worker.map(flaky_square, range(5)))
+
+        assert results == [0, 1, 4, 9, 16]  # Verify all succeeded
+
+        worker.stop()
+
+    def test_taskworker_submit_with_specific_exception(self, worker_mode):
+        """Test TaskWorker.submit() retries only on specific exceptions."""
+        from concurry import TaskWorker
+
+        def always_value_error() -> str:
+            raise ValueError("Retriable error")
+
+        def always_type_error() -> str:
+            raise TypeError("Non-retriable error")
+
+        worker = TaskWorker.options(
+            mode=worker_mode,
+            num_retries=3,
+            retry_wait=0.01,
+            retry_on=[ValueError],
+        ).init()
+
+        # Should retry on ValueError (will exhaust retries)
+        future = worker.submit(always_value_error)
+        with pytest.raises(ValueError, match="Retriable"):
+            future.result(timeout=5)
+
+        # Should NOT retry on TypeError (fails immediately)
+        future = worker.submit(always_type_error)
+        with pytest.raises(TypeError, match="Non-retriable"):
+            future.result(timeout=5)
+
+        worker.stop()
+
+    def test_taskworker_submit_with_limits(self, worker_mode):
+        """Test TaskWorker.submit() with limits and retry."""
+        import time
+
+        from concurry import LimitSet, ResourceLimit, TaskWorker
+
+        limits = LimitSet(
+            limits=[ResourceLimit(key="slots", capacity=1)],
+            shared=True,
+            mode=worker_mode,
+        )
+
+        # Use time-based approach (closures don't work with process/ray)
+        start_time = time.time()
+
+        def limited_function() -> str:
+            # Fail for first 0.05 seconds
+            if time.time() - start_time < 0.05:
+                raise ValueError("First attempt fails")
+            return "success"
+
+        worker = TaskWorker.options(
+            mode=worker_mode,
+            limits=limits,
+            num_retries=10,
+            retry_wait=0.01,
+        ).init()
+
+        # Note: TaskWorker doesn't use self.limits in the function,
+        # but the retry mechanism should still work
+        future = worker.submit(limited_function)
+        result = future.result(timeout=5)
+
+        assert result == "success"
+
+        worker.stop()
+
+    def test_taskworker_pool_with_retry(self, worker_mode):
+        """Test TaskWorker pool with retry."""
+        if worker_mode in ["sync", "asyncio"]:
+            pytest.skip("Sync and asyncio modes don't support max_workers > 1")
+
+        import random
+
+        from concurry import TaskWorker
+
+        # Use random failures (closures don't work with process/ray)
+        def flaky_multiply(x: int) -> int:
+            # Randomly fail with 40% probability
+            if random.random() < 0.4:
+                raise ValueError(f"Random failure for {x}")
+            return x * 10
+
+        pool = TaskWorker.options(
+            mode=worker_mode,
+            max_workers=3,
+            num_retries=20,  # Enough retries to eventually succeed
+            retry_wait=0.01,
+        ).init()
+
+        # Submit multiple tasks
+        futures = [pool.submit(flaky_multiply, i) for i in range(6)]
+        results = [f.result(timeout=10) for f in futures]
+
+        assert results == [0, 10, 20, 30, 40, 50]
+
+        pool.stop()
+
+    def test_taskworker_pool_map_with_retry(self, worker_mode):
+        """Test TaskWorker pool map() with retry."""
+        if worker_mode in ["sync", "asyncio"]:
+            pytest.skip("Sync and asyncio modes don't support max_workers > 1")
+
+        import random
+
+        from concurry import TaskWorker
+
+        # Use random failures (closures don't work with process/ray)
+        def flaky_double(x: int) -> int:
+            # Randomly fail with 40% probability
+            if random.random() < 0.4:
+                raise ValueError(f"Random failure for {x}")
+            return x * 2
+
+        pool = TaskWorker.options(
+            mode=worker_mode,
+            max_workers=4,
+            num_retries=20,  # Enough retries to eventually succeed
+            retry_wait=0.01,
+        ).init()
+
+        results = list(pool.map(flaky_double, range(8)))
+
+        assert results == [0, 2, 4, 6, 8, 10, 12, 14]
+
+        pool.stop()
+
+    def test_taskworker_pool_retry_with_validation(self, worker_mode):
+        """Test TaskWorker pool with retry_until validation."""
+        if worker_mode in ["sync", "asyncio"]:
+            pytest.skip("Sync and asyncio modes don't support max_workers > 1")
+
+        import time
+
+        from concurry import TaskWorker
+
+        # Use time-based approach (closures don't work with process/ray)
+        start_time = time.time()
+
+        def time_based_function(x: int) -> int:
+            elapsed = time.time() - start_time
+            # Return value that increases over time
+            return int(elapsed / 0.01) + x
+
+        def validate_gt_2(result: int, **context) -> bool:
+            return result > 2
+
+        pool = TaskWorker.options(
+            mode=worker_mode,
+            max_workers=2,
+            num_retries=20,  # Enough retries
+            retry_wait=0.01,
+            retry_until=validate_gt_2,
+        ).init()
+
+        futures = [pool.submit(time_based_function, i) for i in range(4)]
+        results = [f.result(timeout=10) for f in futures]
+
+        # All should pass validation (> 2)
+        assert all(r > 2 for r in results)
+
+        pool.stop()
+
+    def test_taskworker_lambda_with_retry(self, worker_mode):
+        """Test TaskWorker with lambda functions and retry."""
+        from concurry import TaskWorker
+
+        # Lambdas don't maintain state, so we use a list
+        attempts = [0]
+
+        worker = TaskWorker.options(
+            mode=worker_mode,
+            num_retries=5,
+            retry_wait=0.01,
+        ).init()
+
+        # This is tricky - lambdas can't maintain state across retries
+        # So we just test that retry mechanism doesn't break with lambdas
+        future = worker.submit(lambda x: x * 5, 10)
+        result = future.result(timeout=5)
+
+        assert result == 50
+
+        worker.stop()
+
+    def test_taskworker_pool_mixed_success_failure(self, worker_mode):
+        """Test TaskWorker pool where some tasks succeed and some fail."""
+        if worker_mode in ["sync", "asyncio"]:
+            pytest.skip("Sync and asyncio modes don't support max_workers > 1")
+
+        from concurry import TaskWorker
+
+        def conditional_function(x: int) -> int:
+            if x % 2 == 0:
+                return x * 2  # Even numbers succeed
+            else:
+                raise ValueError(f"Odd number: {x}")  # Odd numbers fail
+
+        pool = TaskWorker.options(
+            mode=worker_mode,
+            max_workers=3,
+            num_retries=2,
+            retry_wait=0.01,
+        ).init()
+
+        futures = [pool.submit(conditional_function, i) for i in range(6)]
+
+        # Check results
+        for i, f in enumerate(futures):
+            if i % 2 == 0:
+                assert f.result(timeout=5) == i * 2
+            else:
+                with pytest.raises(ValueError, match=f"Odd number: {i}"):
+                    f.result(timeout=5)
+
+        pool.stop()
 
 
 # =============================================================================

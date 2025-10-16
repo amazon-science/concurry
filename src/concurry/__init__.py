@@ -20,6 +20,9 @@ from .core import (
     RateLimit,
     RateLimitAlgorithm,
     ResourceLimit,
+    RetryAlgorithm,
+    RetryConfig,
+    RetryValidationError,
     SyncFuture,
     TaskWorker,
     Worker,
@@ -51,6 +54,7 @@ __all__ = [
     "Executor",
     # Algorithms
     "RateLimitAlgorithm",
+    "RetryAlgorithm",
     # Limit types
     "Limit",
     "RateLimit",
@@ -59,6 +63,9 @@ __all__ = [
     "Acquisition",
     "LimitSetAcquisition",
     "LimitSet",
+    # Retry types
+    "RetryConfig",
+    "RetryValidationError",
     # Utilities
     "ProgressBar",
 ]

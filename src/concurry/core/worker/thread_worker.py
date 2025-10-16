@@ -141,9 +141,7 @@ class ThreadWorkerProxy(WorkerProxy):
                         # Create worker wrapper with limits and retry logic if needed
                         # (limits and retry_config already processed by WorkerBuilder)
 
-                        worker_cls = _create_worker_wrapper(
-                            self.worker_cls, self.limits, self.retry_config
-                        )
+                        worker_cls = _create_worker_wrapper(self.worker_cls, self.limits, self.retry_config)
 
                         worker = worker_cls(*self.init_args, **self.init_kwargs)
                         future._future.set_result(None)
@@ -152,7 +150,8 @@ class ThreadWorkerProxy(WorkerProxy):
                         continue
 
                     if method_name == "__task__":
-                        # Execute arbitrary function
+                        # Execute arbitrary function with optional retry logic
+                        # Retry logic is applied here (not in submit()) to avoid double-wrapping
                         fn, task_args, task_kwargs = args
                         if not callable(fn):
                             future._future.set_exception(
@@ -161,7 +160,24 @@ class ThreadWorkerProxy(WorkerProxy):
                             with self._futures_lock:
                                 self._futures.pop(request_id, None)
                             continue
-                        result = _invoke_function(fn, *task_args, **task_kwargs)
+
+                        # Apply retry logic if configured (for TaskWorker functions)
+                        if self.retry_config is not None and self.retry_config.num_retries > 0:
+                            from ..retry import execute_with_retry_auto
+
+                            context = {
+                                "method_name": fn.__name__
+                                if hasattr(fn, "__name__")
+                                else "anonymous_function",
+                                "worker_class_name": "TaskWorker",
+                            }
+                            # execute_with_retry_auto handles both sync and async functions automatically
+                            result = execute_with_retry_auto(
+                                fn, task_args, task_kwargs, self.retry_config, context
+                            )
+                        else:
+                            result = _invoke_function(fn, *task_args, **task_kwargs)
+
                         future._future.set_result(result)
                         with self._futures_lock:
                             self._futures.pop(request_id, None)

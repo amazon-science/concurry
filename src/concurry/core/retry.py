@@ -570,6 +570,58 @@ async def execute_with_retry_async(
         raise RuntimeError(f"Unexpected state in retry logic for method '{method_name}'")
 
 
+def execute_with_retry_auto(
+    fn: Callable,
+    args: tuple,
+    kwargs: dict,
+    config: RetryConfig,
+    context: Dict[str, Any],
+) -> Any:
+    """Automatically execute function with retry, handling both sync and async functions.
+
+    This is a convenience function for TaskWorker that automatically detects whether
+    the function is sync or async and uses the appropriate retry mechanism.
+
+    For async functions in sync contexts (Sync/Thread/Process/Ray workers), this will
+    run the async retry logic using asyncio.run().
+
+    For async functions in async contexts (AsyncioWorker), the caller should use
+    execute_with_retry_async directly instead of this function.
+
+    Args:
+        fn: Function to execute (sync or async)
+        args: Positional arguments
+        kwargs: Keyword arguments
+        config: Retry configuration
+        context: Context dict with method_name, worker_class, etc.
+
+    Returns:
+        Result from successful function execution
+
+    Raises:
+        RetryValidationError: If retry_until validation fails after all retries
+        Exception: The last exception if retries exhausted
+
+    Example:
+        ```python
+        # Works for both sync and async functions
+        result = execute_with_retry_auto(
+            some_function,  # Can be sync or async
+            (arg1, arg2),
+            {"key": "value"},
+            retry_config,
+            {"method_name": "some_function"}
+        )
+        ```
+    """
+    if inspect.iscoroutinefunction(fn):
+        # Async function - run with asyncio.run() for sync contexts
+        return asyncio.run(execute_with_retry_async(fn, args, kwargs, config, context))
+    else:
+        # Sync function - use regular retry
+        return execute_with_retry(fn, args, kwargs, config, context)
+
+
 def create_retry_wrapper(
     method: Callable,
     config: RetryConfig,

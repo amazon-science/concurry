@@ -155,6 +155,10 @@ class SyncWorkerProxy(WorkerProxy):
     def _execute_task(self, fn, *args: Any, **kwargs: Any) -> SyncFuture:
         """Execute an arbitrary function synchronously and wrap result in SyncFuture.
 
+        This method applies retry logic for TaskWorker.submit() and TaskWorker.map().
+        The retry logic is applied here (not in submit()) to avoid double-wrapping,
+        since submit() would also be wrapped by __getattribute__ retry logic.
+
         Args:
             fn: Callable function to execute
             *args: Positional arguments
@@ -175,7 +179,18 @@ class SyncWorkerProxy(WorkerProxy):
 
         # Execute the function and wrap any execution errors in the future
         try:
-            result = _invoke_function(fn, *args, **kwargs)
+            # Apply retry logic if configured (for TaskWorker functions)
+            if self.retry_config is not None and self.retry_config.num_retries > 0:
+                from ..retry import execute_with_retry_auto
+
+                context = {
+                    "method_name": fn.__name__ if hasattr(fn, "__name__") else "anonymous_function",
+                    "worker_class_name": "TaskWorker",
+                }
+                # execute_with_retry_auto handles both sync and async functions automatically
+                result = execute_with_retry_auto(fn, args, kwargs, self.retry_config, context)
+            else:
+                result = _invoke_function(fn, *args, **kwargs)
             return SyncFuture(result_value=result)
         except Exception as e:
             return SyncFuture(exception_value=e)

@@ -69,12 +69,26 @@ def _process_worker_main(
                     continue
 
                 if method_name == "__task__":
-                    # Execute arbitrary function - deserialize it
+                    # Execute arbitrary function with optional retry logic
+                    # Retry logic is applied here (not in submit()) to avoid double-wrapping
                     fn_bytes, task_args, task_kwargs = args
                     fn = cloudpickle.loads(fn_bytes)
                     if not callable(fn):
                         raise TypeError(f"fn must be callable, got {type(fn).__name__}")
-                    result = _invoke_function(fn, *task_args, **task_kwargs)
+
+                    # Apply retry logic if configured (for TaskWorker functions)
+                    if retry_config is not None and retry_config.num_retries > 0:
+                        from ..retry import execute_with_retry_auto
+
+                        context = {
+                            "method_name": fn.__name__ if hasattr(fn, "__name__") else "anonymous_function",
+                            "worker_class_name": "TaskWorker",
+                        }
+                        # execute_with_retry_auto handles both sync and async functions automatically
+                        result = execute_with_retry_auto(fn, task_args, task_kwargs, retry_config, context)
+                    else:
+                        result = _invoke_function(fn, *task_args, **task_kwargs)
+
                     result_queue.put((request_id, "ok", result))
                     continue
 

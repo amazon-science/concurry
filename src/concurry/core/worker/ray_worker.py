@@ -214,7 +214,9 @@ class RayWorkerProxy(WorkerProxy):
         # Create worker wrapper with limits and retry logic if needed
         # (limits and retry_config already processed by WorkerBuilder)
         # Use for_ray=True to pre-wrap methods (Ray bypasses __getattribute__)
-        worker_cls_to_use = _create_worker_wrapper(self.worker_cls, self.limits, self.retry_config, for_ray=True)
+        worker_cls_to_use = _create_worker_wrapper(
+            self.worker_cls, self.limits, self.retry_config, for_ray=True
+        )
 
         # Create the Ray actor. Use actor_options if provided, otherwise use defaults.
         # Note: Ray 2.50+ doesn't accept ray.remote(**{}) with an empty dict
@@ -258,7 +260,10 @@ class RayWorkerProxy(WorkerProxy):
         return future
 
     def _execute_task(self, fn, *args: Any, **kwargs: Any):
-        """Execute an arbitrary function on the Ray actor.
+        """Execute an arbitrary function on the Ray actor with optional retry logic.
+
+        This method applies retry logic for TaskWorker.submit() and TaskWorker.map().
+        The retry logic is applied here (not in submit()) to avoid double-wrapping.
 
         Args:
             fn: Callable function to execute
@@ -278,18 +283,45 @@ class RayWorkerProxy(WorkerProxy):
         # Don't catch exceptions - let them propagate immediately for fast failure
         import ray
 
-        # Ray doesn't support async functions directly in ray.remote() for tasks
-        # We need to wrap them to use asyncio.run()
-        if inspect.iscoroutinefunction(fn):
-            # Capture the async function in a closure
-            async_fn = fn
+        # Apply retry logic if configured (for TaskWorker functions)
+        if self.retry_config is not None and self.retry_config.num_retries > 0:
+            # Wrap the function with retry logic before making it remote
+            # Important: Serialize retry_config to avoid Pydantic pickling issues with Ray
+            import cloudpickle
 
-            # Wrap the async function in a sync wrapper
-            def sync_wrapper(*args, **kwargs):
-                return asyncio.run(async_fn(*args, **kwargs))
+            original_fn = fn
+            retry_config_bytes = cloudpickle.dumps(self.retry_config)
 
-            # Use the wrapper instead
-            fn = sync_wrapper
+            # Create a wrapper that deserializes config and uses execute_with_retry_auto
+            def ray_retry_wrapper(*inner_args, **inner_kwargs):
+                import cloudpickle
+
+                from ..retry import execute_with_retry_auto
+
+                # Deserialize retry config inside the Ray task
+                r_config = cloudpickle.loads(retry_config_bytes)
+                context = {
+                    "method_name": original_fn.__name__
+                    if hasattr(original_fn, "__name__")
+                    else "anonymous_function",
+                    "worker_class_name": "TaskWorker",
+                }
+                # execute_with_retry_auto handles both sync and async functions
+                return execute_with_retry_auto(original_fn, inner_args, inner_kwargs, r_config, context)
+
+            fn = ray_retry_wrapper
+        else:
+            # No retry configured - handle async functions normally
+            if inspect.iscoroutinefunction(fn):
+                # Capture the async function in a closure
+                async_fn = fn
+
+                # Wrap the async function in a sync wrapper
+                def sync_wrapper(*args, **kwargs):
+                    return asyncio.run(async_fn(*args, **kwargs))
+
+                # Use the wrapper instead
+                fn = sync_wrapper
 
         # Create a remote function and execute it on the actor's resources
         # We'll use ray.remote to make the function remote, then call it

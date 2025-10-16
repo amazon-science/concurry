@@ -10,8 +10,8 @@ from pydantic import ConfigDict, PrivateAttr
 
 from ..config import ExecutionMode
 from ..future import BaseFuture
-from ..retry import RetryAlgorithm, RetryConfig, create_retry_wrapper
 from ..limit.limit_set import LimitSet
+from ..retry import RetryAlgorithm, RetryConfig, create_retry_wrapper
 
 T = TypeVar("T")
 
@@ -154,7 +154,9 @@ def _validate_shared_limitset_mode_compatibility(limit_set: Any, worker_mode: Ex
     """
 
 
-def _create_worker_wrapper(worker_cls: Type, limits: Any, retry_config: Optional[Any] = None, for_ray: bool = False) -> Type:
+def _create_worker_wrapper(
+    worker_cls: Type, limits: Any, retry_config: Optional[Any] = None, for_ray: bool = False
+) -> Type:
     """Create a wrapper class that injects limits and retry logic.
 
     This wrapper dynamically inherits from the user's worker class and:
@@ -203,7 +205,6 @@ def _create_worker_wrapper(worker_cls: Type, limits: Any, retry_config: Optional
         ```
     """
     # Import here to avoid circular imports
-    from ..retry import create_retry_wrapper
 
     # Determine if we need to apply any wrapping
     has_limits = limits is not None
@@ -239,7 +240,13 @@ def _create_worker_wrapper(worker_cls: Type, limits: Any, retry_config: Optional
 
             # Only wrap public methods if retry is configured AND not for Ray
             # (Ray mode uses pre-wrapped methods at class level)
-            if has_retry and not for_ray and not name.startswith("_") and callable(attr) and not isinstance(attr, type):
+            if (
+                has_retry
+                and not for_ray
+                and not name.startswith("_")
+                and callable(attr)
+                and not isinstance(attr, type)
+            ):
                 # Check if this method has already been wrapped
                 # (to avoid double-wrapping on repeated access)
                 if hasattr(attr, "__wrapped_with_retry__"):
@@ -276,39 +283,41 @@ def _create_worker_wrapper(worker_cls: Type, limits: Any, retry_config: Optional
     # ONLY wrap methods that are defined directly on the worker class, not inherited ones
     if for_ray and has_retry:
         import inspect
-        
+
         # Get methods defined directly on the worker class (not inherited)
         for attr_name in dir(worker_cls):
             # Skip private/dunder methods
             if attr_name.startswith("_"):
                 continue
-            
+
             # Only process if it's defined directly on worker_cls, not inherited
             if attr_name not in worker_cls.__dict__:
                 continue
-            
+
             try:
                 attr = getattr(worker_cls, attr_name)
                 # Only wrap actual callable methods (not properties, classmethods, staticmethods)
                 if not callable(attr):
                     continue
-                    
+
                 # Skip if it's a class or type
                 if isinstance(attr, type):
                     continue
-                
+
                 # Check if it's a function/method we should wrap
                 if not (inspect.isfunction(attr) or inspect.ismethod(attr)):
                     continue
-                
+
                 # Create a wrapper method that applies retry logic
                 def make_wrapped_method(original_method, method_name):
                     # Check if it's async
                     is_async = inspect.iscoroutinefunction(original_method)
-                    
+
                     if is_async:
+
                         async def async_method_wrapper(self, *args, **kwargs):
                             from ..retry import execute_with_retry_async
+
                             context = {
                                 "method_name": method_name,
                                 "worker_class_name": worker_cls.__name__,
@@ -318,23 +327,25 @@ def _create_worker_wrapper(worker_cls: Type, limits: Any, retry_config: Optional
                             return await execute_with_retry_async(
                                 bound_method, args, kwargs, retry_config, context
                             )
+
                         async_method_wrapper.__wrapped_with_retry__ = True
                         return async_method_wrapper
                     else:
+
                         def sync_method_wrapper(self, *args, **kwargs):
                             from ..retry import execute_with_retry
+
                             context = {
                                 "method_name": method_name,
                                 "worker_class_name": worker_cls.__name__,
                             }
                             # Bind self to the original method
                             bound_method = original_method.__get__(self, type(self))
-                            return execute_with_retry(
-                                bound_method, args, kwargs, retry_config, context
-                            )
+                            return execute_with_retry(bound_method, args, kwargs, retry_config, context)
+
                         sync_method_wrapper.__wrapped_with_retry__ = True
                         return sync_method_wrapper
-                
+
                 wrapped = make_wrapped_method(attr, attr_name)
                 setattr(WorkerWithLimitsAndRetry, attr_name, wrapped)
             except (AttributeError, TypeError):

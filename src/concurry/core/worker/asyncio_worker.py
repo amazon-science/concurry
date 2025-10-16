@@ -295,6 +295,9 @@ class AsyncioWorkerProxy(WorkerProxy):
     def _execute_task(self, fn, *args: Any, **kwargs: Any):
         """Execute an arbitrary function - routes to sync thread or async event loop.
 
+        This method applies retry logic for TaskWorker.submit() and TaskWorker.map().
+        The retry logic is applied here (not in submit()) to avoid double-wrapping.
+
         Sync functions are executed in a dedicated thread to avoid blocking the event loop.
         Async functions are executed in the event loop for true concurrent execution.
 
@@ -330,7 +333,22 @@ class AsyncioWorkerProxy(WorkerProxy):
                         if not callable(fn):
                             raise TypeError(f"fn must be callable, got {type(fn).__name__}")
 
-                        result = await fn(*unwrapped_args, **unwrapped_kwargs)
+                        # Apply retry logic if configured (for TaskWorker async functions)
+                        if self.retry_config is not None and self.retry_config.num_retries > 0:
+                            from ..retry import execute_with_retry_async
+
+                            context = {
+                                "method_name": fn.__name__
+                                if hasattr(fn, "__name__")
+                                else "anonymous_function",
+                                "worker_class_name": "TaskWorker",
+                            }
+                            result = await execute_with_retry_async(
+                                fn, unwrapped_args, unwrapped_kwargs, self.retry_config, context
+                            )
+                        else:
+                            result = await fn(*unwrapped_args, **unwrapped_kwargs)
+
                         result_future.set_result(result)
                     except Exception as e:
                         result_future.set_exception(e)
@@ -346,11 +364,24 @@ class AsyncioWorkerProxy(WorkerProxy):
             self._loop.call_soon_threadsafe(create_and_schedule)
         else:
             # Route to sync thread for sync functions
-            # Create a wrapper that executes the function
+            # Create a wrapper that executes the function with retry logic
             def execute_sync_task():
                 if not callable(fn):
                     raise TypeError(f"fn must be callable, got {type(fn).__name__}")
-                return fn(*unwrapped_args, **unwrapped_kwargs)
+
+                # Apply retry logic if configured (for TaskWorker sync functions)
+                if self.retry_config is not None and self.retry_config.num_retries > 0:
+                    from ..retry import execute_with_retry
+
+                    context = {
+                        "method_name": fn.__name__ if hasattr(fn, "__name__") else "anonymous_function",
+                        "worker_class_name": "TaskWorker",
+                    }
+                    return execute_with_retry(
+                        fn, unwrapped_args, unwrapped_kwargs, self.retry_config, context
+                    )
+                else:
+                    return fn(*unwrapped_args, **unwrapped_kwargs)
 
             # Queue task to sync thread
             # We use a special marker "__sync_task__" to indicate this is a task, not a method

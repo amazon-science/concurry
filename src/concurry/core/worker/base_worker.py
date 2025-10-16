@@ -185,18 +185,23 @@ def _create_worker_wrapper(worker_cls: Type, limits: Any) -> Type:
 
     class WorkerWithLimits(worker_cls):
         def __init__(self, *args, **kwargs):
+            # Call parent __init__ first to properly initialize Pydantic models
+            super().__init__(*args, **kwargs)
+
             # If limits is a list, create LimitSet here (inside the actor/process)
             if isinstance(limits, list):
                 # Import here to avoid circular imports
                 from ..limit.limit_set import LimitSet
 
                 # Create private LimitSet with mode=sync (uses threading.Lock, works everywhere)
-                self.limits = LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync)
+                limit_set = LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync)
             else:
                 # Already a LimitSet, use it directly
-                self.limits = limits
+                limit_set = limits
 
-            super().__init__(*args, **kwargs)
+            # Use object.__setattr__ to bypass frozen models (Typed/BaseModel)
+            # This allows limits to work with frozen Pydantic models
+            object.__setattr__(self, "limits", limit_set)
 
     # Preserve original class name for debugging
     WorkerWithLimits.__name__ = f"{worker_cls.__name__}_WithLimits"
@@ -420,6 +425,57 @@ class WorkerBuilder:
 
         return False
 
+    def _check_ray_pydantic_compatibility(self, execution_mode: ExecutionMode) -> None:
+        """Check for Ray + Pydantic incompatibility and raise/warn appropriately.
+
+        Args:
+            execution_mode: The execution mode being used
+
+        Raises:
+            ValueError: If trying to create Ray worker with Pydantic-based class
+        """
+        try:
+            from pydantic import BaseModel
+        except ImportError:
+            # Pydantic not installed, no issue
+            return
+
+        # Check if worker class is a Pydantic BaseModel subclass
+        is_pydantic_based = isinstance(self._worker_cls, type) and issubclass(self._worker_cls, BaseModel)
+
+        if not is_pydantic_based:
+            return
+
+        # Issue warning if Ray is installed (even if not using Ray mode)
+        try:
+            import ray
+
+            if execution_mode != ExecutionMode.Ray:
+                # Warn that Ray mode won't work with this worker
+                warnings.warn(
+                    f"Worker class '{self._worker_cls.__name__}' inherits from Pydantic BaseModel. "
+                    f"This worker will NOT be compatible with Ray mode due to Ray's actor wrapping "
+                    f"conflicting with Pydantic's __setattr__. Consider using composition instead of "
+                    f"inheritance if you need Ray support.",
+                    UserWarning,
+                    stacklevel=5,
+                )
+        except ImportError:
+            # Ray not installed, no warning needed
+            pass
+
+        # Raise error if actually trying to use Ray mode
+        if execution_mode == ExecutionMode.Ray:
+            raise ValueError(
+                f"Cannot create Ray worker with Pydantic-based class '{self._worker_cls.__name__}'. "
+                f"Ray's actor wrapping mechanism conflicts with Pydantic's __setattr__ implementation. "
+                f"\n\nWorkaround: Use composition instead of inheritance:\n"
+                f"  class {self._worker_cls.__name__}(Worker):\n"
+                f"      def __init__(self, ...):\n"
+                f"          self.config = YourPydanticModel(...)\n"
+                f"\nThis applies to both morphic.Typed and pydantic.BaseModel."
+            )
+
     def init(self, *args: Any, **kwargs: Any) -> Any:
         """Initialize the worker instance with initialization arguments.
 
@@ -457,6 +513,9 @@ class WorkerBuilder:
 
         Returns:
             WorkerProxy instance
+
+        Raises:
+            ValueError: If trying to create Ray worker with Pydantic-based class
         """
         from .asyncio_worker import AsyncioWorkerProxy
         from .process_worker import ProcessWorkerProxy
@@ -466,6 +525,9 @@ class WorkerBuilder:
 
         # Convert mode string to ExecutionMode
         execution_mode = ExecutionMode(self._mode)
+
+        # Check for Ray + Pydantic incompatibility
+        self._check_ray_pydantic_compatibility(execution_mode)
 
         # Select appropriate proxy class
         if execution_mode == ExecutionMode.Sync:
@@ -523,6 +585,9 @@ class WorkerBuilder:
 
         Returns:
             WorkerProxyPool instance
+
+        Raises:
+            ValueError: If trying to create Ray pool with Pydantic-based class
         """
         from ..config import ExecutionMode, LoadBalancingAlgorithm
         from .worker_pool import (
@@ -533,6 +598,9 @@ class WorkerBuilder:
 
         # Convert mode string to ExecutionMode
         execution_mode = ExecutionMode(self._mode)
+
+        # Check for Ray + Pydantic incompatibility
+        self._check_ray_pydantic_compatibility(execution_mode)
 
         # Determine max_workers (use defaults if not specified)
         max_workers = self._max_workers
@@ -596,18 +664,35 @@ class Worker:
 
     **Important Design Note:**
 
-    The Worker class itself does NOT inherit from morphic.Typed.     This design choice allows you
+    The Worker class itself does NOT inherit from morphic.Typed. This design choice allows you
     complete freedom in defining your `__init__` method - you can use any signature with any
     combination of positional arguments, keyword arguments, *args, and **kwargs. The Typed
     integration is applied at the WorkerProxy layer, which wraps your worker and provides
     validation for worker configuration (mode, blocking, etc.) but not for worker initialization.
 
+    **Model Inheritance Support:**
+
+    Worker supports cooperative multiple inheritance, allowing you to combine Worker with
+    model classes for automatic field validation and serialization:
+
+    - ✅ **morphic.Typed**: Full support (sync, thread, process, asyncio)
+    - ✅ **pydantic.BaseModel**: Full support (sync, thread, process, asyncio)
+    - ❌ **Ray mode limitation**: Ray mode is NOT compatible with Typed/BaseModel workers
+
+    **Validation Decorators (Works with ALL modes including Ray):**
+
+    - ✅ **@morphic.validate**: Works on methods and __init__ (all modes including Ray)
+    - ✅ **@pydantic.validate_call**: Works on methods and __init__ (all modes including Ray)
+
+    These decorators provide runtime validation without class inheritance, making them
+    compatible with Ray mode.
+
     This means you can use:
-    - Plain Python classes
-    - Pydantic models (if you want)
-    - Dataclasses (if you want)
-    - Attrs classes (if you want)
-    - Any other class structure
+    - Plain Python classes (all modes including Ray)
+    - Worker + morphic.Typed for validation and hooks (all modes EXCEPT Ray)
+    - Worker + pydantic.BaseModel for Pydantic validation (all modes EXCEPT Ray)
+    - @validate or @validate_call decorators on methods (all modes including Ray)
+    - Dataclasses, Attrs, or any other class structure (all modes)
 
     The only requirement is that your worker class is instantiable via `__init__` with the
     arguments you pass to `.init()`.
@@ -631,6 +716,154 @@ class Worker:
         result = future.result()  # 30
         worker.stop()
         ```
+
+    Model Inheritance Usage:
+        ```python
+        from concurry import Worker
+        from morphic import Typed
+        from pydantic import BaseModel, Field
+        from typing import List, Optional
+
+        # Worker + Typed for validation and lifecycle hooks
+        class TypedWorker(Worker, Typed):
+            name: str
+            value: int = Field(default=0, ge=0)
+            tags: List[str] = []
+
+            @classmethod
+            def pre_initialize(cls, data: dict) -> None:
+                # Normalize data before validation
+                if 'name' in data:
+                    data['name'] = data['name'].strip().title()
+
+            def compute(self, x: int) -> int:
+                return self.value * x
+
+        # Initialize with validated fields
+        worker = TypedWorker.options(mode="thread").init(
+            name="processor",
+            value=10,
+            tags=["ml", "preprocessing"]
+        )
+        result = worker.compute(5).result()  # 50
+        worker.stop()
+
+        # Worker + Pydantic BaseModel for validation
+        class PydanticWorker(Worker, BaseModel):
+            name: str = Field(..., min_length=1, max_length=50)
+            age: int = Field(..., ge=0, le=150)
+            email: Optional[str] = None
+
+            def get_info(self) -> dict:
+                return {"name": self.name, "age": self.age, "email": self.email}
+
+        worker = PydanticWorker.options(mode="process").init(
+            name="Alice",
+            age=30,
+            email="alice@example.com"
+        )
+        info = worker.get_info().result()
+        worker.stop()
+        ```
+
+    Validation Decorators (Ray-Compatible):
+        ```python
+        from concurry import Worker
+        from morphic import validate
+        from pydantic import validate_call
+
+        # @validate decorator works with ALL modes including Ray
+        class ValidatedWorker(Worker):
+            def __init__(self, multiplier: int):
+                self.multiplier = multiplier
+
+            @validate
+            def process(self, value: int, scale: float = 1.0) -> float:
+                '''Process with automatic type validation and coercion.'''
+                return (value * self.multiplier) * scale
+
+        # Works with Ray mode!
+        worker = ValidatedWorker.options(mode="ray").init(multiplier=5)
+        result = worker.process("10", scale="2.0").result()  # "10" -> 10, "2.0" -> 2.0
+        # result = 100.0
+        worker.stop()
+
+        # @validate_call also works with ALL modes including Ray
+        class PydanticValidatedWorker(Worker):
+            def __init__(self, base: int):
+                self.base = base
+
+            @validate_call
+            def compute(self, x: int, y: int = 0) -> int:
+                '''Compute with Pydantic validation.'''
+                return (x + y) * self.base
+
+        # Also works with Ray mode!
+        worker = PydanticValidatedWorker.options(mode="ray").init(base=3)
+        result = worker.compute("5", y="2").result()  # Strings coerced to ints
+        # result = 21
+        worker.stop()
+        ```
+
+    Ray Mode Limitations and Workarounds:
+        ```python
+        # ❌ BAD: Typed/BaseModel workers don't work with Ray
+        class TypedWorker(Worker, Typed):
+            name: str
+            value: int = 0
+
+        # This will raise ValueError with Ray mode
+        try:
+            worker = TypedWorker.options(mode="ray").init(name="test", value=10)
+        except ValueError as e:
+            print(e)  # "Cannot create Ray worker with Pydantic-based class..."
+
+        # ✅ GOOD: Use composition instead of inheritance for Ray
+        class RayCompatibleWorker(Worker):
+            def __init__(self, name: str, value: int = 0):
+                self.name = name
+                self.value = value
+
+            def compute(self, x: int) -> int:
+                return self.value * x
+
+        # This works with Ray!
+        worker = RayCompatibleWorker.options(mode="ray").init(name="test", value=10)
+        result = worker.compute(5).result()  # 50
+        worker.stop()
+
+        # ✅ EVEN BETTER: Use validation decorators for type checking
+        class ValidatedRayWorker(Worker):
+            @validate
+            def __init__(self, name: str, value: int = 0):
+                self.name = name
+                self.value = value
+
+            @validate
+            def compute(self, x: int) -> int:
+                return self.value * x
+
+        # Validation + Ray compatibility!
+        worker = ValidatedRayWorker.options(mode="ray").init(name="test", value="10")
+        result = worker.compute("5").result()  # Types coerced, result = 50
+        worker.stop()
+        ```
+
+        **Why Ray + Typed/BaseModel doesn't work:**
+
+        Ray's `ray.remote()` wraps classes as actors and modifies their `__setattr__`
+        behavior, which conflicts with Pydantic's frozen model implementation. When you
+        try to create a Ray actor from a Pydantic-based class, Ray attempts to set
+        internal attributes that trigger Pydantic's validation, causing AttributeError.
+
+        **Automatic Error Detection:**
+
+        Concurry automatically detects this incompatibility and raises a clear error:
+        - **ValueError**: When attempting to create a Ray worker/pool with Typed/BaseModel
+        - **UserWarning**: When creating non-Ray workers (if Ray is installed)
+
+        The warning helps you know that your worker won't be compatible with Ray mode
+        if you later decide to switch execution modes.
 
     Different Execution Modes:
         ```python
@@ -994,8 +1227,40 @@ class Worker:
         return instance
 
     def __init__(self, *args, **kwargs):
-        """Initialize the worker. Subclasses can override this freely."""
-        pass
+        """Initialize the worker. Subclasses can override this freely.
+
+        This method supports cooperative multiple inheritance, allowing Worker
+        to be combined with model classes like morphic.Typed or pydantic.BaseModel.
+
+        Examples:
+            ```python
+            # Regular Worker subclass
+            class MyWorker(Worker):
+                def __init__(self, value: int):
+                    self.value = value
+
+            # Worker + Typed
+            class TypedWorker(Worker, Typed):
+                name: str
+                value: int = 0
+
+            # Worker + BaseModel
+            class PydanticWorker(Worker, BaseModel):
+                name: str
+                value: int = 0
+            ```
+        """
+        # Support cooperative multiple inheritance with Typed/BaseModel
+        # Try to call super().__init__() to propagate to other base classes
+        try:
+            super().__init__(*args, **kwargs)
+        except TypeError as e:
+            # object.__init__() doesn't accept arguments
+            # This happens when Worker is the only meaningful base class
+            if "object.__init__()" in str(e) or "no arguments" in str(e).lower():
+                pass
+            else:
+                raise
 
 
 class WorkerProxy(Typed, ABC):

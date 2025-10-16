@@ -837,6 +837,265 @@ results = [f.result() for f in futures]
 pool.stop()
 ```
 
+## Model Inheritance with Pools
+
+Worker pools support the same model inheritance and validation features as single workers. All the patterns from the Workers guide apply to pools as well.
+
+### Typed/BaseModel Pools (Not Ray-Compatible)
+
+```python
+from concurry import Worker
+from morphic import Typed
+from pydantic import BaseModel, Field
+from typing import List
+
+# Typed worker pool (works with thread, process, asyncio)
+class TypedWorker(Worker, Typed):
+    name: str
+    multiplier: int = Field(default=2, ge=1)
+    
+    def process(self, x: int) -> int:
+        return x * self.multiplier
+
+# ✅ Works with thread, process, asyncio
+pool = TypedWorker.options(
+    mode="thread",
+    max_workers=5
+).init(name="processor", multiplier=3)
+
+# All workers in pool share the same validated configuration
+futures = [pool.process(i) for i in range(10)]
+results = [f.result() for f in futures]
+print(results)  # [0, 3, 6, 9, 12, 15, 18, 21, 24, 27]
+pool.stop()
+
+# ❌ Does NOT work with Ray
+try:
+    pool = TypedWorker.options(
+        mode="ray",
+        max_workers=5
+    ).init(name="processor", multiplier=3)
+except ValueError as e:
+    print("Ray mode not supported with Typed workers")
+    # ValueError: Cannot create Ray worker with Pydantic-based class
+```
+
+### Validation Decorators with Ray Pools
+
+Use `@validate` or `@validate_call` decorators for Ray-compatible validation:
+
+```python
+from concurry import Worker
+from morphic import validate
+from pydantic import validate_call
+
+# Option 1: @validate decorator (Ray-compatible)
+class ValidatedWorker(Worker):
+    @validate
+    def __init__(self, multiplier: int = 2):
+        self.multiplier = multiplier
+    
+    @validate
+    def process(self, x: int, offset: float = 0.0) -> float:
+        return (x * self.multiplier) + offset
+
+# ✅ Works with Ray!
+pool = ValidatedWorker.options(
+    mode="ray",
+    max_workers=10
+).init(multiplier="5")  # String coerced to int
+
+# Strings are coerced for all method calls
+futures = [pool.process(str(i), offset=str(i * 0.5)) for i in range(5)]
+results = [f.result() for f in futures]
+print(results)  # [0.0, 5.5, 11.0, 16.5, 22.0]
+pool.stop()
+
+# Option 2: @validate_call decorator (Ray-compatible)
+class PydanticValidatedWorker(Worker):
+    @validate_call
+    def __init__(self, base: int):
+        self.base = base
+        self.call_count = 0
+    
+    @validate_call
+    def compute(self, x: int, y: int = 0) -> int:
+        self.call_count += 1
+        return (x + y) * self.base
+
+# ✅ Also works with Ray!
+pool = PydanticValidatedWorker.options(
+    mode="ray",
+    max_workers=10
+).init(base=3)
+
+futures = [pool.compute("10", y=str(i)) for i in range(5)]
+results = [f.result() for f in futures]
+print(results)  # [30, 33, 36, 39, 42]
+pool.stop()
+```
+
+### Pool-Specific Considerations
+
+**State Isolation:**
+Each worker in a pool maintains its own state, even with validation:
+
+```python
+from morphic import validate
+
+class StatefulWorker(Worker):
+    @validate
+    def __init__(self, multiplier: int):
+        self.multiplier = multiplier
+        self.count = 0
+    
+    @validate
+    def process(self, x: int) -> dict:
+        self.count += 1
+        return {"result": x * self.multiplier, "count": self.count}
+
+# Create pool of 3 workers
+pool = StatefulWorker.options(
+    mode="thread",
+    max_workers=3,
+    load_balancing="round_robin"
+).init(multiplier=2)
+
+# Each worker maintains separate count
+results = [pool.process(10).result() for _ in range(9)]
+
+# With round-robin, each worker processes 3 times
+# results[0], [3], [6]: worker 0 (count: 1, 2, 3)
+# results[1], [4], [7]: worker 1 (count: 1, 2, 3)
+# results[2], [5], [8]: worker 2 (count: 1, 2, 3)
+for r in results:
+    print(r)  # {'result': 20, 'count': 1|2|3}
+
+pool.stop()
+```
+
+**Shared Limits with Validated Workers:**
+
+```python
+from concurry import Worker, RateLimit
+from morphic import validate
+
+class APIWorker(Worker):
+    @validate
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+    
+    @validate
+    def call_api(self, endpoint: str, tokens: int = 100) -> dict:
+        # Use limits.acquire() to enforce rate limits
+        with self.limits.acquire(requested={"tokens": tokens}) as acq:
+            response = {"endpoint": endpoint, "tokens": tokens}
+            acq.update(usage={"tokens": tokens})
+            return response
+
+# Pool of 10 workers sharing 1000 tokens/min
+pool = APIWorker.options(
+    mode="thread",
+    max_workers=10,
+    limits=[
+        RateLimit(key="tokens", window_seconds=60, capacity=1000)
+    ]
+).init(api_key="my-key")
+
+# All workers share the token budget
+futures = [pool.call_api("/users", tokens=100) for _ in range(20)]
+# Only 10 complete immediately, rest wait for token refresh
+results = [f.result() for f in futures]
+
+pool.stop()
+```
+
+### Ray Pool Compatibility Summary
+
+| Worker Type | Thread Pool | Process Pool | Asyncio Pool | Ray Pool |
+|-------------|-------------|--------------|--------------|----------|
+| Plain Worker | ✅ | ✅ | ✅ | ✅ |
+| Worker + Typed | ✅ | ✅ | ✅ | ❌ |
+| Worker + BaseModel | ✅ | ✅ | ✅ | ❌ |
+| Worker + @validate | ✅ | ✅ | ✅ | ✅ |
+| Worker + @validate_call | ✅ | ✅ | ✅ | ✅ |
+
+**For Ray pools:**
+- ✅ Use plain Worker classes
+- ✅ Use @validate or @validate_call decorators for validation
+- ❌ Don't inherit from Typed or BaseModel
+
+**Example: Ray Pool with Validation**
+
+```python
+import ray
+from concurry import Worker
+from morphic import validate
+
+ray.init()
+
+class DistributedWorker(Worker):
+    """Ray-compatible worker with validation."""
+    
+    @validate
+    def __init__(self, model_name: str, batch_size: int = 32):
+        self.model_name = model_name
+        self.batch_size = batch_size
+        # Load model, etc.
+    
+    @validate
+    def predict(self, data: list, threshold: float = 0.5) -> list:
+        # Process batch with validation
+        return [x * threshold for x in data]
+
+# Create Ray pool with validated workers
+pool = DistributedWorker.options(
+    mode="ray",
+    max_workers=20,
+    actor_options={"num_cpus": 0.5}
+).init(model_name="bert-base", batch_size="64")  # Coerced to int
+
+# Distribute work across Ray cluster
+futures = [
+    pool.predict([1.0, 2.0, 3.0], threshold=str(0.8 + i*0.1))  # Strings coerced
+    for i in range(10)
+]
+results = [f.result() for f in futures]
+
+pool.stop()
+ray.shutdown()
+```
+
+### When to Use Each Approach
+
+**For Non-Ray Pools (thread, process, asyncio):**
+
+Use **Typed/BaseModel** when:
+- You want full model validation and lifecycle hooks
+- You need immutable configuration
+- You want the richest feature set
+
+Use **@validate/@validate_call** when:
+- You want flexibility to switch to Ray later
+- You only need validation on specific methods
+- You prefer decorator-based validation
+
+**For Ray Pools:**
+
+Use **@validate decorator** when:
+- You want morphic's validation style
+- You need type coercion (strings → numbers)
+- You want minimal overhead
+
+Use **@validate_call decorator** when:
+- You want Pydantic's validation features
+- You need Field constraints
+- You prefer strict validation
+
+Use **plain Worker** when:
+- You don't need validation
+- You want maximum performance
+
 ## Best Practices
 
 ### Choosing Pool Size

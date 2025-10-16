@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-      - adivekar  # Include your current branch
+      - mainline
   workflow_dispatch:  # Allow manual triggering
 
 permissions:

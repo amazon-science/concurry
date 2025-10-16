@@ -1,10 +1,10 @@
 site_name: Concurry Documentation
 site_description: A unified, delightful Python concurrency library
 site_author: Abhishek Divekar
-site_url: https://adivekar-utexas.github.io/concurry/
+site_url: https://amazon-science.github.io/concurry/
 
-repo_name: adivekar-utexas/concurry
-repo_url: https://github.com/adivekar-utexas/concurry
+repo_name: amazon-science/concurry
+repo_url: https://github.com/amazon-science/concurry
 edit_uri: edit/main/docs/
 
 nav:

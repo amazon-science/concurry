@@ -21,13 +21,21 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Check out concurry repo
         uses: actions/checkout@v4
+        with:
+          path: concurry
+
+      - name: Check out morphic repo
+        uses: actions/checkout@v4
+        with:
+          repository: adivekar-utexas/morphic
+          path: morphic
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Cache MkDocs materials
         uses: actions/cache@v4
@@ -40,18 +48,22 @@ jobs:
           cache_id: ${{ github.run_id }}
 
       - name: Install dependencies
+        # Install morphic first from local checkout, then concurry with docs dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install uv
-          python -m uv pip install -e ".[docs]"
+          python -m uv pip install -e "./morphic"
+          python -m uv pip install -e "./concurry[docs]"
 
       - name: Build documentation
-        run: mkdocs build
+        run: |
+          cd concurry
+          mkdocs build
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: site/
+          path: concurry/site/
 
   deploy:
     needs: build

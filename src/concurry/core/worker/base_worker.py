@@ -936,6 +936,37 @@ class Worker:
         worker.stop()
         ```
 
+    Context Manager (Automatic Cleanup):
+        Workers and pools support context manager protocol for automatic cleanup:
+
+        ```python
+        from concurry import Worker
+
+        class DataProcessor(Worker):
+            def __init__(self, multiplier: int):
+                self.multiplier = multiplier
+
+            def process(self, value: int) -> int:
+                return value * self.multiplier
+
+        # Context manager automatically calls .stop() on exit
+        with DataProcessor.options(mode="thread").init(3) as worker:
+            future = worker.process(10)
+            result = future.result()  # 30
+        # Worker is automatically stopped here
+
+        # Works with pools too
+        with DataProcessor.options(mode="thread", max_workers=5).init(3) as pool:
+            results = [pool.process(i).result() for i in range(10)]
+        # All workers in pool are automatically stopped here
+
+        # Cleanup happens even on exceptions
+        with DataProcessor.options(mode="thread").init(3) as worker:
+            if some_error:
+                raise ValueError("Error occurred")
+        # Worker is still stopped despite exception
+        ```
+
     Model Inheritance Usage:
         ```python
         from concurry import Worker
@@ -1152,6 +1183,11 @@ class Worker:
         worker = DataProcessor.options(mode="thread", blocking=True).init(5)
         result = worker.process(10)  # Returns 50 directly, not a future
         worker.stop()
+
+        # With context manager (recommended)
+        with DataProcessor.options(mode="thread", blocking=True).init(5) as worker:
+            result = worker.process(10)  # Returns 50 directly
+        # Worker automatically stopped
         ```
 
     Submitting Arbitrary Functions with TaskWorker:
@@ -1185,15 +1221,12 @@ class Worker:
                 return self.count
 
         # Each worker maintains its own state
-        worker1 = Counter.options(mode="thread").init()
-        worker2 = Counter.options(mode="thread").init()
-
-        print(worker1.increment().result())  # 1
-        print(worker1.increment().result())  # 2
-        print(worker2.increment().result())  # 1 (separate state)
-
-        worker1.stop()
-        worker2.stop()
+        with Counter.options(mode="thread").init() as worker1:
+            with Counter.options(mode="thread").init() as worker2:
+                print(worker1.increment().result())  # 1
+                print(worker1.increment().result())  # 2
+                print(worker2.increment().result())  # 1 (separate state)
+        # Both workers automatically stopped
         ```
 
     Resource Protection with Limits:
@@ -1743,6 +1776,24 @@ class WorkerProxy(Typed, ABC):
         """
         # Pydantic allows setting private attributes even on frozen models
         self._stopped = True
+
+    def __enter__(self) -> "WorkerProxy":
+        """Enter context manager.
+
+        Returns:
+            Self for use in with statement
+        """
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Exit context manager and stop worker.
+
+        Args:
+            exc_type: Exception type if an exception occurred
+            exc_val: Exception value if an exception occurred
+            exc_tb: Exception traceback if an exception occurred
+        """
+        self.stop()
 
 
 def worker(cls: Type[T]) -> Type[T]:

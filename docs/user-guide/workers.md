@@ -51,6 +51,36 @@ count = worker.get_count().result()  # 1
 worker.stop()
 ```
 
+### Context Manager (Recommended)
+
+Workers support the context manager protocol for automatic cleanup:
+
+```python
+# Context manager automatically calls .stop() on exit
+with DataProcessor.options(mode="thread").init(3) as worker:
+    future = worker.process(10)
+    result = future.result()  # 30
+# Worker is automatically stopped here
+
+# Works with blocking mode
+with DataProcessor.options(mode="thread", blocking=True).init(3) as worker:
+    result = worker.process(10)  # Returns 30 directly
+# Worker automatically stopped
+
+# Cleanup happens even on exceptions
+with DataProcessor.options(mode="thread").init(3) as worker:
+    result = worker.process(10).result()
+    if result < 50:
+        raise ValueError("Result too small")
+# Worker is still stopped despite exception
+```
+
+**Benefits:**
+- ✅ Automatic cleanup - no need to remember `.stop()`
+- ✅ Exception safe - worker stopped even on errors
+- ✅ Cleaner code - follows Python best practices
+- ✅ Works with all modes (sync, thread, process, asyncio, ray)
+
 ## Execution Modes
 
 Workers support multiple execution modes:
@@ -1181,23 +1211,18 @@ finally:
     worker.stop()
 ```
 
-Or use a context manager pattern:
+Or use the built-in context manager (recommended):
 
 ```python
-class ManagedWorker:
-    def __init__(self, worker):
-        self.worker = worker
-    
-    def __enter__(self):
-        return self.worker
-    
-    def __exit__(self, *args):
-        self.worker.stop()
-
-# Usage
-with ManagedWorker(DataProcessor.options(mode="thread").init(2)) as worker:
+# Workers have built-in context manager support
+with DataProcessor.options(mode="thread").init(2) as worker:
     result = worker.process(10).result()
     # worker.stop() called automatically
+
+# Also works with pools
+with DataProcessor.options(mode="thread", max_workers=5).init(2) as pool:
+    results = [pool.process(i).result() for i in range(10)]
+    # All workers stopped automatically
 ```
 
 ### Exception Handling

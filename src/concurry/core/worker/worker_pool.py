@@ -58,38 +58,71 @@ class WorkerProxyPool(Typed, ABC):
     instead of inheriting from Typed/BaseModel. See Worker docstring for details.
 
     Example:
-        ```python
-        # Create a pool via Worker.options()
-        pool = MyWorker.options(
-            mode="thread",
-            max_workers=10,
-            load_balancing="round_robin"
-        ).init(arg1, arg2)
+        Basic Usage:
+            ```python
+            # Create a pool via Worker.options()
+            pool = MyWorker.options(
+                mode="thread",
+                max_workers=10,
+                load_balancing="round_robin"
+            ).init(arg1, arg2)
 
-        # Use like a single worker
-        future = pool.my_method(x=5)
-        result = future.result()
+            # Use like a single worker
+            future = pool.my_method(x=5)
+            result = future.result()
 
-        # Get pool statistics
-        stats = pool.get_pool_stats()
+            # Get pool statistics
+            stats = pool.get_pool_stats()
 
-        # Stop all workers
-        pool.stop()
+            # Stop all workers
+            pool.stop()
+            ```
 
-        # Ray pool with validation (use decorators, not inheritance)
-        from morphic import validate
+        Context Manager (Recommended):
+            ```python
+            # Context manager automatically stops all workers
+            with MyWorker.options(
+                mode="thread",
+                max_workers=10
+            ).init(arg1, arg2) as pool:
+                future = pool.my_method(x=5)
+                result = future.result()
+            # All workers automatically stopped here
 
-        class ValidatedWorker(Worker):
-            @validate
-            def process(self, x: int) -> int:
-                return x * 2
+            # Works with blocking mode
+            with MyWorker.options(
+                mode="thread",
+                max_workers=5,
+                blocking=True
+            ).init() as pool:
+                results = [pool.process(i) for i in range(10)]
+            # Pool automatically stopped
 
-        # Works with Ray!
-        pool = ValidatedWorker.options(
-            mode="ray",
-            max_workers=10
-        ).init()
-        ```
+            # Cleanup happens even on exceptions
+            with MyWorker.options(mode="thread", max_workers=3).init() as pool:
+                if error_condition:
+                    raise ValueError("Error")
+            # Pool still stopped despite exception
+            ```
+
+        Ray Pool with Validation:
+            ```python
+            # Ray pool with validation (use decorators, not inheritance)
+            from morphic import validate
+
+            class ValidatedWorker(Worker):
+                @validate
+                def process(self, x: int) -> int:
+                    return x * 2
+
+            # Works with Ray!
+            with ValidatedWorker.options(
+                mode="ray",
+                max_workers=10
+            ).init() as pool:
+                result = pool.process(5).result()
+            # Pool automatically stopped
+            ```
     """
 
     # Public fields (immutable after creation)
@@ -414,6 +447,24 @@ class WorkerProxyPool(Typed, ABC):
             self._on_demand_workers.clear()
 
         self._workers.clear()
+
+    def __enter__(self) -> "WorkerProxyPool":
+        """Enter context manager.
+
+        Returns:
+            Self for use in with statement
+        """
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Exit context manager and stop all workers.
+
+        Args:
+            exc_type: Exception type if an exception occurred
+            exc_val: Exception value if an exception occurred
+            exc_tb: Exception traceback if an exception occurred
+        """
+        self.stop()
 
 
 class InMemoryWorkerProxyPool(WorkerProxyPool):

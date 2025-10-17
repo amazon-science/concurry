@@ -47,6 +47,43 @@ print(f"Pool has {stats['total_workers']} workers")
 pool.stop()
 ```
 
+### Context Manager (Recommended)
+
+Pools support the context manager protocol for automatic cleanup of all workers:
+
+```python
+# Context manager automatically stops all workers
+with DataProcessor.options(
+    mode="thread",
+    max_workers=5
+).init(multiplier=10) as pool:
+    future = pool.process(42)
+    result = future.result()  # 420
+# All 5 workers automatically stopped here
+
+# Works with blocking mode
+with DataProcessor.options(
+    mode="thread",
+    max_workers=5,
+    blocking=True
+).init(multiplier=10) as pool:
+    results = [pool.process(i) for i in range(10)]
+# Pool automatically stopped
+
+# Cleanup happens even on exceptions
+with DataProcessor.options(mode="thread", max_workers=3).init(multiplier=2) as pool:
+    if some_error:
+        raise ValueError("Error occurred")
+# All workers still stopped despite exception
+```
+
+**Benefits:**
+- ✅ Automatic cleanup of all workers - no need to remember `.stop()`
+- ✅ Exception safe - all workers stopped even on errors
+- ✅ Cleaner code - follows Python best practices
+- ✅ Works with all pool types (thread, process, ray)
+- ✅ Works with on-demand pools
+
 ### Supported Modes
 
 Different execution modes support different pool configurations:

@@ -16,6 +16,52 @@
 
 ---
 
+## 🚀 Quick Example: 50x Speedup for Batch LLM Calls
+
+Calling LLMs in a loop is painfully slow. With concurry, get 50x faster batch processing with just 3 lines of code change:
+
+```python
+from pydantic import BaseModel
+from concurry import Worker
+from tqdm import tqdm
+import litellm
+
+# Define your LLM worker
+class LLM(Worker, BaseModel):
+    temperature: float
+    top_p: float
+    model: str
+
+    def call_llm(self, prompt: str) -> str:
+        response = litellm.completion(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=self.temperature,
+            top_p=self.top_p,
+        )
+        return response
+
+# Load prompts (e.g., evaluating AI-generated responses for harmfulness)
+prompts = [...] # 1000 prompts
+
+# ❌ Sequential: ~775 seconds
+llm = LLM(temperature=0.1, top_p=0.9, model="meta-llama/llama-3.1-8b-instruct")
+responses = [llm.call_llm(prompt) for prompt in tqdm(prompts)]
+
+# ✅ Concurrent with concurry: ~16 seconds (50x faster!)
+llm = LLM.options(
+    mode='thread',
+    max_workers=100
+).init(temperature=0.1, top_p=0.9, model="meta-llama/llama-3.1-8b-instruct")
+
+futures = [llm.call_llm(prompt) for prompt in tqdm(prompts, desc="Submitting")]
+responses = [f.result() for f in tqdm(futures, desc="Collecting results")]
+```
+
+**What changed?** Just added `.options(mode='thread', max_workers=100).init(...)` and called `.result()` on futures. That's it.
+
+---
+
 ## Why Concurry?
 
 Python's concurrency landscape is fragmented. Threading, multiprocessing, asyncio, and Ray all have different APIs, behaviors, and gotchas. **Concurry unifies them** with a consistent, elegant interface that works the same way everywhere.
@@ -78,29 +124,132 @@ worker.stop()
 
 ## ✨ Key Features
 
-### 🎭 **Actor-Based Workers**
+### 🎭 Actor-Based Workers
 Stateful workers that run across sync, thread, process, asyncio, and Ray backends with a unified API.
 
-### 🔄 **Worker Pools with Load Balancing**
-Distribute work across multiple workers with pluggable load balancing strategies (round-robin, least-active, random).
+```python
+class Counter(Worker):
+    def __init__(self):
+        self.count = 0
+    
+    def increment(self) -> int:
+        self.count += 1
+        return self.count
 
-### 🚦 **Resource Limits & Rate Limiting**
-Token bucket, leaky bucket, sliding window, and more. Enforce rate limits across workers with atomic multi-resource acquisition.
+# State is isolated per worker
+counter = Counter.options(mode="thread").init()
+print(counter.increment().result())  # 1
+print(counter.increment().result())  # 2
+```
 
-### 🔁 **Intelligent Retry Mechanisms**
+### 🔄 Worker Pools with Load Balancing
+Distribute work across multiple workers with pluggable strategies (round-robin, least-active, random).
+
+```python
+# Pool of 10 workers with round-robin load balancing
+pool = DataProcessor.options(
+    mode="thread",
+    max_workers=10,
+    load_balancing="round_robin"
+).init()
+
+# Work automatically distributed across all workers
+futures = [pool.process(i) for i in range(1000)]
+results = [f.result() for f in futures]
+```
+
+### 🚦 Resource Limits & Rate Limiting
+Token bucket, leaky bucket, sliding window algorithms. Enforce rate limits across workers with atomic multi-resource acquisition.
+
+```python
+from concurry import RateLimit, CallLimit
+
+# Limit to 100 API calls and 10k tokens per minute
+pool = APIWorker.options(
+    mode="thread",
+    max_workers=20,
+    limits=[
+        CallLimit(window_seconds=60, capacity=100),
+        RateLimit(key="tokens", window_seconds=60, capacity=10_000)
+    ]
+).init()
+
+# Limits automatically enforced across all 20 workers
+```
+
+### 🔁 Intelligent Retry Mechanisms
 Exponential backoff, exception filtering, output validation, and automatic resource release between retries.
 
-### 🎯 **Automatic Future Unwrapping**
+```python
+# Retry on transient errors with exponential backoff
+worker = APIWorker.options(
+    mode="thread",
+    num_retries=5,
+    retry_algorithm="exponential",
+    retry_on=[ConnectionError, TimeoutError],
+    retry_until=lambda result: result.get("status") == "ok"
+).init()
+
+# Automatically retries up to 5 times on failure
+```
+
+### 🎯 Automatic Future Unwrapping
 Pass futures between workers seamlessly. Concurry automatically unwraps them - even with zero-copy optimization for Ray.
 
-### 📊 **Progress Tracking**
+```python
+# Producer creates futures
+producer = DataSource.options(mode="thread").init()
+data_future = producer.get_data()
+
+# Consumer automatically unwraps the future
+consumer = DataProcessor.options(mode="process").init()
+result = consumer.process(data_future).result()  # Auto-unwrapped!
+```
+
+### 📊 Progress Tracking
 Beautiful progress bars with state indicators, automatic style detection, and rich customization.
 
-### ✅ **Pydantic Integration**
+```python
+from concurry.utils.progress import ProgressBar
+
+for item in ProgressBar(items, desc="Processing"):
+    process(item)
+# Shows: Processing: 100%|██████████| 1000/1000 [00:05<00:00] ✓ Complete
+```
+
+### ✅ Pydantic Integration
 Full validation support with both model inheritance and decorators (Ray-compatible `@validate` decorator included).
 
-### ⚡ **Async First-Class Support**
-AsyncIO workers route async methods to an event loop and sync methods to a dedicated thread for optimal performance.
+```python
+from morphic import validate
+
+class ValidatedWorker(Worker):
+    @validate
+    def __init__(self, multiplier: int):
+        self.multiplier = multiplier
+    
+    @validate
+    def process(self, x: int) -> int:
+        return x * self.multiplier
+
+# Automatic type coercion and validation
+worker = ValidatedWorker.options(mode="ray").init(multiplier="5")  # str→int
+```
+
+### ⚡ Async First-Class Support
+AsyncIO workers route async methods to an event loop and sync methods to a dedicated thread for optimal performance (10-50x speedup for I/O).
+
+```python
+class AsyncAPIWorker(Worker):
+    async def fetch(self, url: str) -> dict:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                return await resp.json()
+
+worker = AsyncAPIWorker.options(mode="asyncio").init()
+# 100 concurrent requests instead of sequential!
+result = worker.fetch_many(urls).result()
+```
 
 ---
 
@@ -121,33 +270,9 @@ pip install concurry[all]
 
 ---
 
-## 💡 Quick Start
+## 💡 More Examples
 
-### Simple Worker Example
-
-```python
-from concurry import Worker
-
-class Counter(Worker):
-    def __init__(self):
-        self.count = 0
-    
-    def increment(self) -> int:
-        self.count += 1
-        return self.count
-
-# Create a thread-based worker
-counter = Counter.options(mode="thread").init()
-
-# Call methods (returns futures)
-print(counter.increment().result())  # 1
-print(counter.increment().result())  # 2
-print(counter.increment().result())  # 3
-
-counter.stop()
-```
-
-### Worker Pool with Load Balancing
+### Worker Pool with Context Manager
 
 ```python
 from concurry import Worker
@@ -156,25 +281,64 @@ class DataProcessor(Worker):
     def process(self, x: int) -> int:
         return x ** 2
 
-# Create a pool of 5 workers with round-robin load balancing
-pool = DataProcessor.options(
-    mode="thread",
-    max_workers=5,
-    load_balancing="round_robin"
-).init()
+# Context manager automatically cleans up all workers
+with DataProcessor.options(mode="thread", max_workers=5).init() as pool:
+    futures = [pool.process(i) for i in range(100)]
+    results = [f.result() for f in futures]
+# All workers automatically stopped here
+```
 
-# Distribute work across the pool
-futures = [pool.process(i) for i in range(100)]
+### TaskWorker for Arbitrary Functions
+
+```python
+from concurry import TaskWorker
+
+worker = TaskWorker.options(mode="process").init()
+
+# Submit any function
+future = worker.submit(lambda x: x ** 2, 42)
+print(future.result())  # 1764
+
+# Use map() for batch processing
+results = list(worker.map(lambda x: x * 2, range(10)))
+print(results)  # [0, 2, 4, 6, 8, 10, 12, 14, 16, 18]
+
+worker.stop()
+```
+
+### Distributed Computing with Ray
+
+```python
+import ray
+from concurry import Worker
+
+ray.init()
+
+class DistributedProcessor(Worker):
+    def __init__(self, model_name: str):
+        self.model = load_large_model(model_name)
+    
+    def predict(self, data: list) -> list:
+        return self.model.predict(data)
+
+# 50 Ray actors across your cluster
+pool = DistributedProcessor.options(
+    mode="ray",
+    max_workers=50,
+    num_cpus=2,
+    num_gpus=0.5
+).init(model_name="bert-large")
+
+# Distribute work across entire cluster
+batches = [data[i:i+32] for i in range(0, len(data), 32)]
+futures = [pool.predict(batch) for batch in batches]
 results = [f.result() for f in futures]
 
 pool.stop()
+ray.shutdown()
 ```
 
----
-
-## 🎯 Real-World Example: LLM API with Rate Limits and Retries
-
-Here's a production-ready example that calls an LLM API at scale with token-level rate limiting, automatic retries, and validation:
+### Production-Ready LLM with Rate Limits and Retries
 
 ```python
 from concurry import Worker, RateLimit, CallLimit
@@ -182,8 +346,6 @@ from morphic import validate
 import openai
 
 class LLMWorker(Worker):
-    """Production-grade LLM worker with rate limiting, retries, and validation."""
-    
     @validate
     def __init__(self, model: str = "gpt-4", temperature: float = 0.7):
         self.model = model
@@ -192,8 +354,7 @@ class LLMWorker(Worker):
     
     @validate
     def generate(self, prompt: str, max_tokens: int = 500) -> dict:
-        """Generate text with automatic rate limiting."""
-        # Rate limits are automatically enforced by the pool
+        # Rate limits automatically enforced
         with self.limits.acquire(requested={"tokens": max_tokens}) as acq:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -205,107 +366,42 @@ class LLMWorker(Worker):
             result = {
                 "text": response.choices[0].message.content,
                 "tokens": response.usage.total_tokens,
-                "model": self.model
             }
             
-            # Report actual token usage for accurate rate limiting
+            # Report actual usage for accurate rate limiting
             acq.update(usage={"tokens": result["tokens"]})
             return result
 
-# Validation function for output quality
-def validate_output(result, **ctx):
-    """Ensure generated text meets quality requirements."""
-    return (
-        isinstance(result, dict) 
-        and len(result.get("text", "")) > 50
-        and "error" not in result.get("text", "").lower()
-    )
-
-# Create a pool of 10 LLM workers with rate limits and retries
+# Pool of 10 workers with shared rate limits and automatic retries
 pool = LLMWorker.options(
     mode="thread",
     max_workers=10,
     
-    # Rate limiting: 1000 tokens/min and 50 calls/min shared across pool
+    # Shared rate limits across all workers
     limits=[
-        RateLimit(key="tokens", window_seconds=60, capacity=1000),
-        CallLimit(window_seconds=60, capacity=50)
+        RateLimit(key="tokens", window_seconds=60, capacity=10_000),
+        CallLimit(window_seconds=60, capacity=100)
     ],
     
-    # Retry configuration for transient failures
+    # Automatic retry with exponential backoff
     num_retries=3,
-    retry_algorithm="exponential",  # Exponential backoff
-    retry_wait=1.0,                  # Base wait of 1 second
+    retry_algorithm="exponential",
     retry_on=[openai.RateLimitError, openai.APIConnectionError],
-    retry_until=validate_output      # Retry until validation passes
-).init(model="gpt-4", temperature=0.7)
+    retry_until=lambda r: len(r.get("text", "")) > 50
+).init(model="gpt-4")
 
 # Process 100 prompts with automatic rate limiting and retries
 prompts = [f"Summarize topic {i}" for i in range(100)]
 futures = [pool.generate(prompt, max_tokens=200) for prompt in prompts]
-
-# Collect results (blocks until all complete)
 results = [f.result() for f in futures]
 
 print(f"Processed {len(results)} prompts")
-print(f"Total tokens used: {sum(r['tokens'] for r in results)}")
+print(f"Total tokens: {sum(r['tokens'] for r in results)}")
 
 pool.stop()
 ```
 
-**What just happened?**
-
-- ✅ 10 workers processing prompts in parallel
-- ✅ Shared token budget (1000 tokens/min) across all workers
-- ✅ Automatic retries on rate limit errors with exponential backoff
-- ✅ Output validation to ensure quality responses
-- ✅ Automatic resource release between retry attempts
-- ✅ Type validation with `@validate` decorator
-
----
-
-## 🌐 Distributed Computing with Ray
-
-Scale to hundreds of machines with Ray - same API, just change `mode`:
-
-```python
-import ray
-from concurry import Worker
-
-ray.init()  # Connect to Ray cluster
-
-class DistributedProcessor(Worker):
-    def __init__(self, model_name: str):
-        # Load model once per worker
-        self.model = load_large_model(model_name)
-    
-    def predict(self, data: list) -> list:
-        return self.model.predict(data)
-
-# Create a pool of 50 Ray actors across the cluster
-pool = DistributedProcessor.options(
-    mode="ray",
-    max_workers=50,
-    num_cpus=2,              # Each worker gets 2 CPUs
-    num_gpus=0.5,            # Each worker gets 0.5 GPU
-).init(model_name="bert-large")
-
-# Distribute work across the entire cluster
-batches = [data[i:i+32] for i in range(0, len(data), 32)]
-futures = [pool.predict(batch) for batch in batches]
-results = [f.result() for f in futures]
-
-pool.stop()
-ray.shutdown()
-```
-
-**Zero-copy optimization:** When passing futures between Ray workers, Concurry passes `ObjectRef`s directly without serialization!
-
----
-
-## 🔄 Async Functions with AsyncIO Workers
-
-AsyncIO workers provide 10-50x speedup for concurrent I/O operations:
+### Async I/O with 10-50x Speedup
 
 ```python
 from concurry import Worker
@@ -329,162 +425,10 @@ class AsyncAPIWorker(Worker):
 
 worker = AsyncAPIWorker.options(mode="asyncio").init("https://api.example.com")
 
-# All 100 requests execute concurrently!
+# All 100 requests execute concurrently (10-50x faster)!
 result = worker.fetch_many([f"data/{i}" for i in range(100)]).result()
 
 worker.stop()
-```
-
-**Architecture:** AsyncIO workers route async methods to an event loop thread and sync methods to a dedicated sync thread, giving you the best of both worlds.
-
----
-
-## ✅ Pydantic & Morphic Integration
-
-Concurry integrates seamlessly with [Pydantic](https://pydantic.dev/) and [Morphic](https://github.com/adivekar/morphic) for validation:
-
-### Option 1: Model Inheritance (Non-Ray)
-
-```python
-from concurry import Worker
-from morphic import Typed
-from pydantic import Field
-
-class ValidatedWorker(Worker, Typed):
-    """Worker with full Pydantic validation and lifecycle hooks."""
-    
-    name: str = Field(..., min_length=1)
-    multiplier: int = Field(default=2, ge=1)
-    
-    def process(self, x: int) -> int:
-        return x * self.multiplier
-
-# Automatic validation
-worker = ValidatedWorker.options(mode="thread").init(
-    name="processor",
-    multiplier=5
-)
-
-result = worker.process(10).result()  # 50
-worker.stop()
-```
-
-### Option 2: Validation Decorators (Ray-Compatible!)
-
-```python
-from concurry import Worker
-from morphic import validate
-import ray
-
-ray.init()
-
-class RayValidatedWorker(Worker):
-    """Ray-compatible worker with validation."""
-    
-    @validate
-    def __init__(self, name: str, multiplier: int = 2):
-        self.name = name
-        self.multiplier = multiplier
-    
-    @validate
-    def process(self, x: int, scale: float = 1.0) -> float:
-        return (x * self.multiplier) * scale
-
-# Works with Ray! (Typed/BaseModel don't work with Ray)
-worker = RayValidatedWorker.options(mode="ray").init(
-    name="ray_processor",
-    multiplier="5"  # String coerced to int
-)
-
-# Automatic type coercion
-result = worker.process("10", scale="2.0").result()  # 100.0
-worker.stop()
-
-ray.shutdown()
-```
-
----
-
-## 🎨 More Features
-
-### TaskWorker for Arbitrary Functions
-
-```python
-from concurry import TaskWorker
-
-worker = TaskWorker.options(mode="process").init()
-
-# Submit any function
-future = worker.submit(lambda x: x ** 2, 42)
-print(future.result())  # 1764
-
-# Use map() for batch processing
-results = list(worker.map(lambda x: x * 2, range(10)))
-print(results)  # [0, 2, 4, 6, 8, 10, 12, 14, 16, 18]
-
-worker.stop()
-```
-
-### Progress Tracking
-
-```python
-from concurry.utils.progress import ProgressBar
-import time
-
-# Beautiful progress bars with state indicators
-for item in ProgressBar(range(100), desc="Processing"):
-    time.sleep(0.01)
-    # Automatic success indicator when complete!
-
-# Manual progress bar with failure handling
-pbar = ProgressBar(total=100, desc="Complex Task")
-try:
-    for i in range(100):
-        if error_condition:
-            raise ValueError("Something went wrong")
-        pbar.update(1)
-    pbar.success("All done!")
-except Exception as e:
-    pbar.failure(f"Failed: {e}")
-```
-
-### Automatic Future Unwrapping
-
-```python
-# Pass futures between workers - they're automatically unwrapped!
-producer = DataSource.options(mode="thread").init()
-consumer = DataProcessor.options(mode="process").init()
-
-# Producer returns a future
-data_future = producer.get_data()
-
-# Consumer automatically unwraps it
-result = consumer.process(data_future).result()
-
-# Works with nested structures too!
-futures = [producer.get_data() for _ in range(10)]
-result = consumer.process_batch(futures).result()  # All unwrapped!
-```
-
-### Resource Limits
-
-```python
-from concurry import Worker, ResourceLimit
-
-class DatabaseWorker(Worker):
-    def query(self, sql: str) -> list:
-        # Limit concurrent database connections
-        with self.limits.acquire(requested={"connections": 1}):
-            return execute_query(sql)
-
-# Pool of 20 workers sharing 5 database connections
-pool = DatabaseWorker.options(
-    mode="thread",
-    max_workers=20,
-    limits=[ResourceLimit(key="connections", capacity=5)]
-).init()
-
-# Only 5 queries run concurrently, even with 20 workers
 ```
 
 ---

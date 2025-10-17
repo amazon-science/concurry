@@ -91,6 +91,7 @@ See Also:
 
 from .acquisition import Acquisition, LimitSetAcquisition
 from .limit import CallLimit, Limit, RateLimit, ResourceLimit
+from .limit_pool import LimitPool
 from .limit_set import LimitSet
 from .rate_limiting_algorithms import (
     BaseRateLimiter,
@@ -109,8 +110,9 @@ __all__ = [
     # Acquisition
     "Acquisition",
     "LimitSetAcquisition",
-    # Limit sets
+    # Limit sets and pools
     "LimitSet",
+    "LimitPool",
     # Factory
     "RateLimiter",
 ]

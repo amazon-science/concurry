@@ -14,6 +14,7 @@ from .core import (
     ConcurrentFuture,
     ExecutionMode,
     Limit,
+    LimitPool,
     LimitSet,
     LimitSetAcquisition,
     LoadBalancingAlgorithm,
@@ -63,6 +64,7 @@ __all__ = [
     "Acquisition",
     "LimitSetAcquisition",
     "LimitSet",
+    "LimitPool",
     # Retry types
     "RetryConfig",
     "RetryValidationError",

@@ -20,33 +20,28 @@ def _transform_worker_limits(
     limits: Any,
     mode: ExecutionMode,
     is_pool: bool,
+    worker_index: int = 0,
 ) -> Any:
-    """Process limits parameter and return appropriate LimitSet or list of Limits.
+    """Process limits parameter and return LimitPool.
 
-    This function handles the common logic for processing limits for both
-    WorkerProxy and WorkerProxyPool:
-    - Converting list of Limits to LimitSet (for pools or in-memory workers)
-    - Keeping list of Limits as-is (for Ray/Process single workers - to be created remotely)
-    - Validating shared LimitSets
-    - Checking mode compatibility
-    - Creating empty LimitSet when no limits provided (allows workers to always use self.limits)
+    This function always returns a LimitPool wrapping one or more LimitSets.
+    This provides a unified interface and enables multi-region/multi-account scenarios.
 
     Args:
-        limits: The limits parameter (None, List[Limit], or LimitSet)
+        limits: The limits parameter (None, List[Limit], LimitSet, List[LimitSet], or LimitPool)
         mode: Execution mode (ExecutionMode enum)
         is_pool: True if processing for WorkerProxyPool, False for WorkerProxy
+        worker_index: Starting offset for round-robin selection in LimitPool (default 0)
 
     Returns:
-        - For pools: Processed LimitSet instance (may be empty)
-        - For Ray/Process single workers: List of Limit objects (may be empty list)
-        - For in-memory single workers: LimitSet instance (may be empty)
-        - Empty LimitSet/list if no limits provided (never returns None)
+        LimitPool instance wrapping one or more LimitSets
 
     Raises:
         ValueError: If limits configuration is invalid
     """
     # Import here to avoid circular imports
     from ..limit import Limit
+    from ..limit.limit_pool import LimitPool
     from ..limit.limit_set import (
         BaseLimitSet,
         InMemorySharedLimitSet,
@@ -55,103 +50,142 @@ def _transform_worker_limits(
         RaySharedLimitSet,
     )
 
+    # Case 1: None -> Create empty LimitPool with empty LimitSet
     if limits is None:
-        # Create empty LimitSet so workers can always use self.limits.acquire()
-        # Empty LimitSet always allows acquisition without blocking
+        # Create empty LimitSet
         if is_pool:
-            # For pools, create empty shared LimitSet
-            return LimitSet(limits=[], shared=True, mode=mode)
+            empty_limitset = LimitSet(limits=[], shared=True, mode=mode)
         else:
-            # For single workers with Ray/Process, keep as empty list (created remotely)
             if mode in (ExecutionMode.Ray, ExecutionMode.Processes):
-                return []
+                # For Ray/Process, create list to be wrapped remotely
+                empty_limitset = []
             else:
-                # For in-memory workers, create empty non-shared LimitSet
-                return LimitSet(limits=[], shared=False, mode=ExecutionMode.Sync)
+                empty_limitset = LimitSet(limits=[], shared=False, mode=ExecutionMode.Sync)
 
-    # Case 1: List of Limits
+        # Wrap in LimitPool (unless it's a list for remote creation)
+        if isinstance(empty_limitset, list):
+            return empty_limitset  # Will be wrapped in LimitPool by _create_worker_wrapper
+        return LimitPool(limit_sets=[empty_limitset], load_balancing="round_robin", worker_index=worker_index)
+
+    # Case 2: Already a LimitPool -> pass through or validate
+    if isinstance(limits, LimitPool):
+        return limits
+
+    # Case 3: List - could be List[Limit] or List[LimitSet]
     if isinstance(limits, list):
-        # Validate all items are Limit instances
-        if len(limits) == 0 or not all(isinstance(item, Limit) for item in limits):
-            raise ValueError("limits parameter must be either a LimitSet or a list of Limit objects")
-
-        if is_pool:
-            # WorkerProxyPool: create shared LimitSet with pool's mode
-            return LimitSet(limits=limits, shared=True, mode=mode)
-        else:
-            # Single worker
-            if mode in (ExecutionMode.Ray, ExecutionMode.Processes):
-                # Ray/Process: Keep as list - LimitSet will be created inside the actor/process
-                # This avoids serialization issues with threading locks
-                return limits
-            else:
-                # Sync/Asyncio/Thread: Create LimitSet now (in-memory, non-shared)
-                return LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync)
-
-    # Case 2: Already a BaseLimitSet
-    elif isinstance(limits, BaseLimitSet):
-        # Check if it's a shared LimitSet
-        assert limits.shared in {True, False}
-        if limits.shared is False:
+        if len(limits) == 0:
+            # Empty list -> treat as no limits
             if is_pool:
-                # WorkerProxyPool: must be shared
+                empty_limitset = LimitSet(limits=[], shared=True, mode=mode)
+            else:
+                if mode in (ExecutionMode.Ray, ExecutionMode.Processes):
+                    return []  # Will be wrapped remotely
+                empty_limitset = LimitSet(limits=[], shared=False, mode=ExecutionMode.Sync)
+            return LimitPool(
+                limit_sets=[empty_limitset], load_balancing="round_robin", worker_index=worker_index
+            )
+
+        # Check if List[Limit]
+        if all(isinstance(item, Limit) for item in limits):
+            # Create LimitSet from Limits
+            if is_pool:
+                limitset = LimitSet(limits=limits, shared=True, mode=mode)
+            else:
+                if mode in (ExecutionMode.Ray, ExecutionMode.Processes):
+                    return limits  # Keep as list, will be wrapped remotely
+                limitset = LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync)
+            return LimitPool(limit_sets=[limitset], load_balancing="round_robin", worker_index=worker_index)
+
+        # Check if List[LimitSet]
+        if all(isinstance(item, BaseLimitSet) for item in limits):
+            # Validate all are shared and compatible with mode
+            for ls in limits:
+                if not ls.shared:
+                    raise ValueError(
+                        "All LimitSets in a list must be shared. "
+                        "Create with: LimitSet(limits=[...], shared=True, mode='...')"
+                    )
+                # Validate mode compatibility
+                if isinstance(ls, InMemorySharedLimitSet):
+                    if mode not in (ExecutionMode.Sync, ExecutionMode.Asyncio, ExecutionMode.Threads):
+                        raise ValueError(
+                            f"InMemorySharedLimitSet is not compatible with worker mode '{mode}'. "
+                            f"Use mode='sync', 'asyncio', or 'thread' workers."
+                        )
+                elif isinstance(ls, MultiprocessSharedLimitSet):
+                    if mode != ExecutionMode.Processes:
+                        raise ValueError(
+                            f"MultiprocessSharedLimitSet is not compatible with worker mode '{mode}'. "
+                            f"Use mode='process' workers."
+                        )
+                elif isinstance(ls, RaySharedLimitSet):
+                    if mode != ExecutionMode.Ray:
+                        raise ValueError(
+                            f"RaySharedLimitSet is not compatible with worker mode '{mode}'. "
+                            f"Use mode='ray' workers."
+                        )
+            return LimitPool(limit_sets=limits, load_balancing="round_robin", worker_index=worker_index)
+
+        raise ValueError("List must contain either all Limit objects or all LimitSet objects")
+
+    # Case 4: Single LimitSet
+    if isinstance(limits, BaseLimitSet):
+        # Check if it's shared
+        if not limits.shared:
+            if is_pool:
                 raise ValueError(
                     "WorkerProxyPool requires a shared LimitSet. "
                     "Create with: LimitSet(limits=[...], shared=True, mode='...')"
                 )
 
-            # WorkerProxy: if not shared, extract limits and handle based on mode
+            # Single worker with non-shared LimitSet: extract limits and recreate
             limits_list = getattr(limits, "limits", [])
 
             if mode in (ExecutionMode.Ray, ExecutionMode.Processes):
-                # Ray/Process: Keep as list
                 warnings.warn(
                     "Passing non-shared LimitSet to Ray/Process worker. "
                     "The limits will be extracted and recreated inside the actor/process.",
                     UserWarning,
                     stacklevel=4,
                 )
-                return limits_list
+                return limits_list  # Will be wrapped remotely
             else:
-                # Sync/Asyncio/Thread: Create new LimitSet
                 warnings.warn(
                     "Passing non-shared LimitSet to WorkerProxy. "
                     "The limits will be copied as a new private LimitSet with shared=False and mode='sync'.",
                     UserWarning,
                     stacklevel=4,
                 )
-                return LimitSet(limits=limits_list, shared=False, mode=ExecutionMode.Sync)
+                new_limitset = LimitSet(limits=limits_list, shared=False, mode=ExecutionMode.Sync)
+                return LimitPool(
+                    limit_sets=[new_limitset], load_balancing="round_robin", worker_index=worker_index
+                )
 
-        assert limits.shared is True
-        # Validate mode compatibility for shared LimitSets:
+        # Shared LimitSet - validate mode compatibility
         if isinstance(limits, InMemorySharedLimitSet):
-            # InMemory backend - compatible with sync, asyncio, thread
             if mode not in (ExecutionMode.Sync, ExecutionMode.Asyncio, ExecutionMode.Threads):
                 raise ValueError(
                     f"InMemorySharedLimitSet is not compatible with worker mode '{mode}'. "
                     f"Use mode='sync', 'asyncio', or 'thread' workers."
                 )
         elif isinstance(limits, MultiprocessSharedLimitSet):
-            # Multiprocess backend - only compatible with process
             if mode != ExecutionMode.Processes:
                 raise ValueError(
                     f"MultiprocessSharedLimitSet is not compatible with worker mode '{mode}'. "
                     f"Use mode='process' workers."
                 )
         elif isinstance(limits, RaySharedLimitSet):
-            # Ray backend - only compatible with ray
             if mode != ExecutionMode.Ray:
                 raise ValueError(
                     f"RaySharedLimitSet is not compatible with worker mode '{mode}'. Use mode='ray' workers."
                 )
 
-        return limits
+        return LimitPool(limit_sets=[limits], load_balancing="round_robin", worker_index=worker_index)
 
-    else:
-        raise ValueError(
-            f"limits parameter must be either a LimitSet or a list of Limit objects, "
-            f"got {type(limits).__name__}"
-        )
+    raise ValueError(
+        f"limits parameter must be None, LimitSet, LimitPool, List[Limit], or List[LimitSet], "
+        f"got {type(limits).__name__}"
+    )
 
 
 def _validate_shared_limitset_mode_compatibility(limit_set: Any, worker_mode: ExecutionMode) -> None:
@@ -233,17 +267,23 @@ def _create_worker_wrapper(
                 super().__init__(*args, **kwargs)
 
                 # Always set limits (may be empty)
-                # If limits is a list, create LimitSet here (inside the actor/process)
+                # If limits is a list, create LimitSet and wrap in LimitPool (inside actor/process)
                 if isinstance(limits, list):
+                    from ..limit.limit_pool import LimitPool
+
                     # Create private LimitSet with mode=sync (uses threading.Lock, works everywhere)
                     limit_set = LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync)
+                    # Wrap in LimitPool with worker_index=0 (single worker)
+                    limit_pool = LimitPool(
+                        limit_sets=[limit_set], load_balancing="round_robin", worker_index=0
+                    )
                 else:
-                    # Already a LimitSet, use it directly
-                    limit_set = limits
+                    # Already a LimitPool, use it directly
+                    limit_pool = limits
 
                 # Use object.__setattr__ to bypass frozen models (Typed/BaseModel)
                 # This allows limits to work with frozen Pydantic models
-                object.__setattr__(self, "limits", limit_set)
+                object.__setattr__(self, "limits", limit_pool)
 
         WorkerWithLimits.__name__ = f"{worker_cls.__name__}_WithLimits"
         WorkerWithLimits.__qualname__ = f"{worker_cls.__qualname__}_WithLimits"
@@ -255,17 +295,21 @@ def _create_worker_wrapper(
             super().__init__(*args, **kwargs)
 
             # Always set limits (may be empty)
-            # If limits is a list, create LimitSet here (inside the actor/process)
+            # If limits is a list, create LimitSet and wrap in LimitPool (inside actor/process)
             if isinstance(limits, list):
+                from ..limit.limit_pool import LimitPool
+
                 # Create private LimitSet with mode=sync (uses threading.Lock, works everywhere)
                 limit_set = LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync)
+                # Wrap in LimitPool with worker_index=0 (single worker)
+                limit_pool = LimitPool(limit_sets=[limit_set], load_balancing="round_robin", worker_index=0)
             else:
-                # Already a LimitSet, use it directly
-                limit_set = limits
+                # Already a LimitPool, use it directly
+                limit_pool = limits
 
             # Use object.__setattr__ to bypass frozen models (Typed/BaseModel)
             # This allows limits to work with frozen Pydantic models
-            object.__setattr__(self, "limits", limit_set)
+            object.__setattr__(self, "limits", limit_pool)
 
         def __getattribute__(self, name: str):
             """Intercept method calls and wrap with retry logic if configured."""
@@ -769,12 +813,13 @@ class WorkerBuilder:
                 {},
             )
 
-        # Process limits (always, even if None - creates empty LimitSet)
+        # Process limits (always, even if None - creates empty LimitPool)
         processed_options = dict(self._options)
         processed_options["limits"] = _transform_worker_limits(
             limits=processed_options.get("limits"),
             mode=execution_mode,
             is_pool=False,
+            worker_index=0,  # Single workers use index 0
         )
 
         # Create retry config if needed
@@ -829,11 +874,13 @@ class WorkerBuilder:
             load_balancing_str = self._get_default_load_balancing()
         load_balancing = LoadBalancingAlgorithm(load_balancing_str)
 
-        # Process limits for pool (always, even if None - creates empty LimitSet)
+        # Process limits for pool (always, even if None - creates empty LimitPool)
+        # Note: worker_index will be assigned per-worker in pool initialization
         limits = _transform_worker_limits(
             limits=self._options.get("limits"),
             mode=execution_mode,
             is_pool=True,
+            worker_index=0,  # Placeholder, actual indices assigned per worker
         )
 
         # Update options with processed limits

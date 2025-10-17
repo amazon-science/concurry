@@ -145,6 +145,7 @@ class WorkerProxyPool(Typed, ABC):
     _method_cache: Dict[str, Callable] = PrivateAttr()
     _on_demand_workers: List[Any] = PrivateAttr()
     _on_demand_lock: Any = PrivateAttr()
+    _on_demand_counter: int = PrivateAttr()  # Counter for on-demand worker indices
 
     def post_initialize(self) -> None:
         """Initialize private attributes after Typed validation."""
@@ -159,6 +160,7 @@ class WorkerProxyPool(Typed, ABC):
         # On-demand worker tracking
         object.__setattr__(self, "_on_demand_workers", [])
         object.__setattr__(self, "_on_demand_lock", threading.Lock())
+        object.__setattr__(self, "_on_demand_counter", 0)  # Start at 0 for on-demand
 
         # Initialize the pool
         self._initialize_pool()
@@ -316,8 +318,13 @@ class WorkerProxyPool(Typed, ABC):
                 # Wait for slot if limit enforced
                 self._wait_for_on_demand_slot()
 
-                # Create worker
-                worker = self._create_worker()
+                # Get next worker index and increment counter
+                with self._on_demand_lock:
+                    worker_index = self._on_demand_counter
+                    self._on_demand_counter += 1
+
+                # Create worker with unique index
+                worker = self._create_worker(worker_index=worker_index)
 
                 # Track worker
                 with self._on_demand_lock:
@@ -485,13 +492,17 @@ class InMemoryWorkerProxyPool(WorkerProxyPool):
         if self.on_demand:
             return
 
-        # Create persistent workers
+        # Create persistent workers with sequential indices
         for i in range(self.max_workers):
-            worker = self._create_worker()
+            worker = self._create_worker(worker_index=i)
             self._workers.append(worker)
 
-    def _create_worker(self) -> Any:
-        """Create a single worker instance."""
+    def _create_worker(self, worker_index: int = 0) -> Any:
+        """Create a single worker instance.
+
+        Args:
+            worker_index: Index for round-robin load balancing in LimitPool
+        """
         from .asyncio_worker import AsyncioWorkerProxy
         from .sync_worker import SyncWorkerProxy
         from .task_worker import TaskWorker, TaskWorkerMixin
@@ -515,6 +526,16 @@ class InMemoryWorkerProxyPool(WorkerProxyPool):
 
             proxy_cls = TaskWorkerProxyClass
 
+        # Process limits with worker_index
+        from .base_worker import _transform_worker_limits
+
+        worker_limits = _transform_worker_limits(
+            limits=self.limits,
+            mode=self.mode,
+            is_pool=False,  # Each worker gets its own view
+            worker_index=worker_index,
+        )
+
         # Create worker instance
         return proxy_cls(
             worker_cls=self.worker_cls,
@@ -522,7 +543,7 @@ class InMemoryWorkerProxyPool(WorkerProxyPool):
             unwrap_futures=self.unwrap_futures,
             init_args=self.init_args,
             init_kwargs=self.init_kwargs,
-            limits=self.limits,
+            limits=worker_limits,
             retry_config=self.retry_config,
         )
 
@@ -552,13 +573,17 @@ class MultiprocessWorkerProxyPool(WorkerProxyPool):
         if self.on_demand:
             return
 
-        # Create persistent workers
+        # Create persistent workers with sequential indices
         for i in range(self.max_workers):
-            worker = self._create_worker()
+            worker = self._create_worker(worker_index=i)
             self._workers.append(worker)
 
-    def _create_worker(self) -> Any:
-        """Create a single worker instance."""
+    def _create_worker(self, worker_index: int = 0) -> Any:
+        """Create a single worker instance.
+
+        Args:
+            worker_index: Index for round-robin load balancing in LimitPool
+        """
         from .process_worker import ProcessWorkerProxy
         from .task_worker import TaskWorker, TaskWorkerMixin
 
@@ -572,6 +597,16 @@ class MultiprocessWorkerProxyPool(WorkerProxyPool):
 
             proxy_cls = TaskWorkerProxyClass
 
+        # Process limits with worker_index
+        from .base_worker import _transform_worker_limits
+
+        worker_limits = _transform_worker_limits(
+            limits=self.limits,
+            mode=self.mode,
+            is_pool=False,  # Each worker gets its own view
+            worker_index=worker_index,
+        )
+
         # Create worker instance
         return proxy_cls(
             worker_cls=self.worker_cls,
@@ -579,7 +614,7 @@ class MultiprocessWorkerProxyPool(WorkerProxyPool):
             unwrap_futures=self.unwrap_futures,
             init_args=self.init_args,
             init_kwargs=self.init_kwargs,
-            limits=self.limits,
+            limits=worker_limits,
             retry_config=self.retry_config,
         )
 
@@ -607,13 +642,17 @@ class RayWorkerProxyPool(WorkerProxyPool):
         if self.on_demand:
             return
 
-        # Create persistent workers
+        # Create persistent workers with sequential indices
         for i in range(self.max_workers):
-            worker = self._create_worker()
+            worker = self._create_worker(worker_index=i)
             self._workers.append(worker)
 
-    def _create_worker(self) -> Any:
-        """Create a single worker instance."""
+    def _create_worker(self, worker_index: int = 0) -> Any:
+        """Create a single worker instance.
+
+        Args:
+            worker_index: Index for round-robin load balancing in LimitPool
+        """
         from .ray_worker import RayWorkerProxy
         from .task_worker import TaskWorker, TaskWorkerMixin
 
@@ -627,6 +666,16 @@ class RayWorkerProxyPool(WorkerProxyPool):
 
             proxy_cls = TaskWorkerProxyClass
 
+        # Process limits with worker_index
+        from .base_worker import _transform_worker_limits
+
+        worker_limits = _transform_worker_limits(
+            limits=self.limits,
+            mode=self.mode,
+            is_pool=False,  # Each worker gets its own view
+            worker_index=worker_index,
+        )
+
         # Create worker instance with Ray-specific options
         return proxy_cls(
             worker_cls=self.worker_cls,
@@ -634,7 +683,7 @@ class RayWorkerProxyPool(WorkerProxyPool):
             unwrap_futures=self.unwrap_futures,
             init_args=self.init_args,
             init_kwargs=self.init_kwargs,
-            limits=self.limits,
+            limits=worker_limits,
             retry_config=self.retry_config,
             actor_options=self.actor_options,
         )

@@ -17,6 +17,7 @@ from .limit import (
     Acquisition,
     CallLimit,
     Limit,
+    LimitPool,
     LimitSet,
     LimitSetAcquisition,
     RateLimit,
@@ -65,6 +66,7 @@ __all__ = [
     "Acquisition",
     "LimitSetAcquisition",
     "LimitSet",
+    "LimitPool",
 ]
 
 # Conditionally export RayFuture if Ray is installed

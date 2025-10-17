@@ -6,12 +6,9 @@ import pytest
 
 from concurry import CallLimit, Worker
 
-# Import POOL_MODES from conftest for pool-related tests
-from tests.conftest import POOL_MODES
 
 # Ray initialization is handled by conftest.py initialize_ray fixture
-
-
+# pool_mode fixture is provided by conftest.py
 class SimpleWorker(Worker):
     """Simple worker for testing."""
 
@@ -49,11 +46,10 @@ class TestWorkerPoolCreation:
 
         worker.stop()
 
-    @pytest.mark.parametrize("mode", POOL_MODES)
-    def test_pool_with_max_workers(self, mode):
+    def test_pool_with_max_workers(self, pool_mode):
         """Test creating pool with max_workers."""
-        options = {"mode": mode, "max_workers": 3}
-        if mode == "ray":
+        options = {"mode": pool_mode, "max_workers": 3}
+        if pool_mode == "ray":
             options["actor_options"] = {"num_cpus": 0.1}
 
         pool = SimpleWorker.options(**options).init(multiplier=2)
@@ -109,11 +105,10 @@ class TestWorkerPoolCreation:
 class TestWorkerPoolDispatch:
     """Tests for worker pool dispatch and load balancing."""
 
-    @pytest.mark.parametrize("mode", POOL_MODES)
-    def test_round_robin_dispatch(self, mode):
+    def test_round_robin_dispatch(self, pool_mode):
         """Test that round-robin dispatches to workers evenly."""
-        options = {"mode": mode, "max_workers": 3, "load_balancing": "round_robin"}
-        if mode == "ray":
+        options = {"mode": pool_mode, "max_workers": 3, "load_balancing": "round_robin"}
+        if pool_mode == "ray":
             options["actor_options"] = {"num_cpus": 0.1}
 
         pool = SimpleWorker.options(**options).init(multiplier=2)
@@ -132,11 +127,10 @@ class TestWorkerPoolDispatch:
 
         pool.stop()
 
-    @pytest.mark.parametrize("mode", POOL_MODES)
-    def test_pool_blocking_mode(self, mode):
+    def test_pool_blocking_mode(self, pool_mode):
         """Test pool in blocking mode."""
-        options = {"mode": mode, "max_workers": 3, "blocking": True}
-        if mode == "ray":
+        options = {"mode": pool_mode, "max_workers": 3, "blocking": True}
+        if pool_mode == "ray":
             options["actor_options"] = {"num_cpus": 0.1}
 
         pool = SimpleWorker.options(**options).init(multiplier=3)
@@ -148,11 +142,10 @@ class TestWorkerPoolDispatch:
 
         pool.stop()
 
-    @pytest.mark.parametrize("mode", POOL_MODES)
-    def test_pool_stops_all_workers(self, mode):
+    def test_pool_stops_all_workers(self, pool_mode):
         """Test that stopping pool stops all workers."""
-        options = {"mode": mode, "max_workers": 3}
-        if mode == "ray":
+        options = {"mode": pool_mode, "max_workers": 3}
+        if pool_mode == "ray":
             options["actor_options"] = {"num_cpus": 0.1}
 
         pool = SimpleWorker.options(**options).init(multiplier=2)
@@ -176,11 +169,10 @@ class TestWorkerPoolDispatch:
 class TestWorkerPoolLoadBalancing:
     """Tests for load balancing in worker pools."""
 
-    @pytest.mark.parametrize("mode", POOL_MODES)
-    def test_least_active_load_balancing(self, mode):
+    def test_least_active_load_balancing(self, pool_mode):
         """Test least active load balancing."""
-        options = {"mode": mode, "max_workers": 3, "load_balancing": "active"}
-        if mode == "ray":
+        options = {"mode": pool_mode, "max_workers": 3, "load_balancing": "active"}
+        if pool_mode == "ray":
             options["actor_options"] = {"num_cpus": 0.1}
 
         pool = SimpleWorker.options(**options).init(multiplier=2)
@@ -196,11 +188,10 @@ class TestWorkerPoolLoadBalancing:
 
         pool.stop()
 
-    @pytest.mark.parametrize("mode", POOL_MODES)
-    def test_least_total_load_balancing(self, mode):
+    def test_least_total_load_balancing(self, pool_mode):
         """Test least total load balancing."""
-        options = {"mode": mode, "max_workers": 3, "load_balancing": "total"}
-        if mode == "ray":
+        options = {"mode": pool_mode, "max_workers": 3, "load_balancing": "total"}
+        if pool_mode == "ray":
             options["actor_options"] = {"num_cpus": 0.1}
 
         pool = SimpleWorker.options(**options).init(multiplier=2)
@@ -216,11 +207,10 @@ class TestWorkerPoolLoadBalancing:
 
         pool.stop()
 
-    @pytest.mark.parametrize("mode", POOL_MODES)
-    def test_random_load_balancing(self, mode):
+    def test_random_load_balancing(self, pool_mode):
         """Test random load balancing."""
-        options = {"mode": mode, "max_workers": 3, "load_balancing": "random"}
-        if mode == "ray":
+        options = {"mode": pool_mode, "max_workers": 3, "load_balancing": "random"}
+        if pool_mode == "ray":
             options["actor_options"] = {"num_cpus": 0.1}
 
         pool = SimpleWorker.options(**options).init(multiplier=2)
@@ -244,8 +234,7 @@ class TestSharedLimitState:
     RaySharedLimitSet were not sharing state across workers in a pool.
     """
 
-    @pytest.mark.parametrize("mode", POOL_MODES)
-    def test_shared_limits_enforced_across_pool(self, mode):
+    def test_shared_limits_enforced_across_pool(self, pool_mode):
         """Test that limits are shared across all workers in the pool.
 
         This is the critical test for the shared limit state bug fix.
@@ -267,8 +256,12 @@ class TestSharedLimitState:
 
         # Create pool with 4 workers and a CallLimit of 20 calls/sec
         # For Ray, use fractional CPUs to avoid resource exhaustion
-        options = {"mode": mode, "max_workers": 4, "limits": [CallLimit(window_seconds=1.0, capacity=20)]}
-        if mode == "ray":
+        options = {
+            "mode": pool_mode,
+            "max_workers": 4,
+            "limits": [CallLimit(window_seconds=1.0, capacity=20)],
+        }
+        if pool_mode == "ray":
             options["actor_options"] = {"num_cpus": 0.1}
 
         pool = Counter.options(**options).init(0)
@@ -290,8 +283,7 @@ class TestSharedLimitState:
 
         pool.stop()
 
-    @pytest.mark.parametrize("mode", POOL_MODES)
-    def test_single_worker_with_limits_baseline(self, mode):
+    def test_single_worker_with_limits_baseline(self, pool_mode):
         """Baseline test: single worker with limits should enforce limit correctly."""
 
         # Initialize ray if needed
@@ -307,8 +299,12 @@ class TestSharedLimitState:
 
         # Single worker with 20 calls/sec limit
         # For Ray, use fractional CPUs to avoid resource exhaustion
-        options = {"mode": mode, "max_workers": 1, "limits": [CallLimit(window_seconds=1.0, capacity=20)]}
-        if mode == "ray":
+        options = {
+            "mode": pool_mode,
+            "max_workers": 1,
+            "limits": [CallLimit(window_seconds=1.0, capacity=20)],
+        }
+        if pool_mode == "ray":
             options["actor_options"] = {"num_cpus": 0.1}
 
         worker = Counter.options(**options).init(0)

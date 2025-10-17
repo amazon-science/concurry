@@ -22,9 +22,11 @@ from concurry.core.limit.limit_set import BaseLimitSet
 class TestBasicLimitEnforcement:
     """Test basic limit enforcement with single workers."""
 
-    @pytest.mark.parametrize("worker_mode", ["sync", "thread", "asyncio", "process"])
     def test_counter_with_call_limit(self, worker_mode):
         """Test Counter worker with CallLimit - should throttle execution."""
+        # Skip ray mode - use separate ray tests in TestRayWorkerLimits
+        if worker_mode == "ray":
+            pytest.skip("Ray mode has separate tests in TestRayWorkerLimits class")
 
         class Counter(Worker):
             def __init__(self, count: int = 0):
@@ -63,9 +65,11 @@ class TestBasicLimitEnforcement:
 
         w.stop()
 
-    @pytest.mark.parametrize("worker_mode", ["sync", "thread", "asyncio", "process"])
     def test_counter_with_rate_limit(self, worker_mode):
         """Test Counter worker with RateLimit - should throttle token consumption."""
+        # Skip ray mode - use separate ray tests in TestRayWorkerLimits
+        if worker_mode == "ray":
+            pytest.skip("Ray mode has separate tests in TestRayWorkerLimits class")
 
         class TokenCounter(Worker):
             def __init__(self):
@@ -109,9 +113,11 @@ class TestBasicLimitEnforcement:
 
         w.stop()
 
-    @pytest.mark.parametrize("worker_mode", ["sync", "thread", "asyncio", "process"])
     def test_counter_with_resource_limit(self, worker_mode):
         """Test Counter worker with ResourceLimit - should block when resources exhausted."""
+        # Skip ray mode - use separate ray tests in TestRayWorkerLimits
+        if worker_mode == "ray":
+            pytest.skip("Ray mode has separate tests in TestRayWorkerLimits class")
 
         class ResourceWorker(Worker):
             def __init__(self):
@@ -154,9 +160,11 @@ class TestBasicLimitEnforcement:
 class TestSharedLimitSets:
     """Test shared LimitSets across multiple workers."""
 
-    @pytest.mark.parametrize("worker_mode", ["sync", "thread", "asyncio"])
     def test_shared_limitset_across_workers_inmemory(self, worker_mode):
         """Test that shared InMemorySharedLimitSet is shared across workers."""
+        # Skip process and ray modes - they use different shared limit implementations
+        if worker_mode in ("process", "ray"):
+            pytest.skip("InMemorySharedLimitSet is only for sync/thread/asyncio modes")
 
         class Counter(Worker):
             def __init__(self):
@@ -306,9 +314,11 @@ class TestRayWorkerLimits:
 class TestMixedLimitTypes:
     """Test workers with multiple limit types."""
 
-    @pytest.mark.parametrize("worker_mode", ["sync", "thread", "asyncio", "process"])
     def test_worker_with_call_and_rate_limits(self, worker_mode):
         """Test worker with both CallLimit and RateLimit."""
+        # Skip ray mode - use separate ray test
+        if worker_mode == "ray":
+            pytest.skip("Ray mode has separate test")
 
         class APIWorker(Worker):
             def __init__(self):
@@ -403,9 +413,11 @@ class TestMixedLimitTypes:
 
         w.stop()
 
-    @pytest.mark.parametrize("worker_mode", ["sync", "thread", "asyncio", "process"])
     def test_worker_with_all_limit_types(self, worker_mode):
         """Test worker with CallLimit, RateLimit, and ResourceLimit."""
+        # Skip ray mode - use separate ray tests
+        if worker_mode == "ray":
+            pytest.skip("Ray mode has separate tests")
 
         class ComplexWorker(Worker):
             def __init__(self):
@@ -467,26 +479,235 @@ class TestLimitValidation:
 
     def test_list_of_limits_creates_appropriate_limitset(self):
         """Test that list of Limits creates appropriate LimitSet for worker mode."""
+        from concurry.core.limit.limit_pool import LimitPool
 
         class DummyWorker(Worker):
             def process(self):
                 # Verify limits exist and check type
                 assert self.limits is not None
-                assert isinstance(self.limits, BaseLimitSet), (
-                    f"Expected BaseLimitSet, got {type(self.limits)}"
+                # self.limits is now always a LimitPool
+                assert isinstance(self.limits, LimitPool), f"Expected LimitPool, got {type(self.limits)}"
+                # Verify it contains exactly one LimitSet
+                assert len(self.limits.limit_sets) == 1, (
+                    f"Expected 1 LimitSet in LimitPool, got {len(self.limits.limit_sets)}"
+                )
+                # Verify the LimitSet is a BaseLimitSet
+                assert isinstance(self.limits.limit_sets[0], BaseLimitSet), (
+                    f"Expected BaseLimitSet inside LimitPool, got {type(self.limits.limit_sets[0])}"
                 )
                 return 1
 
         limits_list = [CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)]
 
-        # Thread worker should get InMemorySharedLimitSet
+        # Thread worker should get InMemorySharedLimitSet wrapped in LimitPool
         w_thread = DummyWorker.options(mode="thread", limits=limits_list).init()
         # Call process() which will verify limits inside the worker
         w_thread.process().result()
         w_thread.stop()
 
-        # Process worker should also get InMemorySharedLimitSet (private copy)
+        # Process worker should also get appropriate LimitSet wrapped in LimitPool
         w_process = DummyWorker.options(mode="process", limits=limits_list).init()
         # Call process() which will verify limits inside the worker
         w_process.process().result()
         w_process.stop()
+
+
+class TestSharedLimitSetsWithConfig:
+    """Test config parameter with shared LimitSets across multiple workers."""
+
+    def test_config_shared_across_workers_inmemory(self, worker_mode):
+        """Test that multiple workers can access the same config from shared LimitSet."""
+        # Skip process and ray modes - they use different shared limit implementations
+        if worker_mode in ("process", "ray"):
+            pytest.skip("InMemorySharedLimitSet is only for sync/thread/asyncio modes")
+
+        class APIWorker(Worker):
+            def __init__(self):
+                pass
+
+            def call_api(self):
+                with self.limits.acquire(requested={"tokens": 100}) as acq:
+                    region = acq.config.get("region", "unknown")
+                    acq.update(usage={"tokens": 100})
+                    return region
+
+        # Create shared LimitSet with config
+        shared_limits = LimitSet(
+            limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+            shared=True,
+            mode=worker_mode,
+            config={"region": "us-east-1", "account": "12345"},
+        )
+
+        # Create multiple workers with shared limits
+        worker1 = APIWorker.options(mode=worker_mode, limits=shared_limits).init()
+        worker2 = APIWorker.options(mode=worker_mode, limits=shared_limits).init()
+
+        # Both workers should see the same config
+        result1 = worker1.call_api().result()
+        result2 = worker2.call_api().result()
+
+        assert result1 == "us-east-1"
+        assert result2 == "us-east-1"
+
+        worker1.stop()
+        worker2.stop()
+
+    def test_config_shared_across_workers_process(self):
+        """Test that process workers can access config from shared LimitSet."""
+
+        class APIWorker(Worker):
+            def __init__(self):
+                pass
+
+            def call_api(self):
+                with self.limits.acquire(requested={"tokens": 100}) as acq:
+                    region = acq.config.get("region", "unknown")
+                    account = acq.config.get("account", "unknown")
+                    acq.update(usage={"tokens": 100})
+                    return f"{region}:{account}"
+
+        # Create shared LimitSet with config for process mode
+        shared_limits = LimitSet(
+            limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+            shared=True,
+            mode="process",
+            config={"region": "eu-west-1", "account": "67890"},
+        )
+
+        # Create multiple process workers
+        worker1 = APIWorker.options(mode="process", limits=shared_limits).init()
+        worker2 = APIWorker.options(mode="process", limits=shared_limits).init()
+
+        # Both workers should see the same config
+        result1 = worker1.call_api().result()
+        result2 = worker2.call_api().result()
+
+        assert result1 == "eu-west-1:67890"
+        assert result2 == "eu-west-1:67890"
+
+        worker1.stop()
+        worker2.stop()
+
+    @pytest.mark.skipif(
+        not pytest.importorskip("ray", reason="Ray not installed"), reason="Ray not installed"
+    )
+    def test_config_shared_across_ray_workers(self):
+        """Test that Ray workers can access config from shared LimitSet."""
+
+        class APIWorker(Worker):
+            def __init__(self):
+                pass
+
+            def call_api(self):
+                with self.limits.acquire(requested={"tokens": 100}) as acq:
+                    region = acq.config.get("region", "unknown")
+                    acq.update(usage={"tokens": 100})
+                    return region
+
+        # Create shared LimitSet with config for Ray mode
+        shared_limits = LimitSet(
+            limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+            shared=True,
+            mode="ray",
+            config={"region": "ap-southeast-1", "endpoint": "https://api.example.com"},
+        )
+
+        # Create multiple Ray workers
+        worker1 = APIWorker.options(mode="ray", limits=shared_limits).init()
+        worker2 = APIWorker.options(mode="ray", limits=shared_limits).init()
+
+        # Both workers should see the same config
+        result1 = worker1.call_api().result()
+        result2 = worker2.call_api().result()
+
+        assert result1 == "ap-southeast-1"
+        assert result2 == "ap-southeast-1"
+
+        worker1.stop()
+        worker2.stop()
+
+    def test_config_not_modified_across_workers(self, worker_mode):
+        """Test that one worker modifying acq.config doesn't affect other workers."""
+        # This test is primarily for thread mode where we can easily test shared state
+        if worker_mode not in ("thread", "sync", "asyncio"):
+            pytest.skip("This test is specific to in-memory shared modes")
+
+        class APIWorker(Worker):
+            def __init__(self):
+                pass
+
+            def modify_config(self):
+                with self.limits.acquire(requested={"tokens": 100}) as acq:
+                    # Modify the acquisition's config (should be a copy)
+                    original = acq.config["region"]
+                    acq.config["region"] = "modified"
+                    acq.update(usage={"tokens": 100})
+                    return original
+
+            def read_config(self):
+                with self.limits.acquire(requested={"tokens": 100}) as acq:
+                    region = acq.config["region"]
+                    acq.update(usage={"tokens": 100})
+                    return region
+
+        # Create shared LimitSet with config
+        shared_limits = LimitSet(
+            limits=[RateLimit(key="tokens", window_seconds=60, capacity=2000)],
+            shared=True,
+            mode=worker_mode,
+            config={"region": "us-west-2"},
+        )
+
+        worker1 = APIWorker.options(mode=worker_mode, limits=shared_limits).init()
+        worker2 = APIWorker.options(mode=worker_mode, limits=shared_limits).init()
+
+        # Worker 1 modifies its acquisition's config
+        result1 = worker1.modify_config().result()
+        assert result1 == "us-west-2"
+
+        # Worker 2 should still see the original config
+        result2 = worker2.read_config().result()
+        assert result2 == "us-west-2"
+
+        # LimitSet's config should be unchanged
+        assert shared_limits.config["region"] == "us-west-2"
+
+        worker1.stop()
+        worker2.stop()
+
+    def test_config_with_worker_pool(self):
+        """Test that worker pools properly handle config from shared LimitSet."""
+
+        class APIWorker(Worker):
+            def __init__(self):
+                pass
+
+            def call_api(self, prompt: str):
+                with self.limits.acquire(requested={"tokens": 100}) as acq:
+                    region = acq.config.get("region", "unknown")
+                    acq.update(usage={"tokens": 50})
+                    return f"{region}:{prompt}"
+
+        # Create shared LimitSet with config
+        shared_limits = LimitSet(
+            limits=[RateLimit(key="tokens", window_seconds=60, capacity=10000)],
+            shared=True,
+            mode="thread",
+            config={"region": "us-east-1", "tier": "premium"},
+        )
+
+        # Create worker pool
+        pool = APIWorker.options(mode="thread", max_workers=5, limits=shared_limits).init()
+
+        # All workers in the pool should see the same config
+        results = []
+        for i in range(10):
+            result = pool.call_api(f"prompt-{i}").result()
+            results.append(result)
+
+        # All results should have the same region
+        for result in results:
+            assert result.startswith("us-east-1:")
+
+        pool.stop()

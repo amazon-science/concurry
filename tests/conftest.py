@@ -69,6 +69,25 @@ def worker_mode(request):
     yield request.param
 
 
+@pytest.fixture(params=POOL_MODES)
+def pool_mode(request):
+    """Fixture providing different pool modes.
+
+    This fixture is automatically parametrized across pool-supporting modes.
+    Pool modes are modes that support max_workers > 1 (thread, process, and ray if installed).
+
+    The Ray cluster is initialized by the initialize_ray fixture, so this
+    fixture just yields the mode name.
+
+    Args:
+        request: pytest request object containing the parameter
+
+    Yields:
+        str: The pool mode name ("thread", "process", or "ray")
+    """
+    yield request.param
+
+
 @pytest.fixture(scope="session", autouse=True)
 def cleanup_all():
     """Session-level fixture to ensure all resources are cleaned up after tests.

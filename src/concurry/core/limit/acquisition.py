@@ -133,6 +133,7 @@ class LimitSetAcquisition:
         limit_set: The parent LimitSet that created this acquisition
         acquisitions: Dict mapping limit keys to individual Acquisition objects
         successful: Whether all limits were successfully acquired
+        config: Static configuration dict from the parent LimitSet
 
     Update Requirements:
         - **RateLimits**: MUST call update() to report actual usage (raises RuntimeError if missing)
@@ -194,17 +195,26 @@ class LimitSetAcquisition:
         - BaseLimitSet: Parent class that manages releases
     """
 
-    def __init__(self, limit_set: "LimitSet", acquisitions: Dict[str, Acquisition], successful: bool = True):
+    def __init__(
+        self,
+        limit_set: "LimitSet",
+        acquisitions: Dict[str, Acquisition],
+        successful: bool = True,
+        config: Optional[dict] = None,
+    ):
         """Initialize a limit set acquisition.
 
         Args:
             limit_set: The parent LimitSet
             acquisitions: Mapping of limit key to acquisition
             successful: Whether all acquisitions were successful
+            config: Static configuration dict from the parent LimitSet
         """
         self.limit_set = limit_set
         self.acquisitions = acquisitions
         self.successful = successful
+        # Make a copy of config to prevent mutations
+        self.config = dict(config) if config is not None else {}
         self._updated_keys: Set[str] = set()
         self._released = False
 

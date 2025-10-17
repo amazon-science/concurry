@@ -199,20 +199,22 @@ class TestWorkerLimits:
 
             def get_limit_capacity(self, limit_key: str) -> int:
                 """Get the capacity of a specific limit."""
-                limit = self.limits[limit_key]
+                # Access limit via first LimitSet in pool
+                limit = self.limits[0][limit_key]
                 return limit.capacity
 
             def get_limit_stats(self, limit_key: str) -> dict:
                 """Get statistics for a specific limit."""
-                limit = self.limits[limit_key]
+                # Access limit via first LimitSet in pool
+                limit = self.limits[0][limit_key]
                 return limit.get_stats()
 
             def check_all_limits(self) -> dict:
                 """Check capacities of all configured limits."""
                 return {
-                    "call_count_capacity": self.limits["call_count"].capacity,
-                    "tokens_capacity": self.limits["tokens"].capacity,
-                    "connections_capacity": self.limits["connections"].capacity,
+                    "call_count_capacity": self.limits[0]["call_count"].capacity,
+                    "tokens_capacity": self.limits[0]["tokens"].capacity,
+                    "connections_capacity": self.limits[0]["connections"].capacity,
                 }
 
         worker = InspectorWorker.options(mode=worker_mode, limits=limits).init()
@@ -414,3 +416,545 @@ class TestWorkerWithoutLimits:
         result = pool.process(5)
         assert result == 10
         pool.stop()
+
+
+class TestWorkerLimitsWithConfig:
+    """Test Worker integration with LimitSet config parameter."""
+
+    def test_worker_with_limitset_config(self, worker_mode):
+        """Test that worker can access config from LimitSet via acquisition."""
+        config = {"region": "us-east-1", "account_id": "12345"}
+        limitset = LimitSet(
+            limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+            shared=True,
+            mode=worker_mode,
+            config=config,
+        )
+
+        class APIWorker(Worker):
+            def __init__(self):
+                pass
+
+            def call_api(self, prompt: str):
+                with self.limits.acquire(requested={"tokens": 100}) as acq:
+                    # Access config from acquisition
+                    assert acq.config == config
+                    assert acq.config["region"] == "us-east-1"
+                    assert acq.config["account_id"] == "12345"
+                    acq.update(usage={"tokens": 100})
+                    return f"Called {acq.config['region']}"
+
+        worker = APIWorker.options(mode=worker_mode, limits=limitset).init()
+        result = worker.call_api("test").result()
+        assert "us-east-1" in result
+        worker.stop()
+
+    def test_worker_config_immutable_during_acquisition(self, worker_mode):
+        """Test that modifying acq.config doesn't affect the LimitSet's config."""
+        original_config = {"region": "us-east-1"}
+        limitset = LimitSet(
+            limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+            shared=True,
+            mode=worker_mode,
+            config=original_config,
+        )
+
+        class APIWorker(Worker):
+            def __init__(self):
+                pass
+
+            def call_api(self):
+                with self.limits.acquire(requested={"tokens": 100}) as acq:
+                    # Try to modify the acquisition's config
+                    acq.config["region"] = "modified"
+                    acq.update(usage={"tokens": 50})
+                    return acq.config["region"]
+
+        worker = APIWorker.options(mode=worker_mode, limits=limitset).init()
+        result = worker.call_api().result()
+        assert result == "modified"  # Worker saw the modification
+
+        # But the original LimitSet config should be unchanged
+        assert limitset.config["region"] == "us-east-1"
+        worker.stop()
+
+    def test_worker_with_config_and_all_limit_types(self, worker_mode):
+        """Test that config works with all limit types."""
+        config = {"environment": "production", "service": "api"}
+        limitset = LimitSet(
+            limits=[
+                CallLimit(window_seconds=60, capacity=100),
+                RateLimit(key="tokens", window_seconds=60, capacity=1000),
+                ResourceLimit(key="connections", capacity=10),
+            ],
+            shared=True,
+            mode=worker_mode,
+            config=config,
+        )
+
+        class APIWorker(Worker):
+            def __init__(self):
+                pass
+
+            def process(self):
+                with self.limits.acquire(requested={"tokens": 100, "connections": 2}) as acq:
+                    assert acq.config == config
+                    assert acq.config["environment"] == "production"
+                    assert acq.config["service"] == "api"
+                    acq.update(usage={"tokens": 80})
+                    return True
+
+        worker = APIWorker.options(mode=worker_mode, limits=limitset).init()
+        result = worker.process().result()
+        assert result is True
+        worker.stop()
+
+    def test_worker_config_with_nested_acquisition(self, worker_mode):
+        """Test that config is accessible in nested acquisitions."""
+        config = {"region": "ap-southeast-1"}
+        limitset = LimitSet(
+            limits=[
+                RateLimit(key="tokens", window_seconds=60, capacity=1000),
+                ResourceLimit(key="connections", capacity=10),
+            ],
+            shared=True,
+            mode=worker_mode,
+            config=config,
+        )
+
+        class APIWorker(Worker):
+            def __init__(self):
+                pass
+
+            def process(self):
+                # First acquisition
+                with self.limits.acquire(requested={"connections": 1}) as acq1:
+                    assert acq1.config["region"] == "ap-southeast-1"
+
+                    # Nested acquisition
+                    with self.limits.acquire(requested={"tokens": 100}) as acq2:
+                        assert acq2.config["region"] == "ap-southeast-1"
+                        acq2.update(usage={"tokens": 90})
+
+                return True
+
+        worker = APIWorker.options(mode=worker_mode, limits=limitset).init()
+        result = worker.process().result()
+        assert result is True
+        worker.stop()
+
+    def test_worker_without_config_defaults_to_empty_dict(self, worker_mode):
+        """Test that LimitSet without config defaults to empty dict."""
+        limitset = LimitSet(
+            limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+            shared=True,
+            mode=worker_mode,
+        )
+
+        class APIWorker(Worker):
+            def __init__(self):
+                pass
+
+            def process(self):
+                with self.limits.acquire(requested={"tokens": 100}) as acq:
+                    assert acq.config == {}
+                    acq.update(usage={"tokens": 100})
+                    return True
+
+        worker = APIWorker.options(mode=worker_mode, limits=limitset).init()
+        result = worker.process().result()
+        assert result is True
+        worker.stop()
+
+
+class TestLimitPoolWorkerIntegration:
+    """Test LimitPool integration with Workers across all modes."""
+
+    def test_worker_with_limitpool(self, worker_mode):
+        """Test that workers can use LimitPool via self.limits."""
+
+        class APIWorker(Worker):
+            def __init__(self):
+                self.calls = []
+
+            def call_api(self, prompt: str):
+                # self.limits is a LimitPool
+                with self.limits.acquire(requested={"tokens": 100}) as acq:
+                    region = acq.config["region"]
+                    self.calls.append(region)
+                    acq.update(usage={"tokens": 100})
+                    return f"Response from {region}"
+
+        # Create LimitSets with configs for the appropriate mode
+        limitsets = [
+            LimitSet(
+                limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+                shared=True,
+                mode=worker_mode,
+                config={"region": f"region-{i}"},
+            )
+            for i in range(3)
+        ]
+
+        # Create LimitPool
+        from concurry import LoadBalancingAlgorithm
+        from concurry.core.limit.limit_pool import LimitPool
+
+        pool = LimitPool(
+            limit_sets=limitsets, load_balancing=LoadBalancingAlgorithm.RoundRobin, worker_index=0
+        )
+
+        # Create worker with LimitPool
+        worker = APIWorker.options(mode=worker_mode, limits=pool).init()
+
+        # Make calls - should cycle through regions
+        results = []
+        for i in range(6):
+            result = worker.call_api(f"prompt-{i}").result()
+            results.append(result)
+
+        # Verify round-robin distribution
+        assert "region-0" in results[0]
+        assert "region-1" in results[1]
+        assert "region-2" in results[2]
+        assert "region-0" in results[3]
+        assert "region-1" in results[4]
+        assert "region-2" in results[5]
+
+        worker.stop()
+
+    def test_worker_with_list_of_limitsets(self, worker_mode):
+        """Test that passing List[LimitSet] to worker creates LimitPool automatically."""
+
+        class APIWorker(Worker):
+            def __init__(self):
+                pass
+
+            def call_api(self, prompt: str):
+                # self.limits should be a LimitPool wrapping the LimitSets
+                with self.limits.acquire(requested={"tokens": 100}) as acq:
+                    region = acq.config.get("region", "unknown")
+                    acq.update(usage={"tokens": 100})
+                    return region
+
+        # Create list of LimitSets with appropriate mode
+        limitsets = [
+            LimitSet(
+                limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+                shared=True,
+                mode=worker_mode,
+                config={"region": f"region-{i}"},
+            )
+            for i in range(2)
+        ]
+
+        # Pass list of LimitSets directly
+        worker = APIWorker.options(mode=worker_mode, limits=limitsets).init()
+
+        # Make calls
+        results = []
+        for i in range(4):
+            result = worker.call_api(f"prompt-{i}").result()
+            results.append(result)
+
+        # Verify both regions were used (round-robin)
+        assert "region-0" in results
+        assert "region-1" in results
+
+        worker.stop()
+
+    def test_worker_pool_with_limitpool(self, worker_mode):
+        """Test that worker pools properly assign worker_index to each worker's LimitPool."""
+        # Skip modes that don't support pools
+        if worker_mode in ("sync", "asyncio"):
+            pytest.skip(f"{worker_mode} mode does not support max_workers > 1")
+
+        class APIWorker(Worker):
+            def __init__(self):
+                pass
+
+            def call_api(self, prompt: str):
+                with self.limits.acquire(requested={"tokens": 100}) as acq:
+                    region = acq.config["region"]
+                    acq.update(usage={"tokens": 100})
+                    return region
+
+        # Create LimitSets with appropriate mode
+        limitsets = [
+            LimitSet(
+                limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+                shared=True,
+                mode=worker_mode,
+                config={"region": f"region-{i}"},
+            )
+            for i in range(3)
+        ]
+
+        # Create worker pool with list of LimitSets
+        pool = APIWorker.options(mode=worker_mode, max_workers=3, limits=limitsets).init()
+
+        # Make many calls
+        futures = [pool.call_api(f"prompt-{i}") for i in range(12)]
+        results = [f.result() for f in futures]
+
+        # Verify all regions were accessed
+        regions = set(results)
+        assert "region-0" in regions
+        assert "region-1" in regions
+        assert "region-2" in regions
+
+        pool.stop()
+
+    def test_shared_limitsets_enforce_limits_across_workers(self, worker_mode):
+        """Test that shared LimitSets properly enforce limits across multiple workers in a pool."""
+        # Skip modes that don't support pools
+        if worker_mode in ("sync", "asyncio"):
+            pytest.skip(f"{worker_mode} mode does not support max_workers > 1")
+
+        class APIWorker(Worker):
+            def __init__(self):
+                pass
+
+            def call_api(self, tokens: int):
+                # Try to acquire tokens
+                acq = self.limits.try_acquire(requested={"tokens": tokens})
+                if acq.successful:
+                    with acq:
+                        acq.update(usage={"tokens": tokens})
+                        return True
+                return False
+
+        # Create shared LimitSet with small capacity to test enforcement
+        limitset = LimitSet(
+            limits=[RateLimit(key="tokens", window_seconds=10, capacity=100)],
+            shared=True,
+            mode=worker_mode,
+        )
+
+        # Create pool with 3 workers sharing the same LimitSet
+        pool = APIWorker.options(mode=worker_mode, max_workers=3, limits=limitset).init()
+
+        # Each worker tries to acquire 50 tokens (total 150 tokens needed, but only 100 available)
+        futures = [pool.call_api(50) for _ in range(3)]
+        results = [f.result() for f in futures]
+
+        # Only 2 out of 3 calls should succeed (2 * 50 = 100 tokens)
+        successful = sum(1 for r in results if r)
+        assert successful == 2, f"Expected 2 successful calls, got {successful}"
+
+        pool.stop()
+
+    def test_limitpool_round_robin_across_worker_pool(self, worker_mode):
+        """Test that LimitPool distributes acquisitions using round-robin across worker pool."""
+        # Skip modes that don't support pools
+        if worker_mode in ("sync", "asyncio"):
+            pytest.skip(f"{worker_mode} mode does not support max_workers > 1")
+
+        class APIWorker(Worker):
+            def __init__(self):
+                pass
+
+            def call_api(self):
+                with self.limits.acquire(requested={"tokens": 10}) as acq:
+                    # Return the region that was selected
+                    acq.update(usage={"tokens": 10})
+                    return acq.config["region"]
+
+        # Create 3 LimitSets with different regions
+        limitsets = [
+            LimitSet(
+                limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+                shared=True,
+                mode=worker_mode,
+                config={"region": f"region-{i}"},
+            )
+            for i in range(3)
+        ]
+
+        # Create pool with 3 workers and 3 LimitSets
+        # Each worker should start at different offset (0, 1, 2)
+        pool = APIWorker.options(mode=worker_mode, max_workers=3, limits=limitsets).init()
+
+        # Make many calls
+        futures = [pool.call_api() for _ in range(30)]
+        results = [f.result() for f in futures]
+
+        # Count calls per region
+        region_counts = {}
+        for region in results:
+            region_counts[region] = region_counts.get(region, 0) + 1
+
+        # All regions should be used roughly equally (within 30-40% range)
+        for region, count in region_counts.items():
+            assert count >= 7 and count <= 13, f"Region {region} was used {count} times (expected 7-13)"
+
+        pool.stop()
+
+    @pytest.mark.parametrize("mode", ["process", "ray"])
+    def test_limitpool_serialization_across_processes(self, mode):
+        """Test that LimitPool can be serialized for process/Ray workers."""
+
+        class APIWorker(Worker):
+            def __init__(self):
+                pass
+
+            def call_api(self):
+                # Access limits in remote worker
+                with self.limits.acquire(requested={"tokens": 10}) as acq:
+                    region = acq.config["region"]
+                    acq.update(usage={"tokens": 10})
+                    return region
+
+        # Create LimitSets
+        limitsets = [
+            LimitSet(
+                limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+                shared=True,
+                mode=mode,
+                config={"region": f"region-{i}"},
+            )
+            for i in range(2)
+        ]
+
+        # Create worker with LimitSets (should create LimitPool)
+        worker = APIWorker.options(mode=mode, limits=limitsets).init()
+
+        # Make call - this will serialize LimitPool to remote worker
+        result = worker.call_api().result()
+        assert result in ["region-0", "region-1"]
+
+        worker.stop()
+
+    def test_limitpool_high_concurrency_stress(self, worker_mode):
+        """Stress test LimitPool with high concurrency to verify thread-safety."""
+        # Skip modes that don't support pools
+        if worker_mode in ("sync", "asyncio"):
+            pytest.skip(f"{worker_mode} mode does not support max_workers > 1")
+
+        class APIWorker(Worker):
+            def __init__(self):
+                pass
+
+            def call_api(self, id: int):
+                with self.limits.acquire(requested={"tokens": 1}) as acq:
+                    region = acq.config["region"]
+                    acq.update(usage={"tokens": 1})
+                    return (id, region)
+
+        # Create multiple LimitSets
+        limitsets = [
+            LimitSet(
+                limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+                shared=True,
+                mode=worker_mode,
+                config={"region": f"region-{i}"},
+            )
+            for i in range(5)
+        ]
+
+        # Create pool with many workers
+        num_workers = 10
+        pool = APIWorker.options(mode=worker_mode, max_workers=num_workers, limits=limitsets).init()
+
+        # Make many concurrent calls
+        num_calls = 100
+        futures = [pool.call_api(i) for i in range(num_calls)]
+        results = [f.result() for f in futures]
+
+        # Verify all calls succeeded
+        assert len(results) == num_calls
+
+        # Verify all regions were used
+        regions_used = set(region for _, region in results)
+        assert len(regions_used) == 5, f"Expected 5 regions, got {len(regions_used)}"
+
+        pool.stop()
+
+    def test_limitpool_enforces_limits_with_shared_limitsets(self, worker_mode):
+        """Test that LimitPool with shared LimitSets properly enforces limits across workers."""
+        # Skip modes that don't support pools
+        if worker_mode in ("sync", "asyncio"):
+            pytest.skip(f"{worker_mode} mode does not support max_workers > 1")
+
+        class APIWorker(Worker):
+            def __init__(self):
+                pass
+
+            def consume_tokens(self, tokens: int):
+                acq = self.limits.try_acquire(requested={"tokens": tokens})
+                if acq.successful:
+                    with acq:
+                        acq.update(usage={"tokens": tokens})
+                        return True
+                return False
+
+        # Create 2 shared LimitSets with LIMITED capacity
+        limitsets = [
+            LimitSet(
+                limits=[RateLimit(key="tokens", window_seconds=5, capacity=100)],
+                shared=True,
+                mode=worker_mode,
+                config={"limitset_index": i},
+            )
+            for i in range(2)
+        ]
+
+        # Create pool with 5 workers and 2 LimitSets
+        pool = APIWorker.options(mode=worker_mode, max_workers=5, limits=limitsets).init()
+
+        # Try to consume more tokens than available across all LimitSets
+        # Each LimitSet has 100 tokens, total 200 tokens
+        # Request 10 workers x 30 tokens = 300 tokens
+        futures = [pool.consume_tokens(30) for _ in range(10)]
+        results = [f.result() for f in futures]
+
+        # At most 6 calls should succeed (6 * 30 = 180, 7 * 30 = 210 > 200)
+        successful = sum(1 for r in results if r)
+        assert successful <= 7, f"Expected at most 7 successful calls, got {successful}"
+        assert successful >= 5, f"Expected at least 5 successful calls, got {successful}"
+
+        pool.stop()
+
+    @pytest.mark.parametrize("mode", ["process", "ray"])
+    def test_limitpool_config_accessible_in_remote_workers(self, mode):
+        """Test that config from LimitPool's LimitSets is accessible in remote workers."""
+
+        class APIWorker(Worker):
+            def __init__(self):
+                pass
+
+            def get_region_and_account(self):
+                with self.limits.acquire(requested={"tokens": 10}) as acq:
+                    region = acq.config.get("region", "")
+                    account = acq.config.get("account", "")
+                    acq.update(usage={"tokens": 10})
+                    return (region, account)
+
+        # Create LimitSets with detailed config
+        limitsets = [
+            LimitSet(
+                limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+                shared=True,
+                mode=mode,
+                config={"region": f"us-east-{i + 1}", "account": f"account-{i + 1}"},
+            )
+            for i in range(2)
+        ]
+
+        # Create worker with LimitSets
+        worker = APIWorker.options(mode=mode, limits=limitsets).init()
+
+        # Make multiple calls - should see different configs due to round-robin
+        results = [worker.get_region_and_account().result() for _ in range(4)]
+
+        # Extract regions and accounts
+        regions = [region for region, _ in results]
+        accounts = [account for _, account in results]
+
+        # Should see both regions and accounts
+        assert "us-east-1" in regions
+        assert "us-east-2" in regions
+        assert "account-1" in accounts
+        assert "account-2" in accounts
+
+        worker.stop()

@@ -25,3 +25,8 @@
       show_root_heading: true
       show_source: true
 
+::: concurry.core.limit.limit_pool.LimitPool
+    options:
+      show_root_heading: true
+      show_source: true
+

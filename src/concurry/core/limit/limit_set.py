@@ -45,15 +45,18 @@ class BaseLimitSet(ABC):
     Subclasses implement specific synchronization mechanisms.
     """
 
-    def __init__(self, limits: List[Limit], shared: bool):
+    def __init__(self, limits: List[Limit], shared: bool, config: Optional[dict] = None):
         """Initialize the base limit set.
 
         Args:
             limits: List of Limit instances
+            shared: Whether this is a shared limit set
+            config: Static configuration dict (metadata)
         """
         self.limits = limits
         self._limits_by_key: Dict[str, Limit] = {}
         self.shared = shared
+        self.config = config if config is not None else {}
         # Build internal index of limits by key
         for limit in self.limits:
             if limit.key in self._limits_by_key:
@@ -273,13 +276,15 @@ class InMemorySharedLimitSet(BaseLimitSet):
     Suitable for sync, asyncio, and thread workers within the same process.
     """
 
-    def __init__(self, limits: List[Limit], shared: bool):
+    def __init__(self, limits: List[Limit], shared: bool, config: Optional[dict] = None):
         """Initialize in-memory shared limit set.
 
         Args:
             limits: List of Limit instances
+            shared: Whether this is a shared limit set
+            config: Static configuration dict (metadata)
         """
-        super().__init__(limits, shared=shared)
+        super().__init__(limits, shared=shared, config=config)
         self._lock = threading.Lock()
         self._resource_semaphores: Dict[str, threading.Semaphore] = {}
 
@@ -299,7 +304,9 @@ class InMemorySharedLimitSet(BaseLimitSet):
             with self._lock:
                 if self._can_acquire_all(requested_amounts):
                     acquisitions = self._acquire_all(requested_amounts)
-                    return LimitSetAcquisition(limit_set=self, acquisitions=acquisitions, successful=True)
+                    return LimitSetAcquisition(
+                        limit_set=self, acquisitions=acquisitions, successful=True, config=self.config
+                    )
 
             # Check timeout
             if timeout is not None:
@@ -316,7 +323,9 @@ class InMemorySharedLimitSet(BaseLimitSet):
         with self._lock:
             if self._can_acquire_all(requested_amounts):
                 acquisitions = self._acquire_all(requested_amounts)
-                return LimitSetAcquisition(limit_set=self, acquisitions=acquisitions, successful=True)
+                return LimitSetAcquisition(
+                    limit_set=self, acquisitions=acquisitions, successful=True, config=self.config
+                )
             else:
                 # Create failed acquisitions
                 acquisitions = {}
@@ -324,7 +333,9 @@ class InMemorySharedLimitSet(BaseLimitSet):
                     limit = self._limits_by_key[key]
                     acquisitions[key] = Acquisition(limit=limit, requested=amount, successful=False)
 
-                return LimitSetAcquisition(limit_set=self, acquisitions=acquisitions, successful=False)
+                return LimitSetAcquisition(
+                    limit_set=self, acquisitions=acquisitions, successful=False, config=self.config
+                )
 
     def _acquire_resource(self, limit: ResourceLimit, amount: int) -> None:
         """Acquire resource from semaphore."""
@@ -374,14 +385,16 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
         - Call limits: Store call counts and timestamps in Manager dicts
     """
 
-    def __init__(self, limits: List[Limit], shared: bool = True):
+    def __init__(self, limits: List[Limit], shared: bool = True, config: Optional[dict] = None):
         """Initialize multiprocess shared limit set.
 
         Args:
             limits: List of Limit instances
+            shared: Whether this is a shared limit set (must be True)
+            config: Static configuration dict (metadata)
         """
         assert shared is True
-        super().__init__(limits, shared=True)
+        super().__init__(limits, shared=True, config=config)
         import multiprocessing
 
         self._manager = multiprocessing.Manager()
@@ -501,7 +514,9 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
             with self._lock:
                 if self._can_acquire_all(requested_amounts):
                     acquisitions = self._acquire_all(requested_amounts)
-                    return LimitSetAcquisition(limit_set=self, acquisitions=acquisitions, successful=True)
+                    return LimitSetAcquisition(
+                        limit_set=self, acquisitions=acquisitions, successful=True, config=self.config
+                    )
 
             # Check timeout
             if timeout is not None:
@@ -518,14 +533,18 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
         with self._lock:
             if self._can_acquire_all(requested_amounts):
                 acquisitions = self._acquire_all(requested_amounts)
-                return LimitSetAcquisition(limit_set=self, acquisitions=acquisitions, successful=True)
+                return LimitSetAcquisition(
+                    limit_set=self, acquisitions=acquisitions, successful=True, config=self.config
+                )
             else:
                 acquisitions = {}
                 for key, amount in requested_amounts.items():
                     limit = self._limits_by_key[key]
                     acquisitions[key] = Acquisition(limit=limit, requested=amount, successful=False)
 
-                return LimitSetAcquisition(limit_set=self, acquisitions=acquisitions, successful=False)
+                return LimitSetAcquisition(
+                    limit_set=self, acquisitions=acquisitions, successful=False, config=self.config
+                )
 
     def _acquire_resource(self, limit: ResourceLimit, amount: int) -> None:
         """Acquire resource from multiprocess semaphore."""
@@ -840,14 +859,16 @@ class RaySharedLimitSet(BaseLimitSet):
     Suitable for Ray workers.
     """
 
-    def __init__(self, limits: List[Limit], shared: bool = True):
+    def __init__(self, limits: List[Limit], shared: bool = True, config: Optional[dict] = None):
         """Initialize Ray shared limit set.
 
         Args:
             limits: List of Limit instances
+            shared: Whether this is a shared limit set (must be True)
+            config: Static configuration dict (metadata)
         """
         assert shared is True
-        super().__init__(limits, shared=True)
+        super().__init__(limits, shared=True, config=config)
         try:
             import ray
         except ImportError:
@@ -900,7 +921,9 @@ class RaySharedLimitSet(BaseLimitSet):
                     limit = self._limits_by_key[key]
                     acquisitions[key] = Acquisition(limit=limit, requested=amount, successful=True)
 
-                return LimitSetAcquisition(limit_set=self, acquisitions=acquisitions, successful=True)
+                return LimitSetAcquisition(
+                    limit_set=self, acquisitions=acquisitions, successful=True, config=self.config
+                )
 
             # Check timeout
             if timeout is not None:
@@ -926,14 +949,18 @@ class RaySharedLimitSet(BaseLimitSet):
                 limit = self._limits_by_key[key]
                 acquisitions[key] = Acquisition(limit=limit, requested=amount, successful=True)
 
-            return LimitSetAcquisition(limit_set=self, acquisitions=acquisitions, successful=True)
+            return LimitSetAcquisition(
+                limit_set=self, acquisitions=acquisitions, successful=True, config=self.config
+            )
         else:
             acquisitions = {}
             for key, amount in requested_amounts.items():
                 limit = self._limits_by_key[key]
                 acquisitions[key] = Acquisition(limit=limit, requested=amount, successful=False)
 
-            return LimitSetAcquisition(limit_set=self, acquisitions=acquisitions, successful=False)
+            return LimitSetAcquisition(
+                limit_set=self, acquisitions=acquisitions, successful=False, config=self.config
+            )
 
     def _acquire_resource(self, limit: ResourceLimit, amount: int) -> None:
         """Resource acquisition handled by Ray actor."""
@@ -962,6 +989,7 @@ def LimitSet(
     limits: List[Limit],
     shared: bool = False,
     mode: Union[str, ExecutionMode] = "sync",
+    config: Optional[dict] = None,
 ) -> Union[InMemorySharedLimitSet, MultiprocessSharedLimitSet, RaySharedLimitSet]:
     """Factory function to create appropriate LimitSet implementation.
 
@@ -971,6 +999,8 @@ def LimitSet(
         shared: If True, create a shared LimitSet for cross-worker use.
                 If False, create a private LimitSet with warning.
         mode: Execution mode (ExecutionMode enum or string like "sync", "thread", "asyncio", "process", "ray")
+        config: Static configuration dict (metadata) accessible via acquisition.config.
+                Empty dict by default. Useful for multi-account/multi-region scenarios.
 
     Returns:
         Appropriate LimitSet implementation based on shared and mode
@@ -1038,15 +1068,15 @@ def LimitSet(
 
     # Select appropriate implementation
     if mode in (ExecutionMode.Sync, ExecutionMode.Asyncio, ExecutionMode.Threads):
-        return InMemorySharedLimitSet(limits=limits, shared=shared)
+        return InMemorySharedLimitSet(limits=limits, shared=shared, config=config)
     elif mode == ExecutionMode.Processes:
         if shared is False:
             raise ValueError("Non-shared LimitSets cannot use mode='process'")
-        return MultiprocessSharedLimitSet(limits=limits, shared=True)
+        return MultiprocessSharedLimitSet(limits=limits, shared=True, config=config)
     elif mode == ExecutionMode.Ray:
         if shared is False:
             raise ValueError("Non-shared LimitSets cannot use mode='ray'")
-        return RaySharedLimitSet(limits=limits, shared=True)
+        return RaySharedLimitSet(limits=limits, shared=True, config=config)
     else:
         raise ValueError(
             f"Unknown execution mode: '{mode}'. Valid modes: sync, asyncio, thread, process, ray"

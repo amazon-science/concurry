@@ -12,8 +12,7 @@ from concurry.core.worker.load_balancing import (
     RoundRobinBalancer,
 )
 
-# Import POOL_MODES from conftest for pool-related tests
-from tests.conftest import POOL_MODES
+# Pool mode fixture is provided by conftest.py
 
 
 class TestRoundRobinBalancer:
@@ -305,9 +304,8 @@ class TestThreadSafety:
 class TestLoadBalancingIntegration:
     """Integration tests for load balancing with worker pools across execution modes."""
 
-    @pytest.mark.parametrize("mode", POOL_MODES)
     @pytest.mark.parametrize("algorithm", ["round_robin", "active", "total", "random"])
-    def test_load_balancing_with_worker_pools(self, mode, algorithm):
+    def test_load_balancing_with_worker_pools(self, pool_mode, algorithm):
         """Test that all load balancing algorithms work with worker pools across modes."""
         from concurry import Worker
 
@@ -322,8 +320,8 @@ class TestLoadBalancingIntegration:
 
         # Create pool with specified load balancing algorithm
         # For Ray, use fractional CPUs to avoid resource exhaustion
-        options = {"mode": mode, "max_workers": 3, "load_balancing": algorithm}
-        if mode == "ray":
+        options = {"mode": pool_mode, "max_workers": 3, "load_balancing": algorithm}
+        if pool_mode == "ray":
             options["actor_options"] = {"num_cpus": 0.1}
 
         pool = SimpleWorker.options(**options).init()

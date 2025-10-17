@@ -20,7 +20,7 @@ def _transform_worker_limits(
     limits: Any,
     mode: ExecutionMode,
     is_pool: bool,
-) -> Optional[Any]:
+) -> Any:
     """Process limits parameter and return appropriate LimitSet or list of Limits.
 
     This function handles the common logic for processing limits for both
@@ -29,6 +29,7 @@ def _transform_worker_limits(
     - Keeping list of Limits as-is (for Ray/Process single workers - to be created remotely)
     - Validating shared LimitSets
     - Checking mode compatibility
+    - Creating empty LimitSet when no limits provided (allows workers to always use self.limits)
 
     Args:
         limits: The limits parameter (None, List[Limit], or LimitSet)
@@ -36,17 +37,14 @@ def _transform_worker_limits(
         is_pool: True if processing for WorkerProxyPool, False for WorkerProxy
 
     Returns:
-        - For pools: Processed LimitSet instance
-        - For Ray/Process single workers: List of Limit objects (to be created remotely)
-        - For in-memory single workers: LimitSet instance
-        - None if no limits
+        - For pools: Processed LimitSet instance (may be empty)
+        - For Ray/Process single workers: List of Limit objects (may be empty list)
+        - For in-memory single workers: LimitSet instance (may be empty)
+        - Empty LimitSet/list if no limits provided (never returns None)
 
     Raises:
         ValueError: If limits configuration is invalid
     """
-    if limits is None:
-        return None
-
     # Import here to avoid circular imports
     from ..limit import Limit
     from ..limit.limit_set import (
@@ -56,6 +54,20 @@ def _transform_worker_limits(
         MultiprocessSharedLimitSet,
         RaySharedLimitSet,
     )
+
+    if limits is None:
+        # Create empty LimitSet so workers can always use self.limits.acquire()
+        # Empty LimitSet always allows acquisition without blocking
+        if is_pool:
+            # For pools, create empty shared LimitSet
+            return LimitSet(limits=[], shared=True, mode=mode)
+        else:
+            # For single workers with Ray/Process, keep as empty list (created remotely)
+            if mode in (ExecutionMode.Ray, ExecutionMode.Processes):
+                return []
+            else:
+                # For in-memory workers, create empty non-shared LimitSet
+                return LimitSet(limits=[], shared=False, mode=ExecutionMode.Sync)
 
     # Case 1: List of Limits
     if isinstance(limits, list):
@@ -207,20 +219,20 @@ def _create_worker_wrapper(
     # Import here to avoid circular imports
 
     # Determine if we need to apply any wrapping
+    # Note: limits is now always provided (may be empty list or empty LimitSet)
     has_limits = limits is not None
     has_retry = retry_config is not None and retry_config.num_retries > 0
 
-    # If no limits and no retry, return original class
-    if not has_limits and not has_retry:
-        return worker_cls
+    # If no retry, we still need to wrap to set limits attribute
+    # (limits is always provided now, even if empty)
+    if not has_retry:
+        # Only need to set limits, no retry logic
+        class WorkerWithLimits(worker_cls):
+            def __init__(self, *args, **kwargs):
+                # Call parent __init__ first to properly initialize Pydantic models
+                super().__init__(*args, **kwargs)
 
-    class WorkerWithLimitsAndRetry(worker_cls):
-        def __init__(self, *args, **kwargs):
-            # Call parent __init__ first to properly initialize Pydantic models
-            super().__init__(*args, **kwargs)
-
-            # Set limits if provided
-            if has_limits:
+                # Always set limits (may be empty)
                 # If limits is a list, create LimitSet here (inside the actor/process)
                 if isinstance(limits, list):
                     # Create private LimitSet with mode=sync (uses threading.Lock, works everywhere)
@@ -232,6 +244,28 @@ def _create_worker_wrapper(
                 # Use object.__setattr__ to bypass frozen models (Typed/BaseModel)
                 # This allows limits to work with frozen Pydantic models
                 object.__setattr__(self, "limits", limit_set)
+
+        WorkerWithLimits.__name__ = f"{worker_cls.__name__}_WithLimits"
+        WorkerWithLimits.__qualname__ = f"{worker_cls.__qualname__}_WithLimits"
+        return WorkerWithLimits
+
+    class WorkerWithLimitsAndRetry(worker_cls):
+        def __init__(self, *args, **kwargs):
+            # Call parent __init__ first to properly initialize Pydantic models
+            super().__init__(*args, **kwargs)
+
+            # Always set limits (may be empty)
+            # If limits is a list, create LimitSet here (inside the actor/process)
+            if isinstance(limits, list):
+                # Create private LimitSet with mode=sync (uses threading.Lock, works everywhere)
+                limit_set = LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync)
+            else:
+                # Already a LimitSet, use it directly
+                limit_set = limits
+
+            # Use object.__setattr__ to bypass frozen models (Typed/BaseModel)
+            # This allows limits to work with frozen Pydantic models
+            object.__setattr__(self, "limits", limit_set)
 
         def __getattribute__(self, name: str):
             """Intercept method calls and wrap with retry logic if configured."""
@@ -267,16 +301,9 @@ def _create_worker_wrapper(
 
             return attr
 
-    # Preserve original class name for debugging
-    if has_limits and has_retry:
-        WorkerWithLimitsAndRetry.__name__ = f"{worker_cls.__name__}_WithLimitsAndRetry"
-        WorkerWithLimitsAndRetry.__qualname__ = f"{worker_cls.__qualname__}_WithLimitsAndRetry"
-    elif has_limits:
-        WorkerWithLimitsAndRetry.__name__ = f"{worker_cls.__name__}_WithLimits"
-        WorkerWithLimitsAndRetry.__qualname__ = f"{worker_cls.__qualname__}_WithLimits"
-    else:  # has_retry
-        WorkerWithLimitsAndRetry.__name__ = f"{worker_cls.__name__}_WithRetry"
-        WorkerWithLimitsAndRetry.__qualname__ = f"{worker_cls.__qualname__}_WithRetry"
+    # Preserve original class name for debugging (always has limits and retry here)
+    WorkerWithLimitsAndRetry.__name__ = f"{worker_cls.__name__}_WithLimitsAndRetry"
+    WorkerWithLimitsAndRetry.__qualname__ = f"{worker_cls.__qualname__}_WithLimitsAndRetry"
 
     # For Ray actors, __getattribute__ doesn't work the same way
     # Instead, wrap each public method individually at the class level
@@ -742,14 +769,13 @@ class WorkerBuilder:
                 {},
             )
 
-        # Process limits if present
+        # Process limits (always, even if None - creates empty LimitSet)
         processed_options = dict(self._options)
-        if "limits" in processed_options and processed_options["limits"] is not None:
-            processed_options["limits"] = _transform_worker_limits(
-                limits=processed_options["limits"],
-                mode=execution_mode,
-                is_pool=False,
-            )
+        processed_options["limits"] = _transform_worker_limits(
+            limits=processed_options.get("limits"),
+            mode=execution_mode,
+            is_pool=False,
+        )
 
         # Create retry config if needed
         retry_config = self._create_retry_config()
@@ -803,14 +829,12 @@ class WorkerBuilder:
             load_balancing_str = self._get_default_load_balancing()
         load_balancing = LoadBalancingAlgorithm(load_balancing_str)
 
-        # Process limits for pool using common function
-        limits = self._options.get("limits")
-        if limits is not None:
-            limits = _transform_worker_limits(
-                limits=limits,
-                mode=execution_mode,
-                is_pool=True,
-            )
+        # Process limits for pool (always, even if None - creates empty LimitSet)
+        limits = _transform_worker_limits(
+            limits=self._options.get("limits"),
+            mode=execution_mode,
+            is_pool=True,
+        )
 
         # Update options with processed limits
         pool_options = dict(self._options)
@@ -1176,6 +1200,11 @@ class Worker:
         Workers support resource protection and rate limiting via the `limits` parameter.
         Limits enable control over API rates, resource pools, and call frequency.
 
+        **Important: Workers always have `self.limits` available, even when no limits
+        are configured.** If no limits parameter is provided, workers get an empty
+        LimitSet that always allows acquisition without blocking. This means your
+        code can safely call `self.limits.acquire()` without checking if limits exist.
+
         ```python
         from concurry import Worker, LimitSet, RateLimit, CallLimit, ResourceLimit
         from concurry import RateLimitAlgorithm
@@ -1216,6 +1245,10 @@ class Worker:
         ]
         worker = APIWorker.options(mode="thread", limits=limit_defs).init("key")
         # This worker has its own private 1000 token/min pool
+
+        # Option 3: No limits (always succeeds)
+        worker = APIWorker.options(mode="thread").init("key")
+        # self.limits.acquire() always succeeds immediately, no blocking
         ```
 
         **Limit Types:**
@@ -1226,9 +1259,11 @@ class Worker:
         **Key Behaviors:**
         - Passing `LimitSet`: Workers share the same limit pool
         - Passing `List[Limit]`: Each worker gets private limits
+        - No limits parameter: Workers get empty LimitSet (always succeeds)
         - CallLimit/ResourceLimit auto-acquired with default of 1
         - RateLimits must be explicitly specified in `requested` dict
         - RateLimits require `update()` call (raises RuntimeError if missing)
+        - Empty LimitSet has zero overhead (no synchronization, no waiting)
 
         See user guide for more: `/docs/user-guide/limits.md`
     """
@@ -1290,9 +1325,11 @@ class Worker:
             unwrap_futures: If True (default), automatically unwrap BaseFuture arguments
                 by calling .result() on them before passing to worker methods. This enables
                 seamless composition of workers. Set to False to pass futures as-is.
-            limits: Resource protection and rate limiting (optional)
+            limits: Resource protection and rate limiting (optional, defaults to empty LimitSet)
                 - Pass LimitSet: Workers share the same limit pool
                 - Pass List[Limit]: Each worker gets private limits (creates shared LimitSet for pools)
+                - Omit parameter: Workers get empty LimitSet (self.limits.acquire() always succeeds)
+                Workers always have self.limits available, even when no limits configured.
                 See Worker docstring "Resource Protection with Limits" section for details.
             num_retries: Maximum number of retry attempts after initial failure (default: 0)
                 Total attempts = num_retries + 1 (initial attempt).

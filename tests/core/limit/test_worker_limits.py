@@ -340,3 +340,77 @@ class TestWorkerSharedLimits:
         # Should raise error when trying to use with process worker
         with pytest.raises(ValueError, match="not compatible"):
             TestWorker.options(mode="process", limits=thread_limits).init()
+
+
+class TestWorkerWithoutLimits:
+    """Test that workers work correctly without limits configured."""
+
+    def test_worker_without_limits_has_limits_attribute(self, worker_mode):
+        """Test that workers without limits still have self.limits attribute."""
+
+        class TestWorker(Worker):
+            def __init__(self):
+                pass
+
+            def check_limits(self) -> bool:
+                """Check if self.limits is available."""
+                return self.limits is not None
+
+        worker = TestWorker.options(mode=worker_mode).init()
+        result = worker.check_limits().result()
+        assert result is True
+        worker.stop()
+
+    def test_worker_without_limits_can_acquire(self, worker_mode):
+        """Test that workers without limits can call self.limits.acquire()."""
+
+        class TestWorker(Worker):
+            def __init__(self):
+                self.count = 0
+
+            def process(self, value: int) -> int:
+                """Process with limit acquisition (should always succeed)."""
+                with self.limits.acquire():
+                    self.count += 1
+                    return value * 2
+
+        worker = TestWorker.options(mode=worker_mode, blocking=True).init()
+        result = worker.process(10)
+        assert result == 20
+        worker.stop()
+
+    def test_worker_without_limits_never_blocks(self, worker_mode):
+        """Test that empty limits never block."""
+
+        class TestWorker(Worker):
+            def __init__(self):
+                pass
+
+            def process(self) -> str:
+                """Multiple acquisitions should never block."""
+                results = []
+                for i in range(100):
+                    with self.limits.acquire():
+                        results.append(i)
+                return "done"
+
+        worker = TestWorker.options(mode=worker_mode, blocking=True).init()
+        result = worker.process()
+        assert result == "done"
+        worker.stop()
+
+    def test_pool_without_limits(self, worker_mode):
+        """Test that worker pools work without limits."""
+        # Skip sync and asyncio since they don't support pools
+        if worker_mode in ("sync", "asyncio"):
+            pytest.skip(f"Pools not supported for {worker_mode} mode")
+
+        class TestWorker(Worker):
+            def process(self, x: int) -> int:
+                with self.limits.acquire():
+                    return x * 2
+
+        pool = TestWorker.options(mode=worker_mode, max_workers=3, blocking=True).init()
+        result = pool.process(5)
+        assert result == 10
+        pool.stop()

@@ -55,6 +55,8 @@ with limits.acquire(requested={"tokens": 50, "connections": 2}) as acq:
 |---------|----------|
 | **Limit objects** | Data containers only, NOT thread-safe |
 | **LimitSet** | Factory function, creates thread-safe executor |
+| **Empty LimitSet** | Workers always have `self.limits`, even without configuration |
+| **No limits** | Empty LimitSet always allows acquisition, zero overhead |
 | **CallLimit** | Always acquired with default of 1, no update needed |
 | **ResourceLimit** | Always acquired with default if not specified, no update needed |
 | **RateLimit** | Must be in `requested` dict, requires `update()` call |
@@ -100,6 +102,54 @@ with limits.acquire(requested={"api_tokens": 100}) as acq:
 - Always call `acq.update()` for RateLimits to report actual usage
 - Unused tokens may be refunded (algorithm-specific)
 - Usage must not exceed requested amount
+
+### Empty LimitSet (No Limits)
+
+Workers **always** have `self.limits` available, even when no limits are configured. If you create a worker without passing limits, it automatically gets an empty LimitSet that always allows acquisition without blocking.
+
+```python
+from concurry import Worker
+
+class APIWorker(Worker):
+    def __init__(self):
+        pass
+    
+    def process(self, data):
+        # self.limits is always available
+        with self.limits.acquire():
+            # Always succeeds immediately, no blocking
+            return do_work(data)
+
+# Worker without limits - self.limits.acquire() always succeeds
+worker = APIWorker.options(mode="thread").init()
+result = worker.process(data).result()
+worker.stop()
+```
+
+**Key benefits:**
+- Write code once, conditionally enforce limits
+- No need to check `if self.limits is not None`
+- Zero overhead when no limits configured
+- Enables gradual adoption of limits
+
+**Creating empty LimitSet directly:**
+
+```python
+from concurry import LimitSet
+
+# Create empty LimitSet - always allows acquisition
+empty_limits = LimitSet(limits=[], shared=False, mode="sync")
+
+with empty_limits.acquire():
+    # Always succeeds immediately
+    do_work()
+```
+
+**Use cases:**
+- Development/testing without limit enforcement
+- Conditional limit enforcement based on environment
+- Gradual rollout of rate limiting
+- Code that optionally uses limits
 
 ### RateLimit
 
@@ -484,6 +534,69 @@ worker = LLMWorker.options(
 **Behavior:**
 - Passing a `LimitSet`: Workers share the same limits
 - Passing a `List[Limit]`: Each worker gets its own private `LimitSet`
+- Omitting `limits` parameter: Workers get empty LimitSet (always succeeds)
+
+### Option 3: No Limits (Default)
+
+Workers **always** have `self.limits` available. If you don't pass the `limits` parameter, workers automatically get an empty LimitSet that always allows acquisition.
+
+```python
+from concurry import Worker
+
+class SimpleWorker(Worker):
+    def process(self, data):
+        # self.limits is always available, even without configuration
+        with self.limits.acquire():
+            # Always succeeds immediately, no blocking
+            return do_work(data)
+
+# Worker without limits - self.limits.acquire() always succeeds
+worker = SimpleWorker.options(mode="thread").init()
+result = worker.process(data).result()
+worker.stop()
+```
+
+**Key benefits:**
+- Write limit-aware code once
+- Conditionally enable limits based on environment
+- No runtime checks needed (`if self.limits is not None`)
+- Zero overhead when limits not configured
+- Enables gradual adoption and testing
+
+**Example: Conditional limits based on environment**
+
+```python
+import os
+from concurry import Worker, LimitSet, RateLimit, RateLimitAlgorithm
+
+# Define limits only in production
+limits = None
+if os.getenv("ENV") == "production":
+    limits = LimitSet(
+        limits=[
+            RateLimit(
+                key="api_tokens",
+                window_seconds=60,
+                algorithm=RateLimitAlgorithm.TokenBucket,
+                capacity=1000
+            )
+        ],
+        shared=True,
+        mode="thread"
+    )
+
+class APIWorker(Worker):
+    def call_api(self, prompt: str):
+        # Code works the same regardless of whether limits are configured
+        with self.limits.acquire(requested={"api_tokens": 100}) as acq:
+            result = external_api(prompt)
+            acq.update(usage={"api_tokens": result.tokens})
+            return result.text
+
+# Production: limits enforced
+# Development: limits always succeed, no blocking
+worker = APIWorker.options(mode="thread", limits=limits).init()
+```
 
 ### Execution Modes
 

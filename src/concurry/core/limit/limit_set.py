@@ -966,7 +966,8 @@ def LimitSet(
     """Factory function to create appropriate LimitSet implementation.
 
     Args:
-        limits: List of Limit instances
+        limits: List of Limit instances. Can be empty list to create a no-op LimitSet
+                that always allows acquisition without blocking.
         shared: If True, create a shared LimitSet for cross-worker use.
                 If False, create a private LimitSet with warning.
         mode: Execution mode (ExecutionMode enum or string like "sync", "thread", "asyncio", "process", "ray")
@@ -985,6 +986,20 @@ def LimitSet(
                 shared=False,
                 mode="sync"
             )
+            ```
+
+        Empty LimitSet (always allows acquisition):
+            ```python
+            # Create empty LimitSet - never blocks, always succeeds
+            limits = LimitSet(limits=[], shared=False, mode="sync")
+
+            with limits.acquire():
+                # Always succeeds immediately, no limits enforced
+                do_work()
+
+            # Workers automatically get empty LimitSet when no limits provided
+            worker = MyWorker.options(mode="thread").init()
+            # worker.limits is available and always allows acquisition
             ```
 
         Shared LimitSet for thread workers:
@@ -1010,6 +1025,12 @@ def LimitSet(
             worker2 = MyWorker.options(mode="process", limits=limits).init()
             # worker1 and worker2 share the same limits across processes
             ```
+
+    Notes:
+        - Empty LimitSet (limits=[]) is useful for conditional limit enforcement
+        - Workers automatically get empty LimitSet when no limits parameter provided
+        - Empty LimitSet has zero overhead - acquire() returns immediately
+        - Code can safely call self.limits.acquire() without checking if limits exist
     """
     # Convert string to ExecutionMode if needed
     if isinstance(mode, str):

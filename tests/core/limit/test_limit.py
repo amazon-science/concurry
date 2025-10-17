@@ -233,3 +233,60 @@ class TestLimitThreadSafety:
 
         # Thread-safety is provided by LimitSet, not by Limit
         # For actual acquisition, use LimitSet
+
+
+class TestEmptyLimitSet:
+    """Test empty LimitSet behavior (no limits configured)."""
+
+    def test_empty_limitset_creation(self):
+        """Test creating an empty LimitSet."""
+        limit_set = LimitSet(limits=[], shared=False, mode="sync")
+        assert len(limit_set.limits) == 0
+
+    def test_empty_limitset_acquire_always_succeeds(self):
+        """Test that empty LimitSet always allows acquisition."""
+        limit_set = LimitSet(limits=[], shared=False, mode="sync")
+
+        # Acquire without arguments
+        with limit_set.acquire() as acq:
+            assert acq.successful is True
+            assert len(acq.acquisitions) == 0
+
+    def test_empty_limitset_try_acquire_always_succeeds(self):
+        """Test that empty LimitSet try_acquire always succeeds."""
+        limit_set = LimitSet(limits=[], shared=False, mode="sync")
+
+        acq = limit_set.try_acquire()
+        assert acq.successful is True
+        assert len(acq.acquisitions) == 0
+
+    def test_empty_limitset_acquire_with_empty_requested(self):
+        """Test empty LimitSet acquire with empty requested dict."""
+        limit_set = LimitSet(limits=[], shared=False, mode="sync")
+
+        with limit_set.acquire(requested={}) as acq:
+            assert acq.successful is True
+            assert len(acq.acquisitions) == 0
+
+    def test_empty_limitset_multiple_acquires(self):
+        """Test multiple acquisitions on empty LimitSet (never blocks)."""
+        limit_set = LimitSet(limits=[], shared=False, mode="sync")
+
+        # Multiple sequential acquisitions - all should succeed immediately
+        for i in range(10):
+            with limit_set.acquire() as acq:
+                assert acq.successful is True
+
+    def test_empty_limitset_get_stats(self):
+        """Test get_stats on empty LimitSet."""
+        limit_set = LimitSet(limits=[], shared=False, mode="sync")
+        stats = limit_set.get_stats()
+        assert stats == {}
+
+    def test_empty_limitset_shared_mode(self):
+        """Test empty LimitSet in shared mode."""
+        limit_set = LimitSet(limits=[], shared=True, mode="thread")
+        assert limit_set.shared is True
+
+        with limit_set.acquire() as acq:
+            assert acq.successful is True

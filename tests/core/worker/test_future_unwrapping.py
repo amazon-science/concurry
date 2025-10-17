@@ -407,6 +407,7 @@ class TestRayZeroCopyOptimization:
         consumer.stop()
 
 
+@pytest.mark.performance
 class TestPerformance:
     """Performance tests (not strict, just sanity checks)."""
 

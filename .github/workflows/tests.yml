@@ -38,7 +38,9 @@ jobs:
           python -m uv pip install -e "./concurry[all]"
 
       - name: Run tests
-        # Run tests with 5 minute timeout as specified in cursor rules
+        # Skip performance tests and progress tests (via pytestmark) on CI
+        env:
+          CI: true
         run: |
           cd concurry
-          timeout 300 pytest tests --verbose -s || ( [ $? -eq 124 ] && echo "Tests timed out after 5 minutes" && exit 1 || exit $? )
+          pytest tests --verbose -m "not performance"

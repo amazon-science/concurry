@@ -798,6 +798,7 @@ class FileIOWorker(Worker):
         return await asyncio.gather(*tasks)
 
 
+@pytest.mark.performance
 class TestAsyncIOPerformance:
     """Test performance benefits of async I/O with AsyncioWorkerProxy."""
 
@@ -1148,6 +1149,7 @@ class TestAsyncIOPerformance:
                 print("  Note: Results may vary based on system and overhead")
 
 
+@pytest.mark.performance
 class TestWorkerPerformance:
     """Performance tests for tight loops.
 

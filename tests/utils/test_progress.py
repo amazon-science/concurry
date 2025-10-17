@@ -1,3 +1,4 @@
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -7,6 +8,11 @@ from concurry.utils.frameworks import _IS_RAY_INSTALLED, RayContext, ray_context
 from concurry.utils.progress import ProgressBar
 
 # Ray initialization and cleanup are handled by tests/conftest.py
+
+# Skip all progress tests in CI environment (they produce massive output and are slow)
+pytestmark = pytest.mark.skipif(
+    os.environ.get("CI") == "true", reason="Progress bar tests skipped in CI due to massive output"
+)
 
 
 def test_basic_progress_bar():

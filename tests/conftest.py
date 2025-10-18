@@ -3,6 +3,11 @@
 This module provides common fixtures that are automatically available to all test files:
 - worker_mode: Parametrized fixture for testing across all worker modes
 - cleanup_all: Session-level fixture for cleaning up Ray and multiprocessing resources
+
+Pytest Configuration:
+- Default timeout: 60 seconds per test (configurable via --timeout)
+- Timeout method: 'thread' for better compatibility with Ray and multiprocessing
+- Full stack traces on timeout for debugging
 """
 
 import gc
@@ -14,6 +19,47 @@ import pytest
 
 import concurry
 from concurry.utils import _IS_RAY_INSTALLED
+
+# =============================================================================
+# Pytest Configuration Hooks
+# =============================================================================
+
+
+def pytest_configure(config):
+    """Configure pytest with default timeout and other settings.
+
+    This hook runs before test collection. It sets up:
+    - Default 60-second timeout per test (if not overridden by CLI)
+    - Thread-based timeout method (works better with Ray/multiprocessing)
+    - Full traceback display on timeout
+    
+    Note: Timeouts are non-fatal by default - tests continue after timeout.
+    Use -x flag to stop on first timeout/failure.
+    """
+    # Set default timeout if not specified via command line
+    if config.option.timeout is None:
+        config.option.timeout = 60  # 60 seconds default
+
+    # Use 'thread' timeout method for better compatibility
+    # (works with Ray actors and multiprocessing)
+    if not hasattr(config.option, "timeout_method") or config.option.timeout_method is None:
+        config.option.timeout_method = "thread"
+
+
+def pytest_addoption(parser):
+    """Add custom command-line options for concurry tests.
+
+    This allows users to override the default timeout:
+        pytest --timeout=120  # 2 minute timeout
+        pytest --timeout=0    # Disable timeout
+    
+    Use -x to stop on first failure (including timeouts):
+        pytest --timeout=60 -x  # Stop on first timeout/failure
+    """
+    # The pytest-timeout plugin already adds --timeout option,
+    # but we ensure it's available and document it
+    pass
+
 
 # Test modes available for all tests
 WORKER_MODES = ["sync", "thread", "process", "asyncio"]

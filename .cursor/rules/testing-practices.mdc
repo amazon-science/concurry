@@ -5,6 +5,62 @@ description: Comprehensive testing practices for Concurry, including pytest fixt
 
 # Concurry Testing Practices
 
+## Test Timeout Configuration
+
+**ALL tests have a 60-second timeout by default** to prevent hanging tests.
+
+- **Configured in**: `tests/conftest.py` via `pytest_configure` hook
+- **Default**: 60 seconds per test
+- **Method**: Thread-based timeout (compatible with Ray and multiprocessing)
+- **Override**: Use `pytest --timeout=120` to change timeout
+- **Disable**: Use `pytest --timeout=0` to disable timeout
+- **On Timeout**: Full stack trace is displayed for debugging
+- **Behavior**: Timeout marks test as **FAILED** but **continues to next test** (non-fatal)
+
+**Why 60 seconds?**: Most tests should complete in < 10 seconds. The 60-second timeout catches hanging tests (deadlocks, infinite loops, semaphore issues) while allowing slower integration tests to complete.
+
+**Important**: Timeouts do NOT stop the entire test suite! When a test times out:
+1. The test is marked as **FAILED** with timeout information
+2. Full stack traces are displayed showing where the hang occurred
+3. The test runner **continues to the next test**
+4. All remaining tests will still run
+
+This allows you to identify multiple hanging tests in a single test run.
+
+**Example timeout error output**:
+```
+++++++++++++++++++++++++ Timeout ++++++++++++++++++++++++++
+~~~~ Stack of MainThread (140735268369408) ~~~~
+File "/path/to/test.py", line 123, in test_something
+    result = future.result()
+File "/path/to/future.py", line 456, in result
+    self._wait()
+```
+
+## Running Tests
+
+**NEVER use `-q` (quiet mode) or `--tb=line` when debugging issues**, as these suppress important output.
+
+**Recommended pytest commands**:
+- `pytest tests/file.py -vs` - Verbose, no capture (best for debugging multiple tests)
+- `pytest tests/file.py -xvs` - Stop on first failure, verbose, no capture (best for debugging single issue)
+- `pytest tests/file.py -v` - Verbose output showing all test names
+- `pytest tests/file.py --tb=short` - Short traceback format (good for CI)
+
+**Important about `-x` flag**:
+- **WITH `-x`**: Stops on **first failure** (including timeouts) - use when debugging one specific issue
+- **WITHOUT `-x`**: Continues after failures/timeouts - use to identify **all** failing tests in one run
+
+**AVOID**:
+- `pytest -q` - Suppresses output, makes debugging impossible
+- `pytest --tb=line` - Only shows one line per failure, hides context
+- `pytest -qq` - Ultra-quiet mode, completely useless for debugging
+
+**For timeout issues**: Run without `-x` to see all timeouts in one run:
+```bash
+pytest tests/file.py -v  # Will show ALL tests that timeout
+```
+
 ## Pytest Fixtures from conftest.py
 
 The [tests/conftest.py](mdc:tests/conftest.py) file provides essential fixtures for testing across all execution modes. **Always use these fixtures** when writing tests.

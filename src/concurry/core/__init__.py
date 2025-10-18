@@ -3,6 +3,7 @@
 from .config import (
     ExecutionMode,
     LoadBalancingAlgorithm,
+    PollingAlgorithm,
     RateLimitAlgorithm,
     RetryAlgorithm,
 )
@@ -31,6 +32,13 @@ from .retry import (
     execute_with_retry,
     execute_with_retry_async,
 )
+from .synch import (
+    ALL_COMPLETED,
+    FIRST_COMPLETED,
+    FIRST_EXCEPTION,
+    gather,
+    wait,
+)
 from .worker import TaskWorker, Worker, worker
 
 __all__ = [
@@ -43,6 +51,7 @@ __all__ = [
     # Config types
     "ExecutionMode",
     "LoadBalancingAlgorithm",
+    "PollingAlgorithm",
     "RateLimitAlgorithm",
     "RetryAlgorithm",
     # Retry functions
@@ -56,6 +65,12 @@ __all__ = [
     "TaskWorker",
     "Worker",
     "worker",
+    # Synchronization
+    "wait",
+    "gather",
+    "ALL_COMPLETED",
+    "FIRST_COMPLETED",
+    "FIRST_EXCEPTION",
     # Algorithms
     "RateLimitAlgorithm",
     # Limit types

@@ -448,10 +448,6 @@ class ConcurrentFuture(BaseFuture):
     __slots__ = (
         "uuid",
         "_future",
-        "_result",
-        "_exception",
-        "_done",
-        "_cancelled",
         "_callbacks",
         "_lock",
     )
@@ -477,11 +473,7 @@ class ConcurrentFuture(BaseFuture):
         # Store the future
         self._future = future
 
-        # Initialize base future attributes
-        self._result = None
-        self._exception = None
-        self._done = False
-        self._cancelled = False
+        # Initialize callbacks and lock
         self._callbacks = []
         self._lock = threading.Lock()  # Keep lock for consistency
 
@@ -630,10 +622,6 @@ class AsyncioFuture(BaseFuture):
     __slots__ = (
         "uuid",
         "_future",
-        "_result",
-        "_exception",
-        "_done",
-        "_cancelled",
         "_callbacks",
         "_lock",
     )
@@ -659,11 +647,7 @@ class AsyncioFuture(BaseFuture):
         # Store the future
         self._future = future
 
-        # Initialize base future attributes
-        self._result = None
-        self._exception = None
-        self._done = False
-        self._cancelled = False
+        # Initialize callbacks and lock
         self._callbacks = []
         self._lock = threading.Lock()
 
@@ -991,9 +975,8 @@ if _IS_RAY_INSTALLED:
             try:
                 ready, not_ready = ray.wait([self._object_ref], timeout=0)
                 done = len(ready) > 0
-                if done:
-                    with self._lock:
-                        self._done = True
+                # Don't set _done=True here - only set it when result is actually fetched
+                # in result() or exception() methods. Otherwise result() will return None.
                 return done
             except:
                 return False

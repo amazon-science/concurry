@@ -7,6 +7,9 @@ across asyncio, threads, processes and distributed systems.
 
 # Core types
 from .core import (
+    ALL_COMPLETED,
+    FIRST_COMPLETED,
+    FIRST_EXCEPTION,
     Acquisition,
     AsyncioFuture,
     BaseFuture,
@@ -18,6 +21,7 @@ from .core import (
     LimitSet,
     LimitSetAcquisition,
     LoadBalancingAlgorithm,
+    PollingAlgorithm,
     RateLimit,
     RateLimitAlgorithm,
     ResourceLimit,
@@ -27,6 +31,8 @@ from .core import (
     SyncFuture,
     TaskWorker,
     Worker,
+    gather,
+    wait,
     worker,
     wrap_future,
 )
@@ -48,11 +54,18 @@ __all__ = [
     # Config types
     "ExecutionMode",
     "LoadBalancingAlgorithm",
+    "PollingAlgorithm",
     # Worker types
     "TaskWorker",
     "Worker",
     "worker",
     "Executor",
+    # Synchronization
+    "wait",
+    "gather",
+    "ALL_COMPLETED",
+    "FIRST_COMPLETED",
+    "FIRST_EXCEPTION",
     # Algorithms
     "RateLimitAlgorithm",
     "RetryAlgorithm",

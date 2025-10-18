@@ -49,3 +49,19 @@ class RetryAlgorithm(AutoEnum):
     Linear = auto()
     Exponential = auto()
     Fibonacci = auto()
+
+
+class PollingAlgorithm(AutoEnum):
+    """Polling strategies for checking future completion.
+
+    Attributes:
+        Fixed: Constant polling interval (predictable, simple)
+        Adaptive: Adapts based on completion rate (recommended default)
+        Exponential: Exponential backoff (good for slow operations)
+        Progressive: Progressive steps with fixed levels (balanced approach)
+    """
+
+    Fixed = auto()
+    Adaptive = auto()
+    Exponential = auto()
+    Progressive = auto()

@@ -138,6 +138,7 @@ Concurry follows best practices:
 - [Getting Started](user-guide/getting-started.md) - Learn the basics
 - [Workers Guide](user-guide/workers.md) - Learn the actor pattern with Workers
 - [Worker Pools Guide](user-guide/pools.md) - Scale with worker pools
+- [Synchronization Guide](user-guide/synchronization.md) - Coordinate multiple futures with wait() and gather()
 - [Limits Guide](user-guide/limits.md) - Resource and rate limiting
 - [Retry Mechanisms Guide](user-guide/retries.md) - Automatic retry with backoff
 - [Futures Guide](user-guide/futures.md) - Master the unified future interface

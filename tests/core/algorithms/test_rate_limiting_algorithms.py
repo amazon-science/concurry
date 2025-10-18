@@ -5,17 +5,15 @@ import time
 import pytest
 
 from concurry import Worker
-from concurry.core.limit import (
-    CallLimit,
-    RateLimitAlgorithm,
-)
-from concurry.core.limit.rate_limiting_algorithms import (
+from concurry.core.algorithms.rate_limiting import (
     FixedWindowLimiter,
     GCRALimiter,
     LeakyBucketLimiter,
     SlidingWindowLimiter,
     TokenBucketLimiter,
 )
+from concurry.core.constants import RateLimitAlgorithm
+from concurry.core.limit import CallLimit
 
 
 class TestTokenBucketLimiter:
@@ -23,14 +21,14 @@ class TestTokenBucketLimiter:
 
     def test_token_bucket_creation(self):
         """Test creating a TokenBucket limiter."""
-        limiter = TokenBucketLimiter(max_rate=10, capacity=20)
+        limiter = TokenBucketLimiter.of(max_rate=10, capacity=20)
         assert limiter.max_rate == 10
         assert limiter.capacity == 20
-        assert limiter.tokens == 20  # Starts full
+        assert limiter._tokens == 20  # Starts full
 
     def test_token_bucket_try_acquire_success(self):
         """Test successful token acquisition."""
-        limiter = TokenBucketLimiter(max_rate=10, capacity=10)
+        limiter = TokenBucketLimiter.of(max_rate=10, capacity=10)
 
         # Should succeed
         assert limiter.try_acquire(tokens=5) is True
@@ -38,7 +36,7 @@ class TestTokenBucketLimiter:
 
     def test_token_bucket_try_acquire_failure(self):
         """Test failed token acquisition when capacity exceeded."""
-        limiter = TokenBucketLimiter(max_rate=10, capacity=10)
+        limiter = TokenBucketLimiter.of(max_rate=10, capacity=10)
 
         # Acquire all capacity
         assert limiter.try_acquire(tokens=10) is True
@@ -48,7 +46,7 @@ class TestTokenBucketLimiter:
 
     def test_token_bucket_burst_handling(self):
         """Test TokenBucket burst capacity."""
-        limiter = TokenBucketLimiter(max_rate=10, capacity=20)
+        limiter = TokenBucketLimiter.of(max_rate=10, capacity=20)
 
         # Should handle burst up to capacity
         assert limiter.try_acquire(tokens=20) is True
@@ -58,7 +56,7 @@ class TestTokenBucketLimiter:
 
     def test_token_bucket_refill_over_time(self):
         """Test that tokens refill over time."""
-        limiter = TokenBucketLimiter(max_rate=10, capacity=10)
+        limiter = TokenBucketLimiter.of(max_rate=10, capacity=10)
 
         # Use all tokens
         assert limiter.try_acquire(tokens=10) is True
@@ -74,7 +72,7 @@ class TestTokenBucketLimiter:
 
     def test_token_bucket_acquire_blocking(self):
         """Test blocking acquire."""
-        limiter = TokenBucketLimiter(max_rate=100, capacity=10)
+        limiter = TokenBucketLimiter.of(max_rate=100, capacity=10)
 
         # Use capacity
         assert limiter.try_acquire(tokens=10) is True
@@ -89,7 +87,7 @@ class TestTokenBucketLimiter:
 
     def test_token_bucket_acquire_timeout(self):
         """Test acquire with timeout."""
-        limiter = TokenBucketLimiter(max_rate=1, capacity=1)
+        limiter = TokenBucketLimiter.of(max_rate=1, capacity=1)
 
         # Use capacity
         assert limiter.try_acquire(tokens=1) is True
@@ -99,7 +97,7 @@ class TestTokenBucketLimiter:
 
     def test_token_bucket_stats(self):
         """Test getting statistics from TokenBucket limiter."""
-        limiter = TokenBucketLimiter(max_rate=10, capacity=20)
+        limiter = TokenBucketLimiter.of(max_rate=10, capacity=20)
 
         stats = limiter.get_stats()
         assert stats["algorithm"] == "token_bucket"
@@ -114,7 +112,7 @@ class TestTokenBucketLimiter:
 
     def test_token_bucket_stats_after_usage(self):
         """Test stats reflect usage."""
-        limiter = TokenBucketLimiter(max_rate=10, capacity=20)
+        limiter = TokenBucketLimiter.of(max_rate=10, capacity=20)
 
         # Use some tokens
         limiter.try_acquire(tokens=10)
@@ -127,7 +125,7 @@ class TestTokenBucketLimiter:
 
     def test_token_bucket_partial_refill(self):
         """Test partial refill based on time elapsed."""
-        limiter = TokenBucketLimiter(max_rate=10, capacity=20)
+        limiter = TokenBucketLimiter.of(max_rate=10, capacity=20)
 
         # Use all tokens
         limiter.try_acquire(tokens=20)
@@ -145,22 +143,22 @@ class TestLeakyBucketLimiter:
 
     def test_leaky_bucket_creation(self):
         """Test creating a LeakyBucket limiter."""
-        limiter = LeakyBucketLimiter(max_rate=10, capacity=20)
+        limiter = LeakyBucketLimiter.of(max_rate=10, capacity=20)
         assert limiter.max_rate == 10
         assert limiter.capacity == 20
-        assert len(limiter.queue) == 0
+        assert len(limiter._queue) == 0
 
     def test_leaky_bucket_try_acquire_success(self):
         """Test successful token acquisition."""
-        limiter = LeakyBucketLimiter(max_rate=10, capacity=10)
+        limiter = LeakyBucketLimiter.of(max_rate=10, capacity=10)
 
         # Should succeed - queue has space
         assert limiter.try_acquire(tokens=5) is True
-        assert len(limiter.queue) == 5
+        assert len(limiter._queue) == 5
 
     def test_leaky_bucket_try_acquire_failure(self):
         """Test failed token acquisition when queue full."""
-        limiter = LeakyBucketLimiter(max_rate=10, capacity=10)
+        limiter = LeakyBucketLimiter.of(max_rate=10, capacity=10)
 
         # Fill queue
         assert limiter.try_acquire(tokens=10) is True
@@ -170,7 +168,7 @@ class TestLeakyBucketLimiter:
 
     def test_leaky_bucket_queue_capacity(self):
         """Test LeakyBucket respects queue capacity."""
-        limiter = LeakyBucketLimiter(max_rate=10, capacity=20)
+        limiter = LeakyBucketLimiter.of(max_rate=10, capacity=20)
 
         # Should be able to queue up to capacity
         assert limiter.try_acquire(tokens=20) is True
@@ -180,22 +178,22 @@ class TestLeakyBucketLimiter:
 
     def test_leaky_bucket_leak_over_time(self):
         """Test that queue leaks (processes) over time."""
-        limiter = LeakyBucketLimiter(max_rate=10, capacity=10)
+        limiter = LeakyBucketLimiter.of(max_rate=10, capacity=10)
 
         # Fill queue
         assert limiter.try_acquire(tokens=10) is True
-        assert len(limiter.queue) == 10
+        assert len(limiter._queue) == 10
 
         # Wait for leak (0.2s should process 2 items at 10/s)
         time.sleep(0.2)
 
         # Queue should have leaked some items
         limiter._leak()
-        assert len(limiter.queue) < 10
+        assert len(limiter._queue) < 10
 
     def test_leaky_bucket_acquire_blocking(self):
         """Test blocking acquire."""
-        limiter = LeakyBucketLimiter(max_rate=100, capacity=10)
+        limiter = LeakyBucketLimiter.of(max_rate=100, capacity=10)
 
         # Fill queue
         assert limiter.try_acquire(tokens=10) is True
@@ -210,7 +208,7 @@ class TestLeakyBucketLimiter:
 
     def test_leaky_bucket_acquire_timeout(self):
         """Test acquire with timeout."""
-        limiter = LeakyBucketLimiter(max_rate=1, capacity=1)
+        limiter = LeakyBucketLimiter.of(max_rate=1, capacity=1)
 
         # Fill queue
         assert limiter.try_acquire(tokens=1) is True
@@ -220,7 +218,7 @@ class TestLeakyBucketLimiter:
 
     def test_leaky_bucket_stats(self):
         """Test getting statistics from LeakyBucket limiter."""
-        limiter = LeakyBucketLimiter(max_rate=10, capacity=20)
+        limiter = LeakyBucketLimiter.of(max_rate=10, capacity=20)
 
         stats = limiter.get_stats()
         assert stats["algorithm"] == "leaky_bucket"
@@ -235,7 +233,7 @@ class TestLeakyBucketLimiter:
 
     def test_leaky_bucket_stats_after_usage(self):
         """Test stats reflect queue state."""
-        limiter = LeakyBucketLimiter(max_rate=10, capacity=20)
+        limiter = LeakyBucketLimiter.of(max_rate=10, capacity=20)
 
         # Add to queue
         limiter.try_acquire(tokens=10)
@@ -252,22 +250,22 @@ class TestSlidingWindowLimiter:
 
     def test_sliding_window_creation(self):
         """Test creating a SlidingWindow limiter."""
-        limiter = SlidingWindowLimiter(max_rate=10, window_seconds=1.0)
+        limiter = SlidingWindowLimiter.of(max_rate=10, window_seconds=1.0)
         assert limiter.max_rate == 10
         assert limiter.window_seconds == 1.0
-        assert len(limiter.requests) == 0
+        assert len(limiter._requests) == 0
 
     def test_sliding_window_try_acquire_success(self):
         """Test successful token acquisition."""
-        limiter = SlidingWindowLimiter(max_rate=10, window_seconds=1.0)
+        limiter = SlidingWindowLimiter.of(max_rate=10, window_seconds=1.0)
 
         # Should succeed
         assert limiter.try_acquire(tokens=5) is True
-        assert len(limiter.requests) == 5
+        assert len(limiter._requests) == 5
 
     def test_sliding_window_try_acquire_failure(self):
         """Test failed token acquisition when limit reached."""
-        limiter = SlidingWindowLimiter(max_rate=10, window_seconds=1.0)
+        limiter = SlidingWindowLimiter.of(max_rate=10, window_seconds=1.0)
 
         # Fill window
         assert limiter.try_acquire(tokens=10) is True
@@ -277,11 +275,11 @@ class TestSlidingWindowLimiter:
 
     def test_sliding_window_cleanup_old_requests(self):
         """Test that old requests are cleaned up."""
-        limiter = SlidingWindowLimiter(max_rate=10, window_seconds=0.5)
+        limiter = SlidingWindowLimiter.of(max_rate=10, window_seconds=0.5)
 
         # Fill window
         assert limiter.try_acquire(tokens=10) is True
-        assert len(limiter.requests) == 10
+        assert len(limiter._requests) == 10
 
         # Wait for window to pass
         time.sleep(0.6)
@@ -291,7 +289,7 @@ class TestSlidingWindowLimiter:
 
     def test_sliding_window_rolling_behavior(self):
         """Test rolling window behavior."""
-        limiter = SlidingWindowLimiter(max_rate=10, window_seconds=1.0)
+        limiter = SlidingWindowLimiter.of(max_rate=10, window_seconds=1.0)
 
         # Make some requests
         assert limiter.try_acquire(tokens=5) is True
@@ -304,11 +302,11 @@ class TestSlidingWindowLimiter:
 
         # Window should still have 10 requests
         limiter._cleanup_old_requests()
-        assert len(limiter.requests) == 10
+        assert len(limiter._requests) == 10
 
     def test_sliding_window_acquire_blocking(self):
         """Test blocking acquire."""
-        limiter = SlidingWindowLimiter(max_rate=100, window_seconds=1.0)
+        limiter = SlidingWindowLimiter.of(max_rate=100, window_seconds=1.0)
 
         # Fill window
         assert limiter.try_acquire(tokens=100) is True
@@ -323,7 +321,7 @@ class TestSlidingWindowLimiter:
 
     def test_sliding_window_acquire_timeout(self):
         """Test acquire with timeout."""
-        limiter = SlidingWindowLimiter(max_rate=1, window_seconds=1.0)
+        limiter = SlidingWindowLimiter.of(max_rate=1, window_seconds=1.0)
 
         # Fill window
         assert limiter.try_acquire(tokens=1) is True
@@ -333,7 +331,7 @@ class TestSlidingWindowLimiter:
 
     def test_sliding_window_stats(self):
         """Test getting statistics from SlidingWindow limiter."""
-        limiter = SlidingWindowLimiter(max_rate=10, window_seconds=1.0)
+        limiter = SlidingWindowLimiter.of(max_rate=10, window_seconds=1.0)
 
         stats = limiter.get_stats()
         assert stats["algorithm"] == "sliding_window"
@@ -350,7 +348,7 @@ class TestSlidingWindowLimiter:
 
     def test_sliding_window_stats_after_usage(self):
         """Test stats reflect window state."""
-        limiter = SlidingWindowLimiter(max_rate=10, window_seconds=1.0)
+        limiter = SlidingWindowLimiter.of(max_rate=10, window_seconds=1.0)
 
         # Add requests
         limiter.try_acquire(tokens=5)
@@ -368,22 +366,22 @@ class TestFixedWindowLimiter:
 
     def test_fixed_window_creation(self):
         """Test creating a FixedWindow limiter."""
-        limiter = FixedWindowLimiter(max_rate=10, window_seconds=1.0)
+        limiter = FixedWindowLimiter.of(max_rate=10, window_seconds=1.0)
         assert limiter.max_rate == 10
         assert limiter.window_seconds == 1.0
-        assert limiter.request_count == 0
+        assert limiter._request_count == 0
 
     def test_fixed_window_try_acquire_success(self):
         """Test successful token acquisition."""
-        limiter = FixedWindowLimiter(max_rate=10, window_seconds=1.0)
+        limiter = FixedWindowLimiter.of(max_rate=10, window_seconds=1.0)
 
         # Should succeed
         assert limiter.try_acquire(tokens=5) is True
-        assert limiter.request_count == 5
+        assert limiter._request_count == 5
 
     def test_fixed_window_try_acquire_failure(self):
         """Test failed token acquisition when limit reached."""
-        limiter = FixedWindowLimiter(max_rate=10, window_seconds=1.0)
+        limiter = FixedWindowLimiter.of(max_rate=10, window_seconds=1.0)
 
         # Fill window
         assert limiter.try_acquire(tokens=10) is True
@@ -393,22 +391,22 @@ class TestFixedWindowLimiter:
 
     def test_fixed_window_reset(self):
         """Test that window resets after time period."""
-        limiter = FixedWindowLimiter(max_rate=10, window_seconds=0.5)
+        limiter = FixedWindowLimiter.of(max_rate=10, window_seconds=0.5)
 
         # Fill window
         assert limiter.try_acquire(tokens=10) is True
-        assert limiter.request_count == 10
+        assert limiter._request_count == 10
 
         # Wait for window to reset
         time.sleep(0.6)
 
         # Should succeed - window reset
         assert limiter.try_acquire(tokens=10) is True
-        assert limiter.request_count == 10  # Reset and refilled
+        assert limiter._request_count == 10  # Reset and refilled
 
     def test_fixed_window_boundary_behavior(self):
         """Test behavior at window boundaries."""
-        limiter = FixedWindowLimiter(max_rate=10, window_seconds=0.5)
+        limiter = FixedWindowLimiter.of(max_rate=10, window_seconds=0.5)
 
         # Fill current window
         assert limiter.try_acquire(tokens=10) is True
@@ -424,7 +422,7 @@ class TestFixedWindowLimiter:
 
     def test_fixed_window_acquire_blocking(self):
         """Test blocking acquire."""
-        limiter = FixedWindowLimiter(max_rate=100, window_seconds=1.0)
+        limiter = FixedWindowLimiter.of(max_rate=100, window_seconds=1.0)
 
         # Fill window
         assert limiter.try_acquire(tokens=100) is True
@@ -439,7 +437,7 @@ class TestFixedWindowLimiter:
 
     def test_fixed_window_acquire_timeout(self):
         """Test acquire with timeout."""
-        limiter = FixedWindowLimiter(max_rate=1, window_seconds=1.0)
+        limiter = FixedWindowLimiter.of(max_rate=1, window_seconds=1.0)
 
         # Fill window
         assert limiter.try_acquire(tokens=1) is True
@@ -449,7 +447,7 @@ class TestFixedWindowLimiter:
 
     def test_fixed_window_stats(self):
         """Test getting statistics from FixedWindow limiter."""
-        limiter = FixedWindowLimiter(max_rate=10, window_seconds=1.0)
+        limiter = FixedWindowLimiter.of(max_rate=10, window_seconds=1.0)
 
         stats = limiter.get_stats()
         assert stats["algorithm"] == "fixed_window"
@@ -466,7 +464,7 @@ class TestFixedWindowLimiter:
 
     def test_fixed_window_stats_after_usage(self):
         """Test stats reflect window state."""
-        limiter = FixedWindowLimiter(max_rate=10, window_seconds=1.0)
+        limiter = FixedWindowLimiter.of(max_rate=10, window_seconds=1.0)
 
         # Add requests
         limiter.try_acquire(tokens=5)
@@ -484,15 +482,15 @@ class TestGCRALimiter:
 
     def test_gcra_creation(self):
         """Test creating a GCRA limiter."""
-        limiter = GCRALimiter(max_rate=10, capacity=20)
+        limiter = GCRALimiter.of(max_rate=10, capacity=20)
         assert limiter.max_rate == 10
         assert limiter.capacity == 20
-        assert limiter.emission_interval == 0.1  # 1/10
-        assert limiter.tau == 2.0  # 20 * 0.1
+        assert limiter._emission_interval == 0.1  # 1/10
+        assert limiter._tau == 2.0  # 20 * 0.1
 
     def test_gcra_try_acquire_success(self):
         """Test successful token acquisition."""
-        limiter = GCRALimiter(max_rate=10, capacity=10)
+        limiter = GCRALimiter.of(max_rate=10, capacity=10)
 
         # Should succeed
         assert limiter.try_acquire(tokens=5) is True
@@ -500,7 +498,7 @@ class TestGCRALimiter:
 
     def test_gcra_try_acquire_failure(self):
         """Test failed token acquisition when capacity exceeded."""
-        limiter = GCRALimiter(max_rate=10, capacity=10)
+        limiter = GCRALimiter.of(max_rate=10, capacity=10)
 
         # Acquire all capacity
         assert limiter.try_acquire(tokens=10) is True
@@ -510,7 +508,7 @@ class TestGCRALimiter:
 
     def test_gcra_burst_handling(self):
         """Test GCRA burst capacity."""
-        limiter = GCRALimiter(max_rate=10, capacity=20)
+        limiter = GCRALimiter.of(max_rate=10, capacity=20)
 
         # Should handle burst up to capacity
         assert limiter.try_acquire(tokens=20) is True
@@ -520,7 +518,7 @@ class TestGCRALimiter:
 
     def test_gcra_replenishment_over_time(self):
         """Test that tokens replenish over time."""
-        limiter = GCRALimiter(max_rate=10, capacity=10)
+        limiter = GCRALimiter.of(max_rate=10, capacity=10)
 
         # Use all tokens
         assert limiter.try_acquire(tokens=10) is True
@@ -536,7 +534,7 @@ class TestGCRALimiter:
 
     def test_gcra_acquire_blocking(self):
         """Test blocking acquire."""
-        limiter = GCRALimiter(max_rate=100, capacity=10)
+        limiter = GCRALimiter.of(max_rate=100, capacity=10)
 
         # Use capacity
         assert limiter.try_acquire(tokens=10) is True
@@ -551,7 +549,7 @@ class TestGCRALimiter:
 
     def test_gcra_acquire_timeout(self):
         """Test acquire with timeout."""
-        limiter = GCRALimiter(max_rate=1, capacity=1)
+        limiter = GCRALimiter.of(max_rate=1, capacity=1)
 
         # Use capacity
         assert limiter.try_acquire(tokens=1) is True
@@ -561,7 +559,7 @@ class TestGCRALimiter:
 
     def test_gcra_stats(self):
         """Test getting statistics from GCRA limiter."""
-        limiter = GCRALimiter(max_rate=10, capacity=20)
+        limiter = GCRALimiter.of(max_rate=10, capacity=20)
 
         stats = limiter.get_stats()
         assert stats["algorithm"] == "gcra"
@@ -576,7 +574,7 @@ class TestGCRALimiter:
 
     def test_gcra_stats_after_usage(self):
         """Test stats reflect usage."""
-        limiter = GCRALimiter(max_rate=10, capacity=20)
+        limiter = GCRALimiter.of(max_rate=10, capacity=20)
 
         # Use some tokens
         limiter.try_acquire(tokens=10)
@@ -589,7 +587,7 @@ class TestGCRALimiter:
 
     def test_gcra_precision(self):
         """Test GCRA precision for steady-state traffic."""
-        limiter = GCRALimiter(max_rate=10, capacity=10)
+        limiter = GCRALimiter.of(max_rate=10, capacity=10)
 
         # Simulate steady requests at exactly the allowed rate
         for i in range(5):
@@ -602,7 +600,7 @@ class TestGCRALimiter:
     def test_gcra_vs_token_bucket_burst(self):
         """Test GCRA burst behavior (for comparison with TokenBucket)."""
         # GCRA with rate 10/s and capacity 20
-        gcra = GCRALimiter(max_rate=10, capacity=20)
+        gcra = GCRALimiter.of(max_rate=10, capacity=20)
 
         # Should handle burst of 20
         assert gcra.try_acquire(tokens=20) is True
@@ -618,7 +616,7 @@ class TestGCRALimiter:
 
     def test_gcra_multiple_small_requests(self):
         """Test GCRA with multiple small requests."""
-        limiter = GCRALimiter(max_rate=100, capacity=10)
+        limiter = GCRALimiter.of(max_rate=100, capacity=10)
 
         # Multiple small requests should work
         for i in range(10):
@@ -630,7 +628,7 @@ class TestGCRALimiter:
     def test_gcra_fractional_tokens(self):
         """Test GCRA behavior with fractional rate."""
         # 2.5 tokens per second
-        limiter = GCRALimiter(max_rate=2.5, capacity=5)
+        limiter = GCRALimiter.of(max_rate=2.5, capacity=5)
 
         # Should be able to acquire 5 tokens (full capacity)
         assert limiter.try_acquire(tokens=5) is True
@@ -646,28 +644,28 @@ class TestGCRALimiter:
 
     def test_gcra_zero_rate(self):
         """Test GCRA with zero rate."""
-        limiter = GCRALimiter(max_rate=0, capacity=10)
+        limiter = GCRALimiter.of(max_rate=0, capacity=10)
 
         # With zero rate, emission_interval is 0
-        assert limiter.emission_interval == 0
+        assert limiter._emission_interval == 0
 
         # Should still be able to acquire up to capacity
         assert limiter.try_acquire(tokens=10) is True
 
     def test_gcra_tat_tracking(self):
         """Test that TAT (Theoretical Arrival Time) is tracked correctly."""
-        limiter = GCRALimiter(max_rate=10, capacity=10)
+        limiter = GCRALimiter.of(max_rate=10, capacity=10)
 
         # Initial TAT should be 0
-        assert limiter.tat == 0.0
+        assert limiter._tat == 0.0
 
         # After acquiring, TAT should advance
         limiter.try_acquire(tokens=5)
-        assert limiter.tat > 0
+        assert limiter._tat > 0
 
         # TAT should be approximately now + 5 * emission_interval
         expected_tat = time.time() + 5 * 0.1
-        assert abs(limiter.tat - expected_tat) < 0.01  # Within 10ms tolerance
+        assert abs(limiter._tat - expected_tat) < 0.01  # Within 10ms tolerance
 
 
 class TestRateLimitingAlgorithms:

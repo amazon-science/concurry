@@ -12,10 +12,10 @@ from typing import Any, Callable, Dict, List, Optional, Type
 from morphic import Typed
 from pydantic import PrivateAttr
 
-from ..config import ExecutionMode, LoadBalancingAlgorithm
+from ..constants import ExecutionMode, LoadBalancingAlgorithm
 from ..future import BaseFuture
 from .base_worker import Worker
-from .load_balancing import LoadBalancer
+from ..algorithms.load_balancing import LoadBalancer
 
 
 class WorkerProxyPool(Typed, ABC):

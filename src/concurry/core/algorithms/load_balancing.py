@@ -5,12 +5,13 @@ import threading
 from abc import ABC, abstractmethod
 from typing import Any, Dict
 
-from morphic import MutableTyped
+from morphic import MutableTyped, Registry
+from pydantic import ConfigDict, PrivateAttr
 
-from ..config import LoadBalancingAlgorithm
+from ..constants import LoadBalancingAlgorithm
 
 
-class BaseLoadBalancer(MutableTyped, ABC):
+class BaseLoadBalancer(Registry, MutableTyped, ABC):
     """Abstract base class for load balancing algorithms.
 
     Provides a unified interface for different load balancing strategies
@@ -39,7 +40,7 @@ class BaseLoadBalancer(MutableTyped, ABC):
         ```
     """
 
-    algorithm: LoadBalancingAlgorithm
+    model_config = ConfigDict(extra="ignore")
 
     @abstractmethod
     def select_worker(self, num_workers: int) -> int:
@@ -107,7 +108,7 @@ class RoundRobinBalancer(BaseLoadBalancer):
 
     Example:
         ```python
-        balancer = RoundRobinBalancer(algorithm=LoadBalancingAlgorithm.RoundRobin)
+        balancer = RoundRobinBalancer.of()
         # First call -> worker 0
         # Second call -> worker 1
         # Third call -> worker 2
@@ -115,10 +116,10 @@ class RoundRobinBalancer(BaseLoadBalancer):
         ```
     """
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._counter = 0
-        self._lock = threading.Lock()
+    aliases = ["round_robin", "rr", LoadBalancingAlgorithm.RoundRobin]
+
+    _counter: int = PrivateAttr(default=0)
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def select_worker(self, num_workers: int) -> int:
         """Select next worker in round-robin fashion."""
@@ -158,18 +159,18 @@ class LeastActiveLoadBalancer(BaseLoadBalancer):
 
     Example:
         ```python
-        balancer = LeastActiveLoadBalancer(algorithm=LoadBalancingAlgorithm.LeastActiveLoad)
+        balancer = LeastActiveLoadBalancer.of()
         # Always selects worker with fewest active calls
         # Worker 0: 2 active, Worker 1: 1 active, Worker 2: 3 active
         # Next call -> Worker 1
         ```
     """
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._active_calls: Dict[int, int] = {}  # worker_id -> active count
-        self._total_dispatched: int = 0  # total calls dispatched
-        self._lock = threading.Lock()
+    aliases = ["least_active", "active", LoadBalancingAlgorithm.LeastActiveLoad]
+
+    _active_calls: Dict[int, int] = PrivateAttr(default_factory=dict)  # worker_id -> active count
+    _total_dispatched: int = PrivateAttr(default=0)  # total calls dispatched
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def select_worker(self, num_workers: int) -> int:
         """Select worker with least active calls."""
@@ -233,17 +234,17 @@ class LeastTotalLoadBalancer(BaseLoadBalancer):
 
     Example:
         ```python
-        balancer = LeastTotalLoadBalancer(algorithm=LoadBalancingAlgorithm.LeastTotalLoad)
+        balancer = LeastTotalLoadBalancer.of()
         # Always selects worker with fewest total calls
         # Worker 0: 100 calls, Worker 1: 98 calls, Worker 2: 102 calls
         # Next call -> Worker 1
         ```
     """
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._total_calls: Dict[int, int] = {}  # worker_id -> total count
-        self._lock = threading.Lock()
+    aliases = ["least_total", "total", LoadBalancingAlgorithm.LeastTotalLoad]
+
+    _total_calls: Dict[int, int] = PrivateAttr(default_factory=dict)  # worker_id -> total count
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def select_worker(self, num_workers: int) -> int:
         """Select worker with least total calls."""
@@ -303,16 +304,16 @@ class RandomBalancer(BaseLoadBalancer):
 
     Example:
         ```python
-        balancer = RandomBalancer(algorithm=LoadBalancingAlgorithm.Random)
+        balancer = RandomBalancer.of()
         # Each call randomly selects a worker
         # Good distribution over many requests
         ```
     """
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._total_dispatched = 0
-        self._lock = threading.Lock()
+    aliases = ["random", "rand", LoadBalancingAlgorithm.Random]
+
+    _total_dispatched: int = PrivateAttr(default=0)
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def select_worker(self, num_workers: int) -> int:
         """Randomly select a worker."""
@@ -333,12 +334,12 @@ class RandomBalancer(BaseLoadBalancer):
             }
 
 
-def LoadBalancer(algorithm: LoadBalancingAlgorithm) -> BaseLoadBalancer:
-    """Factory function to create the appropriate load balancer.
+def LoadBalancer(algorithm: LoadBalancingAlgorithm, **kwargs) -> BaseLoadBalancer:
+    """Factory function to create the appropriate load balancer using Registry pattern.
 
     Args:
         algorithm: The load balancing algorithm to use
-
+        **kwargs: Additional keyword arguments to pass to the load balancer constructor
     Returns:
         BaseLoadBalancer instance of the appropriate type
 
@@ -347,19 +348,10 @@ def LoadBalancer(algorithm: LoadBalancingAlgorithm) -> BaseLoadBalancer:
 
     Example:
         ```python
-        from concurry.core.config import LoadBalancingAlgorithm
+        from concurry.core.constants import LoadBalancingAlgorithm
 
         balancer = LoadBalancer(LoadBalancingAlgorithm.RoundRobin)
         worker_idx = balancer.select_worker(num_workers=10)
         ```
     """
-    if algorithm == LoadBalancingAlgorithm.RoundRobin:
-        return RoundRobinBalancer(algorithm=algorithm)
-    elif algorithm == LoadBalancingAlgorithm.LeastActiveLoad:
-        return LeastActiveLoadBalancer(algorithm=algorithm)
-    elif algorithm == LoadBalancingAlgorithm.LeastTotalLoad:
-        return LeastTotalLoadBalancer(algorithm=algorithm)
-    elif algorithm == LoadBalancingAlgorithm.Random:
-        return RandomBalancer(algorithm=algorithm)
-    else:
-        raise ValueError(f"Unknown load balancing algorithm: {algorithm}")
+    return BaseLoadBalancer.of(algorithm, **kwargs)

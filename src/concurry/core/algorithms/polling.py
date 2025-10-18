@@ -1,37 +1,44 @@
-"""Polling algorithms for efficient future completion checking.
+"""Polling algorithms for efficient future completion checking."""
 
-This module provides various polling strategies that balance responsiveness
-against CPU usage when checking the completion status of futures.
-"""
+from abc import ABC, abstractmethod
 
-from typing import Protocol, Union
+from morphic import MutableTyped, Registry
+from pydantic import ConfigDict
 
-from morphic import MutableTyped
-
-from .config import PollingAlgorithm
+from ..constants import PollingAlgorithm
 
 
-class PollingStrategy(Protocol):
-    """Protocol defining the interface for polling strategies."""
+class BasePollingStrategy(Registry, MutableTyped, ABC):
+    """Base class for polling strategies using Registry pattern.
 
+    All polling strategies inherit from this class and are automatically
+    registered for factory-based creation.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    @abstractmethod
     def get_next_interval(self) -> float:
         """Get the next polling interval in seconds."""
-        ...
+        pass
 
+    @abstractmethod
     def record_completion(self) -> None:
         """Record that futures completed in this check."""
-        ...
+        pass
 
+    @abstractmethod
     def record_no_completion(self) -> None:
         """Record that no futures completed in this check."""
-        ...
+        pass
 
+    @abstractmethod
     def reset(self) -> None:
         """Reset strategy to initial state."""
-        ...
+        pass
 
 
-class FixedPollingStrategy(MutableTyped):
+class FixedPollingStrategy(BasePollingStrategy):
     """Fixed interval polling - constant wait time between checks.
 
     This strategy uses a constant polling interval regardless of whether
@@ -49,9 +56,11 @@ class FixedPollingStrategy(MutableTyped):
     Example:
         ```python
         # Check every 50ms
-        strategy = FixedPollingStrategy(interval=0.05)
+        strategy = FixedPollingStrategy.of(interval=0.05)
         ```
     """
+
+    aliases = ["fixed", PollingAlgorithm.Fixed]
 
     interval: float = 0.01  # 10ms default
 
@@ -72,7 +81,7 @@ class FixedPollingStrategy(MutableTyped):
         pass
 
 
-class AdaptivePollingStrategy(MutableTyped):
+class AdaptivePollingStrategy(BasePollingStrategy):
     """Adaptive polling that adjusts based on completion rate.
 
     This strategy dynamically adjusts the polling interval based on whether
@@ -100,7 +109,7 @@ class AdaptivePollingStrategy(MutableTyped):
     Example:
         ```python
         # More aggressive adaptation
-        strategy = AdaptivePollingStrategy(
+        strategy = AdaptivePollingStrategy.of(
             min_interval=0.0001,  # 0.1ms min
             max_interval=0.2,     # 200ms max
             speedup_factor=0.5,   # 50% faster on completion
@@ -108,6 +117,8 @@ class AdaptivePollingStrategy(MutableTyped):
         )
         ```
     """
+
+    aliases = ["adaptive", PollingAlgorithm.Adaptive]
 
     min_interval: float = 0.001  # 1ms minimum
     max_interval: float = 0.1  # 100ms maximum
@@ -137,7 +148,7 @@ class AdaptivePollingStrategy(MutableTyped):
         self.consecutive_empty = 0
 
 
-class ExponentialPollingStrategy(MutableTyped):
+class ExponentialPollingStrategy(BasePollingStrategy):
     """Exponential backoff polling.
 
     This strategy starts with a fast polling interval and exponentially
@@ -162,13 +173,15 @@ class ExponentialPollingStrategy(MutableTyped):
     Example:
         ```python
         # Slower growth, higher max
-        strategy = ExponentialPollingStrategy(
+        strategy = ExponentialPollingStrategy.of(
             initial_interval=0.01,  # 10ms start
             max_interval=2.0,       # 2 second max
             multiplier=1.5          # 50% growth
         )
         ```
     """
+
+    aliases = ["exponential", PollingAlgorithm.Exponential]
 
     initial_interval: float = 0.001  # Start at 1ms
     max_interval: float = 0.5  # Cap at 500ms
@@ -192,7 +205,7 @@ class ExponentialPollingStrategy(MutableTyped):
         self.current_interval = self.initial_interval
 
 
-class ProgressivePollingStrategy(MutableTyped):
+class ProgressivePollingStrategy(BasePollingStrategy):
     """Progressive backoff with fixed interval levels.
 
     This strategy progresses through predefined polling intervals, staying
@@ -217,12 +230,14 @@ class ProgressivePollingStrategy(MutableTyped):
     Example:
         ```python
         # Custom interval levels
-        strategy = ProgressivePollingStrategy(
+        strategy = ProgressivePollingStrategy.of(
             intervals=(0.001, 0.01, 0.05, 0.1, 0.5, 1.0),
             checks_before_increase=10  # Stay longer at each level
         )
         ```
     """
+
+    aliases = ["progressive", PollingAlgorithm.Progressive]
 
     intervals: tuple = (0.001, 0.005, 0.01, 0.05, 0.1)  # Progressive steps
     current_index: int = 0
@@ -251,17 +266,15 @@ class ProgressivePollingStrategy(MutableTyped):
         self.checks_at_level = 0
 
 
-def create_polling_strategy(
-    algorithm: Union[PollingAlgorithm, str] = PollingAlgorithm.Adaptive, **kwargs
-) -> PollingStrategy:
-    """Create a polling strategy instance.
+def Poller(algorithm: PollingAlgorithm, **kwargs) -> BasePollingStrategy:
+    """Create a polling strategy instance using Registry pattern.
 
     Args:
         algorithm: Polling algorithm to use (enum or string name)
         **kwargs: Additional arguments passed to strategy constructor
 
     Returns:
-        PollingStrategy instance
+        BasePollingStrategy instance
 
     Raises:
         ValueError: If algorithm is unknown
@@ -269,30 +282,17 @@ def create_polling_strategy(
     Example:
         ```python
         # Using enum
-        strategy = create_polling_strategy(PollingAlgorithm.Adaptive)
+        strategy = Poller(PollingAlgorithm.Adaptive)
 
         # Using string
-        strategy = create_polling_strategy("exponential")
+        strategy = Poller("exponential")
 
         # With custom parameters
-        strategy = create_polling_strategy(
+        strategy = Poller(
             "adaptive",
             min_interval=0.0001,
             max_interval=0.5
         )
         ```
     """
-    # Convert string to enum if needed
-    if isinstance(algorithm, str):
-        algorithm = PollingAlgorithm(algorithm)
-
-    if algorithm == PollingAlgorithm.Fixed:
-        return FixedPollingStrategy(**kwargs)
-    elif algorithm == PollingAlgorithm.Adaptive:
-        return AdaptivePollingStrategy(**kwargs)
-    elif algorithm == PollingAlgorithm.Exponential:
-        return ExponentialPollingStrategy(**kwargs)
-    elif algorithm == PollingAlgorithm.Progressive:
-        return ProgressivePollingStrategy(**kwargs)
-    else:
-        raise ValueError(f"Unknown polling algorithm: {algorithm}")
+    return BasePollingStrategy.of(algorithm, **kwargs)

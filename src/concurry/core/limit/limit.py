@@ -42,7 +42,8 @@ from typing import ClassVar, Dict, NoReturn
 from morphic import Typed
 from pydantic import confloat, conint
 
-from .rate_limiting_algorithms import RateLimitAlgorithm, RateLimiter
+from ..algorithms.rate_limiting import RateLimiter
+from ..constants import RateLimitAlgorithm
 
 
 class Limit(Typed, ABC):

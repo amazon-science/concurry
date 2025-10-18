@@ -2,14 +2,14 @@
 
 import pytest
 
-from concurry.core.config import PollingAlgorithm
-from concurry.core.polling import (
+from concurry.core.algorithms.polling import (
     AdaptivePollingStrategy,
     ExponentialPollingStrategy,
     FixedPollingStrategy,
     ProgressivePollingStrategy,
-    create_polling_strategy,
+    Poller,
 )
+from concurry.core.constants import PollingAlgorithm
 
 
 class TestFixedPollingStrategy:
@@ -252,57 +252,57 @@ class TestProgressivePollingStrategy:
 
 
 class TestCreatePollingStrategy:
-    """Tests for create_polling_strategy factory function."""
+    """Tests for Poller factory function."""
 
     def test_create_fixed_enum(self):
         """Test creating fixed strategy with enum."""
-        strategy = create_polling_strategy(PollingAlgorithm.Fixed)
+        strategy = Poller(PollingAlgorithm.Fixed)
         assert isinstance(strategy, FixedPollingStrategy)
 
     def test_create_fixed_string(self):
         """Test creating fixed strategy with string."""
-        strategy = create_polling_strategy("fixed")
+        strategy = Poller("fixed")
         assert isinstance(strategy, FixedPollingStrategy)
 
     def test_create_adaptive_enum(self):
         """Test creating adaptive strategy with enum."""
-        strategy = create_polling_strategy(PollingAlgorithm.Adaptive)
+        strategy = Poller(PollingAlgorithm.Adaptive)
         assert isinstance(strategy, AdaptivePollingStrategy)
 
     def test_create_adaptive_string(self):
         """Test creating adaptive strategy with string."""
-        strategy = create_polling_strategy("adaptive")
+        strategy = Poller("adaptive")
         assert isinstance(strategy, AdaptivePollingStrategy)
 
     def test_create_exponential_enum(self):
         """Test creating exponential strategy with enum."""
-        strategy = create_polling_strategy(PollingAlgorithm.Exponential)
+        strategy = Poller(PollingAlgorithm.Exponential)
         assert isinstance(strategy, ExponentialPollingStrategy)
 
     def test_create_exponential_string(self):
         """Test creating exponential strategy with string."""
-        strategy = create_polling_strategy("exponential")
+        strategy = Poller("exponential")
         assert isinstance(strategy, ExponentialPollingStrategy)
 
     def test_create_progressive_enum(self):
         """Test creating progressive strategy with enum."""
-        strategy = create_polling_strategy(PollingAlgorithm.Progressive)
+        strategy = Poller(PollingAlgorithm.Progressive)
         assert isinstance(strategy, ProgressivePollingStrategy)
 
     def test_create_progressive_string(self):
         """Test creating progressive strategy with string."""
-        strategy = create_polling_strategy("progressive")
+        strategy = Poller("progressive")
         assert isinstance(strategy, ProgressivePollingStrategy)
 
     def test_create_with_kwargs(self):
         """Test creating strategy with custom parameters."""
-        strategy = create_polling_strategy(PollingAlgorithm.Fixed, interval=0.123)
+        strategy = Poller(PollingAlgorithm.Fixed, interval=0.123)
         assert isinstance(strategy, FixedPollingStrategy)
         assert strategy.interval == 0.123
 
     def test_create_adaptive_with_custom_params(self):
         """Test creating adaptive with custom parameters."""
-        strategy = create_polling_strategy(
+        strategy = Poller(
             PollingAlgorithm.Adaptive, min_interval=0.0001, max_interval=0.5, speedup_factor=0.5
         )
         assert isinstance(strategy, AdaptivePollingStrategy)
@@ -312,9 +312,9 @@ class TestCreatePollingStrategy:
 
     def test_create_invalid_algorithm(self):
         """Test error on invalid algorithm."""
-        # This should fail since the value is out of enum range
-        with pytest.raises(ValueError):
-            create_polling_strategy("invalid_algorithm")
+        # This should fail since the value is not registered in Registry
+        with pytest.raises(KeyError):
+            Poller("invalid_algorithm")
 
 
 class TestPollingBehavior:

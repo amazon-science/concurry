@@ -1,4 +1,4 @@
-"""Configuration classes for concurry executors."""
+"""Constants and enumerations for concurry."""
 
 from morphic import AutoEnum, alias, auto
 
@@ -65,3 +65,17 @@ class PollingAlgorithm(AutoEnum):
     Adaptive = auto()
     Exponential = auto()
     Progressive = auto()
+
+
+class ReturnWhen(AutoEnum):
+    """Control when wait() should return.
+
+    Attributes:
+        ALL_COMPLETED: Wait until all futures are done
+        FIRST_COMPLETED: Return as soon as any future completes
+        FIRST_EXCEPTION: Return as soon as any future raises an exception
+    """
+
+    ALL_COMPLETED = alias("all")
+    FIRST_COMPLETED = alias("first")
+    FIRST_EXCEPTION = alias("exception")

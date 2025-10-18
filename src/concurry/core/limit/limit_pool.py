@@ -68,14 +68,16 @@ from typing import Any, Dict, List, NoReturn, Optional
 from morphic import Typed
 from pydantic import PrivateAttr
 
-from ..config import LoadBalancingAlgorithm
-from ..worker.load_balancing import RandomBalancer, RoundRobinBalancer
+from ..algorithms.load_balancing import RandomBalancer, RoundRobinBalancer
+from ..constants import LoadBalancingAlgorithm
 from .acquisition import LimitSetAcquisition
 from .limit_set import BaseLimitSet
 
 
 class RoundRobinBalancerWithOffset(RoundRobinBalancer):
     """Round-robin load balancer with configurable starting offset.
+
+    Note: This is an internal helper class and not registered in the Registry.
 
     Extends the standard RoundRobinBalancer to support a starting offset,
     enabling multiple workers to start at different positions in the round-robin
@@ -97,16 +99,10 @@ class RoundRobinBalancerWithOffset(RoundRobinBalancer):
     Example:
         ```python
         # Worker 0 starts at index 0
-        balancer0 = RoundRobinBalancerWithOffset(
-            algorithm=LoadBalancingAlgorithm.RoundRobin,
-            offset=0
-        )
+        balancer0 = RoundRobinBalancerWithOffset(offset=0)
 
         # Worker 1 starts at index 1
-        balancer1 = RoundRobinBalancerWithOffset(
-            algorithm=LoadBalancingAlgorithm.RoundRobin,
-            offset=1
-        )
+        balancer1 = RoundRobinBalancerWithOffset(offset=1)
 
         # With 3 LimitSets:
         # balancer0.select_worker(3) -> 0, 1, 2, 0, 1, 2, ...
@@ -114,17 +110,18 @@ class RoundRobinBalancerWithOffset(RoundRobinBalancer):
         ```
     """
 
-    def __init__(self, offset: int = 0, **kwargs):
-        """Initialize round-robin balancer with offset.
+    _dont_register = True  # Don't register this internal helper class
+    aliases = []  # Clear parent aliases to avoid conflicts
 
-        Args:
-            offset: Starting position in round-robin cycle (default 0)
-            **kwargs: Additional arguments passed to parent RoundRobinBalancer
-        """
-        super().__init__(**kwargs)
-        self._offset = offset
-        # Reset counter to offset
-        self._counter = offset
+    offset: int = 0  # Starting position in round-robin cycle
+    _offset: int = PrivateAttr(default=0)
+
+    def post_initialize(self) -> None:
+        """Initialize private attributes after Typed validation."""
+        super().post_initialize()
+        # Store offset and reset counter to offset
+        self._offset = self.offset
+        self._counter = self.offset
 
     def get_stats(self) -> Dict[str, Any]:
         """Get round-robin with offset statistics."""
@@ -226,10 +223,10 @@ class LimitPool(Typed):
 
         # Create appropriate load balancer
         if self.load_balancing == LoadBalancingAlgorithm.Random:
-            balancer = RandomBalancer(algorithm=self.load_balancing)
+            balancer = RandomBalancer()
         elif self.load_balancing == LoadBalancingAlgorithm.RoundRobin:
             # Use custom balancer with offset support
-            balancer = RoundRobinBalancerWithOffset(algorithm=self.load_balancing, offset=self.worker_index)
+            balancer = RoundRobinBalancerWithOffset(offset=self.worker_index)
         else:
             raise ValueError(
                 f"Unsupported load balancing algorithm for LimitPool: {self.load_balancing}. "
@@ -417,9 +414,9 @@ class LimitPool(Typed):
 
         # Recreate balancer
         if self.load_balancing == LoadBalancingAlgorithm.Random:
-            balancer = RandomBalancer(algorithm=self.load_balancing)
+            balancer = RandomBalancer()
         elif self.load_balancing == LoadBalancingAlgorithm.RoundRobin:
-            balancer = RoundRobinBalancerWithOffset(algorithm=self.load_balancing, offset=self.worker_index)
+            balancer = RoundRobinBalancerWithOffset(offset=self.worker_index)
         else:
             raise ValueError(f"Unknown load balancing algorithm: {self.load_balancing}")
 

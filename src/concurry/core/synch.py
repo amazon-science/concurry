@@ -16,13 +16,14 @@ from morphic.structs import map_collection
 
 from ..utils.frameworks import _IS_RAY_INSTALLED
 from ..utils.progress import ProgressBar
+from .algorithms.polling import Poller
+from .constants import PollingAlgorithm, ReturnWhen
 from .future import BaseFuture, wrap_future
-from .polling import PollingAlgorithm, create_polling_strategy
 
-# Constants matching concurrent.futures.wait
-ALL_COMPLETED = "ALL_COMPLETED"
-FIRST_COMPLETED = "FIRST_COMPLETED"
-FIRST_EXCEPTION = "FIRST_EXCEPTION"
+# Legacy constants for backward compatibility (deprecated)
+ALL_COMPLETED = ReturnWhen.ALL_COMPLETED.value
+FIRST_COMPLETED = ReturnWhen.FIRST_COMPLETED.value
+FIRST_EXCEPTION = ReturnWhen.FIRST_EXCEPTION.value
 
 # Import Ray if available
 if _IS_RAY_INSTALLED:
@@ -188,7 +189,7 @@ def wait(
     fs: Union[List, Tuple, Set, Dict, Any],
     *futs,
     timeout: Optional[float] = None,
-    return_when: str = ALL_COMPLETED,
+    return_when: Union[ReturnWhen, str] = ReturnWhen.ALL_COMPLETED,
     polling: Union[PollingAlgorithm, str] = PollingAlgorithm.Adaptive,
     progress: Union[bool, Dict, Callable, None] = None,
     recurse: bool = False,
@@ -212,9 +213,10 @@ def wait(
         *futs: Additional futures (only if fs is not a structure)
         timeout: Maximum time to wait in seconds (None = indefinite)
         return_when: Condition for returning. Options:
-            - ALL_COMPLETED: Wait until all futures are done (default)
-            - FIRST_COMPLETED: Return when any future completes
-            - FIRST_EXCEPTION: Return when any future raises exception
+            - ReturnWhen.ALL_COMPLETED: Wait until all futures are done (default)
+            - ReturnWhen.FIRST_COMPLETED: Return when any future completes
+            - ReturnWhen.FIRST_EXCEPTION: Return when any future raises exception
+            - Can also pass string values: "all_completed", "first_completed", "first_exception"
         polling: Polling algorithm for checking completion
             - PollingAlgorithm enum value or string name
             - Default: Adaptive (adjusts based on completion rate)
@@ -235,7 +237,7 @@ def wait(
     Example:
         Basic usage (most common):
             ```python
-            from concurry import wait, ALL_COMPLETED, FIRST_COMPLETED
+            from concurry import wait, ReturnWhen
 
             # Wait for list of futures (most common)
             futures = [worker.task(i) for i in range(10)]
@@ -246,7 +248,10 @@ def wait(
             done, not_done = wait(futures_dict)
 
             # Return when first completes
-            done, not_done = wait(futures, return_when=FIRST_COMPLETED)
+            done, not_done = wait(futures, return_when=ReturnWhen.FIRST_COMPLETED)
+
+            # Or use string
+            done, not_done = wait(futures, return_when="first_completed")
             ```
 
         Multiple individual futures:
@@ -289,10 +294,9 @@ def wait(
             done, not_done = wait(nested, recurse=True)
             ```
     """
-    # Validate return_when
-    valid_conditions = {ALL_COMPLETED, FIRST_COMPLETED, FIRST_EXCEPTION}
-    if return_when not in valid_conditions:
-        raise ValueError(f"Invalid return_when: {return_when}. Must be one of: {', '.join(valid_conditions)}")
+    # Convert string to ReturnWhen enum if needed
+    if isinstance(return_when, str):
+        return_when = ReturnWhen(return_when)
 
     # Validate usage: can't mix structure and *futs
     if len(futs) > 0 and isinstance(fs, (list, tuple, set, dict)):
@@ -340,7 +344,7 @@ def wait(
     # Create polling strategy
     if isinstance(polling, str):
         polling = PollingAlgorithm(polling)
-    strategy = create_polling_strategy(polling)
+    strategy = Poller(polling)
 
     # Create progress tracker
     total = len(futures_list)
@@ -354,12 +358,12 @@ def wait(
     _update_progress(tracker, len(done), total, time.time() - start_time)
 
     # Check if we can return early
-    if return_when == FIRST_COMPLETED and len(done) > 0:
+    if return_when == ReturnWhen.FIRST_COMPLETED and len(done) > 0:
         if isinstance(tracker, ProgressBar):
             tracker.success()
         return done, not_done
 
-    if return_when == FIRST_EXCEPTION:
+    if return_when == ReturnWhen.FIRST_EXCEPTION:
         for fut in done:
             try:
                 if fut.exception(timeout=0) is not None:
@@ -369,7 +373,7 @@ def wait(
             except Exception:
                 pass
 
-    if return_when == ALL_COMPLETED and len(not_done) == 0:
+    if return_when == ReturnWhen.ALL_COMPLETED and len(not_done) == 0:
         if isinstance(tracker, ProgressBar):
             tracker.success()
         return done, not_done
@@ -398,12 +402,12 @@ def wait(
             _update_progress(tracker, len(done), total, elapsed)
 
             # Check return conditions
-            if return_when == FIRST_COMPLETED:
+            if return_when == ReturnWhen.FIRST_COMPLETED:
                 if isinstance(tracker, ProgressBar):
                     tracker.success()
                 return done, not_done
 
-            if return_when == FIRST_EXCEPTION:
+            if return_when == ReturnWhen.FIRST_EXCEPTION:
                 for fut in newly_done:
                     try:
                         if fut.exception(timeout=0) is not None:
@@ -413,7 +417,7 @@ def wait(
                     except Exception:
                         pass
 
-            if return_when == ALL_COMPLETED and len(not_done) == 0:
+            if return_when == ReturnWhen.ALL_COMPLETED and len(not_done) == 0:
                 if isinstance(tracker, ProgressBar):
                     tracker.success()
                 return done, not_done
@@ -591,7 +595,11 @@ def _gather_blocking_backend(
 
         # Wait for all futures
         done, not_done = wait(
-            futures_list, timeout=timeout, return_when=ALL_COMPLETED, polling=polling, progress=progress
+            futures_list,
+            timeout=timeout,
+            return_when=ReturnWhen.ALL_COMPLETED,
+            polling=polling,
+            progress=progress,
         )
 
         if len(not_done) > 0:
@@ -619,7 +627,11 @@ def _gather_blocking_backend(
 
         # Wait for all futures
         done, not_done = wait(
-            futures_list, timeout=timeout, return_when=ALL_COMPLETED, polling=polling, progress=progress
+            futures_list,
+            timeout=timeout,
+            return_when=ReturnWhen.ALL_COMPLETED,
+            polling=polling,
+            progress=progress,
         )
 
         if len(not_done) > 0:
@@ -669,7 +681,11 @@ def _gather_blocking_backend(
         if len(all_futures) > 0:
             # Wait for all to complete
             done, not_done = wait(
-                all_futures, timeout=timeout, return_when=ALL_COMPLETED, polling=polling, progress=progress
+                all_futures,
+                timeout=timeout,
+                return_when=ReturnWhen.ALL_COMPLETED,
+                polling=polling,
+                progress=progress,
             )
 
             if len(not_done) > 0:
@@ -691,7 +707,11 @@ def _gather_blocking_backend(
 
         # Wait for all futures
         done, not_done = wait(
-            futures_list, timeout=timeout, return_when=ALL_COMPLETED, polling=polling, progress=progress
+            futures_list,
+            timeout=timeout,
+            return_when=ReturnWhen.ALL_COMPLETED,
+            polling=polling,
+            progress=progress,
         )
 
         if len(not_done) > 0:
@@ -794,7 +814,7 @@ def _gather_iter_backend(
     # Create polling strategy
     if isinstance(polling, str):
         polling = PollingAlgorithm(polling)
-    strategy = create_polling_strategy(polling)
+    strategy = Poller(polling)
 
     # Create progress tracker
     tracker = _create_progress_tracker(progress, total, "Gathering")

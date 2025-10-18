@@ -142,7 +142,7 @@ class TestWaitBasics:
     def test_wait_invalid_return_when(self):
         """Test error on invalid return_when."""
         fut = SyncFuture(result_value=1)
-        with pytest.raises(ValueError, match="Invalid return_when"):
+        with pytest.raises(ValueError, match="Could not find enum"):
             wait(fut, return_when="INVALID_CONDITION")
 
 

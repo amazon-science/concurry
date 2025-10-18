@@ -5,15 +5,20 @@ from abc import ABC, abstractmethod
 from collections import deque
 from typing import Deque, List, Optional
 
-from ..config import RateLimitAlgorithm
+from morphic import MutableTyped, Registry
+from pydantic import ConfigDict, PrivateAttr
+
+from ..constants import RateLimitAlgorithm
 
 
-class BaseRateLimiter(ABC):
+class BaseRateLimiter(Registry, MutableTyped, ABC):
     """Abstract base class for rate limiting implementations.
 
     Provides a unified interface for different rate limiting algorithms.
     All algorithm implementations should inherit from this class.
     """
+
+    model_config = ConfigDict(extra="ignore")
 
     @abstractmethod
     def acquire(self, tokens: int = 1, timeout: Optional[float] = None) -> bool:
@@ -86,39 +91,40 @@ class TokenBucketLimiter(BaseRateLimiter):
     Best for: APIs that allow occasional bursts but need average rate control.
     """
 
-    def __init__(self, max_rate: float, capacity: int):
-        """Initialize token bucket limiter.
+    aliases = ["token_bucket", "token", RateLimitAlgorithm.TokenBucket]
 
-        Args:
-            max_rate: Token generation rate (tokens per second)
-            capacity: Maximum bucket capacity (max burst size)
-        """
-        self.max_rate = max_rate
-        self.capacity = capacity
-        self.tokens = float(capacity)
-        self.last_update = time.time()
+    max_rate: float
+    capacity: int
 
-    def _refill(self):
+    _tokens: float = PrivateAttr()
+    _last_update: float = PrivateAttr()
+
+    def post_initialize(self) -> None:
+        """Initialize private attributes after validation."""
+        self._tokens = float(self.capacity)
+        self._last_update = time.time()
+
+    def _refill(self) -> None:
         """Refill the bucket based on elapsed time."""
         now = time.time()
-        elapsed = now - self.last_update
+        elapsed = now - self._last_update
 
         # Add tokens based on elapsed time
         tokens_to_add = elapsed * self.max_rate
-        self.tokens = min(self.capacity, self.tokens + tokens_to_add)
-        self.last_update = now
+        self._tokens = min(self.capacity, self._tokens + tokens_to_add)
+        self._last_update = now
 
     def can_acquire(self, tokens: int = 1) -> bool:
         """Check if tokens can be acquired without consuming them."""
         self._refill()
-        return self.tokens >= tokens
+        return self._tokens >= tokens
 
     def try_acquire(self, tokens: int = 1) -> bool:
         """Try to acquire tokens without blocking."""
         self._refill()
 
-        if self.tokens >= tokens:
-            self.tokens -= tokens
+        if self._tokens >= tokens:
+            self._tokens -= tokens
             return True
         return False
 
@@ -138,7 +144,7 @@ class TokenBucketLimiter(BaseRateLimiter):
 
             # Calculate wait time until we'll have enough tokens
             self._refill()
-            tokens_needed = tokens - self.tokens
+            tokens_needed = tokens - self._tokens
             wait_time = tokens_needed / self.max_rate if tokens_needed > 0 else 0.01
 
             if timeout is not None:
@@ -152,10 +158,10 @@ class TokenBucketLimiter(BaseRateLimiter):
         self._refill()
         return {
             "algorithm": "token_bucket",
-            "available_tokens": self.tokens,
+            "available_tokens": self._tokens,
             "capacity": self.capacity,
             "max_rate": self.max_rate,
-            "utilization": 1.0 - (self.tokens / self.capacity),
+            "utilization": 1.0 - (self._tokens / self.capacity),
         }
 
     def refund(self, tokens: int) -> None:
@@ -166,7 +172,7 @@ class TokenBucketLimiter(BaseRateLimiter):
         Args:
             tokens: Number of tokens to refund
         """
-        self.tokens = min(self.capacity, self.tokens + tokens)
+        self._tokens = min(self.capacity, self._tokens + tokens)
 
 
 class LeakyBucketLimiter(BaseRateLimiter):
@@ -178,43 +184,44 @@ class LeakyBucketLimiter(BaseRateLimiter):
     Best for: Scenarios requiring smooth, predictable traffic flow.
     """
 
-    def __init__(self, max_rate: float, capacity: int):
-        """Initialize leaky bucket limiter.
+    aliases = ["leaky_bucket", "leaky", RateLimitAlgorithm.LeakyBucket]
 
-        Args:
-            max_rate: Processing rate (requests per second)
-            capacity: Maximum queue size
-        """
-        self.max_rate = max_rate
-        self.capacity = capacity
-        self.queue: Deque[float] = deque()
-        self.last_leak = time.time()
+    max_rate: float
+    capacity: int
 
-    def _leak(self):
+    _queue: Deque[float] = PrivateAttr()
+    _last_leak: float = PrivateAttr()
+
+    def post_initialize(self) -> None:
+        """Initialize private attributes after validation."""
+        self._queue = deque()
+        self._last_leak = time.time()
+
+    def _leak(self) -> None:
         """Process (leak) requests from the queue."""
         now = time.time()
-        elapsed = now - self.last_leak
+        elapsed = now - self._last_leak
 
         # Calculate how many items to leak
         items_to_leak = int(elapsed * self.max_rate)
 
-        for _ in range(min(items_to_leak, len(self.queue))):
-            self.queue.popleft()
+        for _ in range(min(items_to_leak, len(self._queue))):
+            self._queue.popleft()
 
-        self.last_leak = now
+        self._last_leak = now
 
     def can_acquire(self, tokens: int = 1) -> bool:
         """Check if tokens can be acquired without consuming them."""
         self._leak()
-        return len(self.queue) + tokens <= self.capacity
+        return len(self._queue) + tokens <= self.capacity
 
     def try_acquire(self, tokens: int = 1) -> bool:
         """Try to add to the queue."""
         self._leak()
 
-        if len(self.queue) + tokens <= self.capacity:
+        if len(self._queue) + tokens <= self.capacity:
             for _ in range(tokens):
-                self.queue.append(time.time())
+                self._queue.append(time.time())
             return True
         return False
 
@@ -248,10 +255,10 @@ class LeakyBucketLimiter(BaseRateLimiter):
         self._leak()
         return {
             "algorithm": "leaky_bucket",
-            "queue_size": len(self.queue),
+            "queue_size": len(self._queue),
             "capacity": self.capacity,
             "max_rate": self.max_rate,
-            "utilization": len(self.queue) / self.capacity if self.capacity > 0 else 0,
+            "utilization": len(self._queue) / self.capacity if self.capacity > 0 else 0,
         }
 
     def refund(self, tokens: int) -> None:
@@ -276,35 +283,35 @@ class SlidingWindowLimiter(BaseRateLimiter):
     Best for: Precise rate limiting without fixed window edge cases.
     """
 
-    def __init__(self, max_rate: float, window_seconds: float = 1.0):
-        """Initialize sliding window limiter.
+    aliases = ["sliding_window", "sliding", RateLimitAlgorithm.SlidingWindow]
 
-        Args:
-            max_rate: Maximum requests per window
-            window_seconds: Window duration in seconds
-        """
-        self.max_rate = max_rate
-        self.window_seconds = window_seconds
-        self.requests: List[float] = []
+    max_rate: float
+    window_seconds: float = 1.0
 
-    def _cleanup_old_requests(self):
+    _requests: List[float] = PrivateAttr()
+
+    def post_initialize(self) -> None:
+        """Initialize private attributes after validation."""
+        self._requests = []
+
+    def _cleanup_old_requests(self) -> None:
         """Remove requests outside the current window."""
         cutoff_time = time.time() - self.window_seconds
-        self.requests = [ts for ts in self.requests if ts > cutoff_time]
+        self._requests = [ts for ts in self._requests if ts > cutoff_time]
 
     def can_acquire(self, tokens: int = 1) -> bool:
         """Check if tokens can be acquired without consuming them."""
         self._cleanup_old_requests()
-        return len(self.requests) + tokens <= self.max_rate
+        return len(self._requests) + tokens <= self.max_rate
 
     def try_acquire(self, tokens: int = 1) -> bool:
         """Try to acquire without blocking."""
         self._cleanup_old_requests()
 
-        if len(self.requests) + tokens <= self.max_rate:
+        if len(self._requests) + tokens <= self.max_rate:
             now = time.time()
             for _ in range(tokens):
-                self.requests.append(now)
+                self._requests.append(now)
             return True
         return False
 
@@ -325,8 +332,8 @@ class SlidingWindowLimiter(BaseRateLimiter):
             # Wait for oldest request to age out
             self._cleanup_old_requests()
 
-            if self.requests:
-                oldest = self.requests[0]
+            if len(self._requests) > 0:
+                oldest = self._requests[0]
                 wait_time = (oldest + self.window_seconds) - time.time()
                 wait_time = max(0.01, wait_time)
             else:
@@ -344,11 +351,11 @@ class SlidingWindowLimiter(BaseRateLimiter):
         self._cleanup_old_requests()
         return {
             "algorithm": "sliding_window",
-            "current_requests": len(self.requests),
+            "current_requests": len(self._requests),
             "max_rate": self.max_rate,
             "window_seconds": self.window_seconds,
-            "available": self.max_rate - len(self.requests),
-            "utilization": len(self.requests) / self.max_rate if self.max_rate > 0 else 0,
+            "available": self.max_rate - len(self._requests),
+            "utilization": len(self._requests) / self.max_rate if self.max_rate > 0 else 0,
         }
 
     def refund(self, tokens: int) -> None:
@@ -373,36 +380,37 @@ class FixedWindowLimiter(BaseRateLimiter):
     Best for: Simple rate limiting where edge cases are acceptable.
     """
 
-    def __init__(self, max_rate: float, window_seconds: float = 1.0):
-        """Initialize fixed window limiter.
+    aliases = ["fixed_window", "fixed", RateLimitAlgorithm.FixedWindow]
 
-        Args:
-            max_rate: Maximum requests per window
-            window_seconds: Window duration in seconds
-        """
-        self.max_rate = max_rate
-        self.window_seconds = window_seconds
-        self.window_start = time.time()
-        self.request_count = 0
+    max_rate: float
+    window_seconds: float = 1.0
 
-    def _check_window_reset(self):
+    _window_start: float = PrivateAttr()
+    _request_count: int = PrivateAttr(default=0)
+
+    def post_initialize(self) -> None:
+        """Initialize private attributes after validation."""
+        self._window_start = time.time()
+        self._request_count = 0
+
+    def _check_window_reset(self) -> None:
         """Reset counter if window has passed."""
         now = time.time()
-        if now - self.window_start >= self.window_seconds:
-            self.window_start = now
-            self.request_count = 0
+        if now - self._window_start >= self.window_seconds:
+            self._window_start = now
+            self._request_count = 0
 
     def can_acquire(self, tokens: int = 1) -> bool:
         """Check if tokens can be acquired without consuming them."""
         self._check_window_reset()
-        return self.request_count + tokens <= self.max_rate
+        return self._request_count + tokens <= self.max_rate
 
     def try_acquire(self, tokens: int = 1) -> bool:
         """Try to acquire without blocking."""
         self._check_window_reset()
 
-        if self.request_count + tokens <= self.max_rate:
-            self.request_count += tokens
+        if self._request_count + tokens <= self.max_rate:
+            self._request_count += tokens
             return True
         return False
 
@@ -422,7 +430,7 @@ class FixedWindowLimiter(BaseRateLimiter):
 
             # Wait for window to reset
             self._check_window_reset()
-            wait_time = (self.window_start + self.window_seconds) - time.time()
+            wait_time = (self._window_start + self.window_seconds) - time.time()
             wait_time = max(0.01, wait_time)
 
             if timeout is not None:
@@ -437,11 +445,11 @@ class FixedWindowLimiter(BaseRateLimiter):
         self._check_window_reset()
         return {
             "algorithm": "fixed_window",
-            "current_requests": self.request_count,
+            "current_requests": self._request_count,
             "max_rate": self.max_rate,
             "window_seconds": self.window_seconds,
-            "available": self.max_rate - self.request_count,
-            "utilization": self.request_count / self.max_rate if self.max_rate > 0 else 0,
+            "available": self.max_rate - self._request_count,
+            "utilization": self._request_count / self.max_rate if self.max_rate > 0 else 0,
         }
 
     def refund(self, tokens: int) -> None:
@@ -467,30 +475,31 @@ class GCRALimiter(BaseRateLimiter):
     Best for: Precise rate limiting with better burst handling for steady streams.
     """
 
-    def __init__(self, max_rate: float, capacity: int):
-        """Initialize GCRA limiter.
+    aliases = ["gcra", RateLimitAlgorithm.GCRA]
 
-        Args:
-            max_rate: Maximum rate (requests per second)
-            capacity: Burst capacity (maximum tokens that can accumulate)
-        """
-        self.max_rate = max_rate
-        self.capacity = capacity
+    max_rate: float
+    capacity: int
 
+    _emission_interval: float = PrivateAttr()
+    _tau: float = PrivateAttr()
+    _tat: float = PrivateAttr(default=0.0)
+
+    def post_initialize(self) -> None:
+        """Initialize private attributes after validation."""
         # Time between requests (emission interval)
-        self.emission_interval = 1.0 / max_rate if max_rate > 0 else 0
+        self._emission_interval = 1.0 / self.max_rate if self.max_rate > 0 else 0
 
         # Maximum burst time (tau)
-        self.tau = capacity * self.emission_interval
+        self._tau = self.capacity * self._emission_interval
 
         # Theoretical Arrival Time - tracks when next request should arrive
-        self.tat = 0.0
+        self._tat = 0.0
 
     def can_acquire(self, tokens: int = 1) -> bool:
         """Check if tokens can be acquired without consuming them."""
         now = time.time()
-        new_tat = max(self.tat, now) + (tokens * self.emission_interval)
-        return new_tat - now <= self.tau
+        new_tat = max(self._tat, now) + (tokens * self._emission_interval)
+        return new_tat - now <= self._tau
 
     def try_acquire(self, tokens: int = 1) -> bool:
         """Try to acquire tokens without blocking."""
@@ -498,12 +507,12 @@ class GCRALimiter(BaseRateLimiter):
 
         # Calculate new TAT if we were to accept this request
         # TAT' = max(TAT, now) + tokens * emission_interval
-        new_tat = max(self.tat, now) + (tokens * self.emission_interval)
+        new_tat = max(self._tat, now) + (tokens * self._emission_interval)
 
         # Check if request would exceed burst capacity
         # Allow if: new_tat - now <= tau (burst tolerance)
-        if new_tat - now <= self.tau:
-            self.tat = new_tat
+        if new_tat - now <= self._tau:
+            self._tat = new_tat
             return True
         return False
 
@@ -523,8 +532,8 @@ class GCRALimiter(BaseRateLimiter):
 
             # Calculate wait time
             now = time.time()
-            new_tat = max(self.tat, now) + (tokens * self.emission_interval)
-            wait_time = new_tat - now - self.tau
+            new_tat = max(self._tat, now) + (tokens * self._emission_interval)
+            wait_time = new_tat - now - self._tau
 
             if wait_time > 0:
                 if timeout is not None:
@@ -542,8 +551,8 @@ class GCRALimiter(BaseRateLimiter):
 
         # Calculate how many tokens are currently available
         # Available capacity = (TAT - now) / emission_interval
-        if self.tat > now:
-            used_capacity = (self.tat - now) / self.emission_interval
+        if self._tat > now:
+            used_capacity = (self._tat - now) / self._emission_interval
             available = max(0, self.capacity - used_capacity)
         else:
             available = self.capacity
@@ -553,7 +562,7 @@ class GCRALimiter(BaseRateLimiter):
             "available_tokens": available,
             "capacity": self.capacity,
             "max_rate": self.max_rate,
-            "emission_interval": self.emission_interval,
+            "emission_interval": self._emission_interval,
             "utilization": 1.0 - (available / self.capacity) if self.capacity > 0 else 0,
         }
 
@@ -565,8 +574,7 @@ class GCRALimiter(BaseRateLimiter):
         Args:
             tokens: Number of tokens to refund
         """
-        emission_interval = self.emission_interval
-        self.tat = max(time.time(), self.tat - (tokens * emission_interval))
+        self._tat = max(time.time(), self._tat - (tokens * self._emission_interval))
 
 
 def RateLimiter(
@@ -575,11 +583,11 @@ def RateLimiter(
     capacity: int,
     window_seconds: Optional[float] = None,
 ) -> BaseRateLimiter:
-    """Factory function to create the appropriate rate limiter.
+    """Factory function to create the appropriate rate limiter using Registry pattern.
 
     Args:
         algorithm: The rate limiting algorithm to use
-        max_rate: Maximum rate (requests per second)
+        max_rate: Maximum rate (requests per second for token/leaky bucket, total for window algorithms)
         capacity: Maximum capacity (burst size or window size)
         window_seconds: Window duration in seconds (for window-based algorithms)
 
@@ -598,15 +606,15 @@ def RateLimiter(
         )
         ```
     """
-    if algorithm == RateLimitAlgorithm.TokenBucket:
-        return TokenBucketLimiter(max_rate=max_rate, capacity=capacity)
-    elif algorithm == RateLimitAlgorithm.LeakyBucket:
-        return LeakyBucketLimiter(max_rate=max_rate, capacity=capacity)
-    elif algorithm == RateLimitAlgorithm.SlidingWindow:
-        return SlidingWindowLimiter(max_rate=capacity, window_seconds=window_seconds or 1.0)
-    elif algorithm == RateLimitAlgorithm.FixedWindow:
-        return FixedWindowLimiter(max_rate=capacity, window_seconds=window_seconds or 1.0)
-    elif algorithm == RateLimitAlgorithm.GCRA:
-        return GCRALimiter(max_rate=max_rate, capacity=capacity)
+    # For window-based algorithms, max_rate should be the total capacity within the window
+    # For token/leaky bucket, max_rate is requests per second
+    if algorithm in (RateLimitAlgorithm.SlidingWindow, RateLimitAlgorithm.FixedWindow):
+        # Use capacity as max_rate for window algorithms
+        return BaseRateLimiter.of(
+            algorithm, max_rate=capacity, capacity=capacity, window_seconds=window_seconds
+        )
     else:
-        raise ValueError(f"Unknown algorithm: {algorithm}")
+        # Use max_rate as-is for token/leaky bucket
+        return BaseRateLimiter.of(
+            algorithm, max_rate=max_rate, capacity=capacity, window_seconds=window_seconds
+        )

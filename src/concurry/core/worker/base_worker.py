@@ -8,7 +8,7 @@ from morphic import Typed, validate
 from morphic.structs import map_collection
 from pydantic import ConfigDict, PrivateAttr
 
-from ..config import ExecutionMode
+from ..constants import ExecutionMode
 from ..future import BaseFuture
 from ..limit.limit_set import LimitSet
 from ..retry import RetryAlgorithm, RetryConfig, create_retry_wrapper
@@ -604,7 +604,7 @@ class WorkerBuilder:
         Raises:
             ValueError: If configuration is invalid
         """
-        from ..config import ExecutionMode
+        from ..constants import ExecutionMode
 
         execution_mode = ExecutionMode(self._mode)
 
@@ -637,7 +637,7 @@ class WorkerBuilder:
         Returns:
             Default number of workers for the mode
         """
-        from ..config import ExecutionMode
+        from ..constants import ExecutionMode
 
         execution_mode = ExecutionMode(self._mode)
 
@@ -850,7 +850,7 @@ class WorkerBuilder:
         Raises:
             ValueError: If trying to create Ray pool with Pydantic-based class
         """
-        from ..config import ExecutionMode, LoadBalancingAlgorithm
+        from ..constants import ExecutionMode, LoadBalancingAlgorithm
         from .worker_pool import (
             InMemoryWorkerProxyPool,
             MultiprocessWorkerProxyPool,

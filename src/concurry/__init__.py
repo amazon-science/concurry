@@ -28,6 +28,7 @@ from .core import (
     RetryAlgorithm,
     RetryConfig,
     RetryValidationError,
+    ReturnWhen,
     SyncFuture,
     TaskWorker,
     Worker,
@@ -55,6 +56,7 @@ __all__ = [
     "ExecutionMode",
     "LoadBalancingAlgorithm",
     "PollingAlgorithm",
+    "ReturnWhen",
     # Worker types
     "TaskWorker",
     "Worker",

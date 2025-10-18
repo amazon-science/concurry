@@ -33,7 +33,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Union
 
-from ..config import ExecutionMode
+from ..constants import ExecutionMode
 from .acquisition import Acquisition, LimitSetAcquisition
 from .limit import CallLimit, Limit, RateLimit, ResourceLimit
 

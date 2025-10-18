@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from morphic import Typed
 from pydantic import Field, field_validator
 
-from .config import RetryAlgorithm
+from .constants import RetryAlgorithm
 
 
 class RetryValidationError(Exception):

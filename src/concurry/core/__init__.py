@@ -1,11 +1,12 @@
 """Core functionality for concurry."""
 
-from .config import (
+from .constants import (
     ExecutionMode,
     LoadBalancingAlgorithm,
     PollingAlgorithm,
     RateLimitAlgorithm,
     RetryAlgorithm,
+    ReturnWhen,
 )
 from .future import (
     AsyncioFuture,
@@ -39,6 +40,11 @@ from .synch import (
     gather,
     wait,
 )
+
+# Also export ReturnWhen for modern usage
+__all_imports = [
+    "ReturnWhen",
+]
 from .worker import TaskWorker, Worker, worker
 
 __all__ = [
@@ -54,6 +60,7 @@ __all__ = [
     "PollingAlgorithm",
     "RateLimitAlgorithm",
     "RetryAlgorithm",
+    "ReturnWhen",
     # Retry functions
     "RetryConfig",
     "RetryValidationError",

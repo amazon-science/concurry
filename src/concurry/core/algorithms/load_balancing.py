@@ -90,36 +90,75 @@ class BaseLoadBalancer(Registry, MutableTyped, ABC):
 
 
 class RoundRobinBalancer(BaseLoadBalancer):
-    """Round-robin load balancing algorithm.
+    """Round-robin load balancing algorithm with optional offset.
 
     Distributes requests evenly across workers in a circular fashion.
     Each request goes to the next worker in sequence.
+
+    Supports a configurable starting offset, enabling multiple workers to start
+    at different positions in the round-robin cycle. This minimizes contention
+    when many workers are competing for the same resources.
+
+    The offset is added to the counter before modulo operation, so:
+    - Balancer with offset 0: selects 0, 1, 2, 0, 1, 2, ...
+    - Balancer with offset 1: selects 1, 2, 0, 1, 2, 0, ...
+    - Balancer with offset 2: selects 2, 0, 1, 2, 0, 1, ...
+
+    This distributes starting points evenly and reduces the probability of
+    multiple workers selecting the same resource simultaneously.
 
     Characteristics:
         - Simple and fast (O(1) selection)
         - Fair distribution over time
         - No consideration of worker load or health
         - Thread-safe via atomic counter
+        - Configurable offset for distributed starting points
 
     Best For:
         - Homogeneous workers with similar capabilities
         - Tasks with similar execution times
+        - Multi-worker scenarios where offset helps reduce contention
         - When simplicity is preferred
 
+    Attributes:
+        offset: Starting position in the round-robin cycle (default: 0)
+
     Example:
-        ```python
-        balancer = RoundRobinBalancer.of()
-        # First call -> worker 0
-        # Second call -> worker 1
-        # Third call -> worker 2
-        # Fourth call -> worker 0 (wraps around)
-        ```
+        Basic usage (offset=0):
+            ```python
+            balancer = RoundRobinBalancer.of()
+            # First call -> worker 0
+            # Second call -> worker 1
+            # Third call -> worker 2
+            # Fourth call -> worker 0 (wraps around)
+            ```
+
+        With offset (for multi-worker scenarios):
+            ```python
+            # Worker 0 starts at index 0
+            balancer0 = RoundRobinBalancer.of(offset=0)
+
+            # Worker 1 starts at index 1
+            balancer1 = RoundRobinBalancer.of(offset=1)
+
+            # With 3 resources:
+            # balancer0.select_worker(3) -> 0, 1, 2, 0, 1, 2, ...
+            # balancer1.select_worker(3) -> 1, 2, 0, 1, 2, 0, ...
+            ```
     """
 
     aliases = ["round_robin", "rr", LoadBalancingAlgorithm.RoundRobin]
 
+    offset: int = 0  # Starting position in round-robin cycle
+    _offset: int = PrivateAttr(default=0)
     _counter: int = PrivateAttr(default=0)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+
+    def post_initialize(self) -> None:
+        """Initialize private attributes after Typed validation."""
+        # Store offset and set counter to offset
+        self._offset = self.offset
+        self._counter = self.offset
 
     def select_worker(self, num_workers: int) -> int:
         """Select next worker in round-robin fashion."""
@@ -136,7 +175,8 @@ class RoundRobinBalancer(BaseLoadBalancer):
         with self._lock:
             return {
                 "algorithm": "RoundRobin",
-                "total_dispatched": self._counter,
+                "offset": self._offset,
+                "total_dispatched": self._counter - self._offset,
             }
 
 

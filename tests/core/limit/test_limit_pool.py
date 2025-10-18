@@ -186,7 +186,7 @@ class TestLimitPoolLoadBalancing:
 
         stats = pool.get_stats()
         assert "balancer_stats" in stats
-        assert stats["balancer_stats"]["algorithm"] == "RoundRobinWithOffset"
+        assert stats["balancer_stats"]["algorithm"] == "RoundRobin"
         assert stats["balancer_stats"]["offset"] == 5
         assert stats["balancer_stats"]["total_dispatched"] == 3
 
@@ -283,7 +283,7 @@ class TestLimitPoolStats:
 
         # Check balancer stats
         assert "balancer_stats" in stats
-        assert stats["balancer_stats"]["algorithm"] == "RoundRobinWithOffset"
+        assert stats["balancer_stats"]["algorithm"] == "RoundRobin"
 
         # Check per-LimitSet stats
         assert len(stats["limit_sets"]) == 3

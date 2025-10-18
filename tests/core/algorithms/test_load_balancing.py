@@ -45,6 +45,7 @@ class TestRoundRobinBalancer:
 
         stats = balancer.get_stats()
         assert stats["algorithm"] == "RoundRobin"
+        assert stats["offset"] == 0
         assert stats["total_dispatched"] == 10
 
     def test_round_robin_invalid_num_workers(self):
@@ -56,6 +57,54 @@ class TestRoundRobinBalancer:
 
         with pytest.raises(ValueError, match="num_workers must be positive"):
             balancer.select_worker(-1)
+
+    def test_round_robin_with_offset(self):
+        """Test round-robin with different starting offsets."""
+        # Balancer with offset 0
+        balancer0 = RoundRobinBalancer.of(offset=0)
+        # Balancer with offset 1
+        balancer1 = RoundRobinBalancer.of(offset=1)
+        # Balancer with offset 2
+        balancer2 = RoundRobinBalancer.of(offset=2)
+
+        num_workers = 3
+
+        # Each balancer should start at a different position
+        selections0 = [balancer0.select_worker(num_workers) for _ in range(6)]
+        selections1 = [balancer1.select_worker(num_workers) for _ in range(6)]
+        selections2 = [balancer2.select_worker(num_workers) for _ in range(6)]
+
+        # Balancer 0 starts at 0: 0, 1, 2, 0, 1, 2
+        assert selections0 == [0, 1, 2, 0, 1, 2]
+        # Balancer 1 starts at 1: 1, 2, 0, 1, 2, 0
+        assert selections1 == [1, 2, 0, 1, 2, 0]
+        # Balancer 2 starts at 2: 2, 0, 1, 2, 0, 1
+        assert selections2 == [2, 0, 1, 2, 0, 1]
+
+    def test_round_robin_offset_stats(self):
+        """Test that stats correctly show offset and total_dispatched."""
+        balancer = RoundRobinBalancer.of(offset=5)
+
+        # Make 10 selections
+        for _ in range(10):
+            balancer.select_worker(3)
+
+        stats = balancer.get_stats()
+        assert stats["algorithm"] == "RoundRobin"
+        assert stats["offset"] == 5
+        assert stats["total_dispatched"] == 10  # Should be calls made, not including offset
+
+    def test_round_robin_large_offset(self):
+        """Test round-robin with large offset wraps correctly."""
+        balancer = RoundRobinBalancer.of(offset=100)
+        num_workers = 3
+
+        # With offset 100 and 3 workers:
+        # First selection: (100) % 3 = 1
+        # Second selection: (101) % 3 = 2
+        # Third selection: (102) % 3 = 0
+        selections = [balancer.select_worker(num_workers) for _ in range(6)]
+        assert selections == [1, 2, 0, 1, 2, 0]
 
 
 class TestLeastActiveLoadBalancer:

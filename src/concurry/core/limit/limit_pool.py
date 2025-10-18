@@ -74,65 +74,6 @@ from .acquisition import LimitSetAcquisition
 from .limit_set import BaseLimitSet
 
 
-class RoundRobinBalancerWithOffset(RoundRobinBalancer):
-    """Round-robin load balancer with configurable starting offset.
-
-    Note: This is an internal helper class and not registered in the Registry.
-
-    Extends the standard RoundRobinBalancer to support a starting offset,
-    enabling multiple workers to start at different positions in the round-robin
-    cycle. This minimizes contention when many workers are competing for the
-    same LimitSets.
-
-    The offset is added to the counter before modulo operation, so:
-    - Worker 0 with offset 0: selects 0, 1, 2, 0, 1, 2, ...
-    - Worker 1 with offset 1: selects 1, 2, 0, 1, 2, 0, ...
-    - Worker 2 with offset 2: selects 2, 0, 1, 2, 0, 1, ...
-
-    This distributes starting points evenly and reduces the probability of
-    multiple workers selecting the same LimitSet simultaneously.
-
-    Attributes:
-        algorithm: LoadBalancingAlgorithm.RoundRobin
-        offset: Starting position in the round-robin cycle
-
-    Example:
-        ```python
-        # Worker 0 starts at index 0
-        balancer0 = RoundRobinBalancerWithOffset(offset=0)
-
-        # Worker 1 starts at index 1
-        balancer1 = RoundRobinBalancerWithOffset(offset=1)
-
-        # With 3 LimitSets:
-        # balancer0.select_worker(3) -> 0, 1, 2, 0, 1, 2, ...
-        # balancer1.select_worker(3) -> 1, 2, 0, 1, 2, 0, ...
-        ```
-    """
-
-    _dont_register = True  # Don't register this internal helper class
-    aliases = []  # Clear parent aliases to avoid conflicts
-
-    offset: int = 0  # Starting position in round-robin cycle
-    _offset: int = PrivateAttr(default=0)
-
-    def post_initialize(self) -> None:
-        """Initialize private attributes after Typed validation."""
-        super().post_initialize()
-        # Store offset and reset counter to offset
-        self._offset = self.offset
-        self._counter = self.offset
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Get round-robin with offset statistics."""
-        with self._lock:
-            return {
-                "algorithm": "RoundRobinWithOffset",
-                "offset": self._offset,
-                "total_dispatched": self._counter - self._offset,
-            }
-
-
 class LimitPool(Typed):
     """Private wrapper for load-balanced selection across multiple LimitSets.
 
@@ -225,8 +166,8 @@ class LimitPool(Typed):
         if self.load_balancing == LoadBalancingAlgorithm.Random:
             balancer = RandomBalancer()
         elif self.load_balancing == LoadBalancingAlgorithm.RoundRobin:
-            # Use custom balancer with offset support
-            balancer = RoundRobinBalancerWithOffset(offset=self.worker_index)
+            # Use RoundRobinBalancer with offset support
+            balancer = RoundRobinBalancer(offset=self.worker_index)
         else:
             raise ValueError(
                 f"Unsupported load balancing algorithm for LimitPool: {self.load_balancing}. "
@@ -416,7 +357,7 @@ class LimitPool(Typed):
         if self.load_balancing == LoadBalancingAlgorithm.Random:
             balancer = RandomBalancer()
         elif self.load_balancing == LoadBalancingAlgorithm.RoundRobin:
-            balancer = RoundRobinBalancerWithOffset(offset=self.worker_index)
+            balancer = RoundRobinBalancer(offset=self.worker_index)
         else:
             raise ValueError(f"Unknown load balancing algorithm: {self.load_balancing}")
 

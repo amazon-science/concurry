@@ -12,6 +12,7 @@ from concurry.core.future import (
     ConcurrentFuture,
     SyncFuture,
 )
+from concurry.core.future import CancelledError as ImportedCancelledError
 
 
 class TestFutureExceptionTypes:
@@ -100,8 +101,6 @@ class TestFutureExceptionTypes:
 
     def test_exception_types_are_from_concurrent_futures(self):
         """Verify we're using the concurrent.futures exception types."""
-        from concurry.core.future import CancelledError as ImportedCancelledError
-
         # Verify CancelledError is from concurrent.futures
         assert ImportedCancelledError is concurrent.futures.CancelledError
 

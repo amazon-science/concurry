@@ -1,17 +1,25 @@
 """Worker implementation for concurry."""
 
+import threading
 import warnings
 from abc import ABC
-from typing import Any, Callable, Optional, Type, TypeVar
+from typing import Any, Callable, ClassVar, Optional, Type, TypeVar
 
 from morphic import Typed, validate
 from morphic.structs import map_collection
 from pydantic import ConfigDict, PrivateAttr
 
-from ..constants import ExecutionMode
+from ..constants import ExecutionMode, LoadBalancingAlgorithm
 from ..future import BaseFuture
+from ..limit.limit_pool import LimitPool
 from ..limit.limit_set import LimitSet
-from ..retry import RetryAlgorithm, RetryConfig, create_retry_wrapper
+from ..retry import (
+    RetryAlgorithm,
+    RetryConfig,
+    create_retry_wrapper,
+    execute_with_retry,
+    execute_with_retry_async,
+)
 
 T = TypeVar("T")
 
@@ -65,7 +73,11 @@ def _transform_worker_limits(
         # Wrap in LimitPool (unless it's a list for remote creation)
         if isinstance(empty_limitset, list):
             return empty_limitset  # Will be wrapped in LimitPool by _create_worker_wrapper
-        return LimitPool(limit_sets=[empty_limitset], load_balancing="round_robin", worker_index=worker_index)
+        return LimitPool(
+            limit_sets=[empty_limitset],
+            load_balancing=LoadBalancingAlgorithm.RoundRobin,
+            worker_index=worker_index,
+        )
 
     # Case 2: Already a LimitPool -> pass through or validate
     if isinstance(limits, LimitPool):
@@ -82,7 +94,9 @@ def _transform_worker_limits(
                     return []  # Will be wrapped remotely
                 empty_limitset = LimitSet(limits=[], shared=False, mode=ExecutionMode.Sync)
             return LimitPool(
-                limit_sets=[empty_limitset], load_balancing="round_robin", worker_index=worker_index
+                limit_sets=[empty_limitset],
+                load_balancing=LoadBalancingAlgorithm.RoundRobin,
+                worker_index=worker_index,
             )
 
         # Check if List[Limit]
@@ -94,7 +108,11 @@ def _transform_worker_limits(
                 if mode in (ExecutionMode.Ray, ExecutionMode.Processes):
                     return limits  # Keep as list, will be wrapped remotely
                 limitset = LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync)
-            return LimitPool(limit_sets=[limitset], load_balancing="round_robin", worker_index=worker_index)
+            return LimitPool(
+                limit_sets=[limitset],
+                load_balancing=LoadBalancingAlgorithm.RoundRobin,
+                worker_index=worker_index,
+            )
 
         # Check if List[LimitSet]
         if all(isinstance(item, BaseLimitSet) for item in limits):
@@ -124,7 +142,9 @@ def _transform_worker_limits(
                             f"RaySharedLimitSet is not compatible with worker mode '{mode}'. "
                             f"Use mode='ray' workers."
                         )
-            return LimitPool(limit_sets=limits, load_balancing="round_robin", worker_index=worker_index)
+            return LimitPool(
+                limit_sets=limits, load_balancing=LoadBalancingAlgorithm.RoundRobin, worker_index=worker_index
+            )
 
         raise ValueError("List must contain either all Limit objects or all LimitSet objects")
 
@@ -158,7 +178,9 @@ def _transform_worker_limits(
                 )
                 new_limitset = LimitSet(limits=limits_list, shared=False, mode=ExecutionMode.Sync)
                 return LimitPool(
-                    limit_sets=[new_limitset], load_balancing="round_robin", worker_index=worker_index
+                    limit_sets=[new_limitset],
+                    load_balancing=LoadBalancingAlgorithm.RoundRobin,
+                    worker_index=worker_index,
                 )
 
         # Shared LimitSet - validate mode compatibility
@@ -180,7 +202,9 @@ def _transform_worker_limits(
                     f"RaySharedLimitSet is not compatible with worker mode '{mode}'. Use mode='ray' workers."
                 )
 
-        return LimitPool(limit_sets=[limits], load_balancing="round_robin", worker_index=worker_index)
+        return LimitPool(
+            limit_sets=[limits], load_balancing=LoadBalancingAlgorithm.RoundRobin, worker_index=worker_index
+        )
 
     raise ValueError(
         f"limits parameter must be None, LimitSet, LimitPool, List[Limit], or List[LimitSet], "
@@ -269,13 +293,13 @@ def _create_worker_wrapper(
                 # Always set limits (may be empty)
                 # If limits is a list, create LimitSet and wrap in LimitPool (inside actor/process)
                 if isinstance(limits, list):
-                    from ..limit.limit_pool import LimitPool
-
                     # Create private LimitSet with mode=sync (uses threading.Lock, works everywhere)
                     limit_set = LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync)
                     # Wrap in LimitPool with worker_index=0 (single worker)
                     limit_pool = LimitPool(
-                        limit_sets=[limit_set], load_balancing="round_robin", worker_index=0
+                        limit_sets=[limit_set],
+                        load_balancing=LoadBalancingAlgorithm.RoundRobin,
+                        worker_index=0,
                     )
                 else:
                     # Already a LimitPool, use it directly
@@ -297,12 +321,12 @@ def _create_worker_wrapper(
             # Always set limits (may be empty)
             # If limits is a list, create LimitSet and wrap in LimitPool (inside actor/process)
             if isinstance(limits, list):
-                from ..limit.limit_pool import LimitPool
-
                 # Create private LimitSet with mode=sync (uses threading.Lock, works everywhere)
                 limit_set = LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync)
                 # Wrap in LimitPool with worker_index=0 (single worker)
-                limit_pool = LimitPool(limit_sets=[limit_set], load_balancing="round_robin", worker_index=0)
+                limit_pool = LimitPool(
+                    limit_sets=[limit_set], load_balancing=LoadBalancingAlgorithm.RoundRobin, worker_index=0
+                )
             else:
                 # Already a LimitPool, use it directly
                 limit_pool = limits
@@ -387,8 +411,6 @@ def _create_worker_wrapper(
                     if is_async:
 
                         async def async_method_wrapper(self, *args, **kwargs):
-                            from ..retry import execute_with_retry_async
-
                             context = {
                                 "method_name": method_name,
                                 "worker_class_name": worker_cls.__name__,
@@ -404,8 +426,6 @@ def _create_worker_wrapper(
                     else:
 
                         def sync_method_wrapper(self, *args, **kwargs):
-                            from ..retry import execute_with_retry
-
                             context = {
                                 "method_name": method_name,
                                 "worker_class_name": worker_cls.__name__,
@@ -513,15 +533,16 @@ class WorkerBuilder:
     def __init__(
         self,
         worker_cls: Type["Worker"],
-        mode: str,
+        mode: ExecutionMode,
         blocking: bool = False,
         max_workers: Optional[int] = None,
-        load_balancing: Optional[str] = None,
+        load_balancing: Optional[LoadBalancingAlgorithm] = None,
         on_demand: bool = False,
+        max_queued_tasks: Optional[int] = None,
         # Retry parameters
         num_retries: int = 0,
         retry_on: Optional[Any] = None,
-        retry_algorithm: str = "exponential",
+        retry_algorithm: RetryAlgorithm = RetryAlgorithm.Exponential,
         retry_wait: float = 1.0,
         retry_jitter: float = 0.3,
         retry_until: Optional[Any] = None,
@@ -560,12 +581,26 @@ class WorkerBuilder:
                 "Example: Worker.options(mode='thread').init(key1=val1, key2=val2)"
             )
 
+        mode: ExecutionMode = ExecutionMode(mode)
+        # Note: Do NOT set default max_workers here - None means single worker
+        # Defaults are only used when explicitly creating a pool (_should_create_pool returns True)
+
+        # Determine max_queued_tasks (use defaults if not specified)
+        if max_queued_tasks is None:
+            max_queued_tasks: Optional[int] = self._get_default_max_queued_tasks(mode)
+
+        # Determine load_balancing algorithm
+        if load_balancing is None:
+            load_balancing: LoadBalancingAlgorithm = self._get_default_load_balancing(on_demand)
+        load_balancing: LoadBalancingAlgorithm = LoadBalancingAlgorithm(load_balancing)
+
         self._worker_cls = worker_cls
         self._mode = mode
         self._blocking = blocking
         self._max_workers = max_workers
         self._load_balancing = load_balancing
         self._on_demand = on_demand
+        self._max_queued_tasks = max_queued_tasks
         self._num_retries = num_retries
         self._retry_on = retry_on
         self._retry_algorithm = retry_algorithm
@@ -604,9 +639,7 @@ class WorkerBuilder:
         Raises:
             ValueError: If configuration is invalid
         """
-        from ..constants import ExecutionMode
-
-        execution_mode = ExecutionMode(self._mode)
+        execution_mode = self._mode
 
         # Validate max_workers for different modes
         if self._max_workers is not None:
@@ -631,16 +664,13 @@ class WorkerBuilder:
                 # This is valid for Thread, Process, and Ray
                 pass
 
-    def _get_default_max_workers(self) -> int:
+    @classmethod
+    def _get_default_max_workers(cls, execution_mode: ExecutionMode) -> int:
         """Get default max_workers for pool based on mode.
 
         Returns:
             Default number of workers for the mode
         """
-        from ..constants import ExecutionMode
-
-        execution_mode = ExecutionMode(self._mode)
-
         if execution_mode == ExecutionMode.Sync:
             return 1
         elif execution_mode == ExecutionMode.Asyncio:
@@ -654,16 +684,37 @@ class WorkerBuilder:
         else:
             return 1
 
-    def _get_default_load_balancing(self) -> str:
+    @classmethod
+    def _get_default_max_queued_tasks(cls, execution_mode: ExecutionMode) -> Optional[int]:
+        """Get default submission queue length for pool based on execution mode.
+
+        Returns:
+            Default submission queue length for the mode (None for sync/asyncio to bypass queuing)
+        """
+        if execution_mode == ExecutionMode.Sync:
+            return None  # No queueing for sync mode
+        elif execution_mode == ExecutionMode.Asyncio:
+            return None  # No queueing for asyncio mode
+        elif execution_mode == ExecutionMode.Threads:
+            return 100
+        elif execution_mode == ExecutionMode.Processes:
+            return 5
+        elif execution_mode == ExecutionMode.Ray:
+            return 2
+        else:
+            raise ValueError(f"Unsupported execution mode: {execution_mode}")
+
+    @classmethod
+    def _get_default_load_balancing(cls, on_demand: bool) -> LoadBalancingAlgorithm:
         """Get default load balancing algorithm.
 
         Returns:
-            Default load balancing algorithm name
+            Default load balancing algorithm
         """
-        if self._on_demand:
-            return "random"  # Random is best for ephemeral workers
+        if on_demand:
+            return LoadBalancingAlgorithm.Random  # Random is best for ephemeral workers
         else:
-            return "round_robin"  # Round-robin is best for persistent pools
+            return LoadBalancingAlgorithm.RoundRobin  # Round-robin is best for persistent pools
 
     def _should_create_pool(self) -> bool:
         """Determine if a pool should be created.
@@ -780,7 +831,7 @@ class WorkerBuilder:
         from .thread_worker import ThreadWorkerProxy
 
         # Convert mode string to ExecutionMode
-        execution_mode = ExecutionMode(self._mode)
+        execution_mode = self._mode
 
         # Check for Ray + Pydantic incompatibility
         self._check_ray_pydantic_compatibility(execution_mode)
@@ -829,11 +880,13 @@ class WorkerBuilder:
 
         # Create proxy with init args/kwargs
         # Typed expects all parameters as keyword arguments
+        # Note: mode is NOT passed - it's a class variable set by each proxy subclass
         return proxy_cls(
             worker_cls=self._worker_cls,
             init_args=args,
             init_kwargs=kwargs,
             blocking=self._blocking,
+            max_queued_tasks=self._max_queued_tasks,
             **processed_options,
         )
 
@@ -850,7 +903,6 @@ class WorkerBuilder:
         Raises:
             ValueError: If trying to create Ray pool with Pydantic-based class
         """
-        from ..constants import ExecutionMode, LoadBalancingAlgorithm
         from .worker_pool import (
             InMemoryWorkerProxyPool,
             MultiprocessWorkerProxyPool,
@@ -862,17 +914,6 @@ class WorkerBuilder:
 
         # Check for Ray + Pydantic incompatibility
         self._check_ray_pydantic_compatibility(execution_mode)
-
-        # Determine max_workers (use defaults if not specified)
-        max_workers = self._max_workers
-        if max_workers is None:
-            max_workers = self._get_default_max_workers()
-
-        # Determine load_balancing algorithm
-        load_balancing_str = self._load_balancing
-        if load_balancing_str is None:
-            load_balancing_str = self._get_default_load_balancing()
-        load_balancing = LoadBalancingAlgorithm(load_balancing_str)
 
         # Process limits for pool (always, even if None - creates empty LimitPool)
         # Note: worker_index will be assigned per-worker in pool initialization
@@ -902,14 +943,20 @@ class WorkerBuilder:
         else:
             raise ValueError(f"Unsupported execution mode for pool: {execution_mode}")
 
+        # Apply default max_workers for pool if not specified
+        max_workers = self._max_workers
+        if max_workers is None:
+            max_workers = self._get_default_max_workers(execution_mode)
+
         # Create pool instance
         return pool_cls(
             worker_cls=self._worker_cls,
             mode=execution_mode,
             max_workers=max_workers,
-            load_balancing=load_balancing,
+            load_balancing=self._load_balancing,
             on_demand=self._on_demand,
             blocking=self._blocking,
+            max_queued_tasks=self._max_queued_tasks,
             unwrap_futures=self._options.get("unwrap_futures", True),
             limits=limits,
             init_args=args,
@@ -1276,6 +1323,48 @@ class Worker:
         # Both workers automatically stopped
         ```
 
+    Submission Queue (Client-Side Task Queuing):
+        Workers support client-side submission queuing via the `max_queued_tasks` parameter.
+        This prevents overloading worker backends when submitting large batches of tasks.
+
+        **Key Benefits:**
+        - Prevents memory exhaustion from thousands of pending futures
+        - Avoids backend overload (especially Ray actors)
+        - Reduces network saturation for distributed workers
+        - Works transparently with your submission loops
+
+        **How it works:**
+        The submission queue limits how many tasks can be "in-flight" (submitted but not completed)
+        per worker. When the queue is full, further submissions block until a task completes.
+
+        ```python
+        # Create worker with submission queue
+        worker = MyWorker.options(
+            mode="thread",
+            max_queued_tasks=10  # Max 10 tasks in-flight
+        ).init()
+
+        # Submit 1000 tasks - automatically blocks when queue is full
+        futures = [worker.process(item) for item in range(1000)]
+        results = gather(futures)  # Submission queue prevents overload
+        worker.stop()
+        ```
+
+        **Default values by mode:**
+        - sync/asyncio: None (bypassed) - immediate execution or event loop handles concurrency
+        - thread: 100 - high concurrency, large queue
+        - process: 5 - limited by CPU cores
+        - ray: 2 - minimize data transfer overhead
+
+        **Integration with other features:**
+        - **Limits**: Submission queue (client-side) + resource limits (worker-side) work together
+        - **Retries**: Only original submissions count, not retry attempts
+        - **Load Balancing**: Each worker in a pool has its own independent queue
+        - **On-Demand Workers**: Automatically bypass submission queue
+
+        For comprehensive documentation and examples, see the user guide:
+        `/docs/user-guide/limits.md#submission-queue`
+
     Resource Protection with Limits:
         Workers support resource protection and rate limiting via the `limits` parameter.
         Limits enable control over API rates, resource pools, and call frequency.
@@ -1352,15 +1441,16 @@ class Worker:
     @validate
     def options(
         cls: Type[T],
-        mode: str = "sync",
+        mode: ExecutionMode = ExecutionMode.Sync,
         blocking: bool = False,
         max_workers: Optional[int] = None,
-        load_balancing: Optional[str] = None,
+        load_balancing: Optional[LoadBalancingAlgorithm] = None,
         on_demand: bool = False,
+        max_queued_tasks: Optional[int] = None,
         # Retry parameters
         num_retries: int = 0,
         retry_on: Optional[Any] = None,
-        retry_algorithm: str = "exponential",
+        retry_algorithm: RetryAlgorithm = RetryAlgorithm.Exponential,
         retry_wait: float = 1.0,
         retry_jitter: float = 0.3,
         retry_until: Optional[Any] = None,
@@ -1402,6 +1492,15 @@ class Worker:
                 - Cannot be used with Sync/Asyncio modes
                 - With max_workers=0: Unlimited concurrent workers (Ray) or
                   limited to cpu_count()-1 (Thread/Process)
+            max_queued_tasks: Maximum number of in-flight tasks per worker (default varies by mode)
+                - Controls how many tasks can be submitted to a worker's backend before blocking
+                - Per-worker limit: each worker in a pool has its own independent queue
+                - Value of N means max N tasks submitted but not yet completed per worker
+                - Automatically bypassed in blocking mode (unlimited submissions allowed)
+                - Automatically bypassed in sync and asyncio modes
+                - Prevents overload when submitting large batches (e.g., 5000+ tasks to Ray)
+                - Default values: sync/asyncio (None), thread (100), process (5), ray (2)
+                - See user guide for detailed usage: /docs/user-guide/limits.md#submission-queue
             unwrap_futures: If True (default), automatically unwrap BaseFuture arguments
                 by calling .result() on them before passing to worker methods. This enables
                 seamless composition of workers. Set to False to pass futures as-is.
@@ -1559,6 +1658,7 @@ class Worker:
             max_workers=max_workers,
             load_balancing=load_balancing,
             on_demand=on_demand,
+            max_queued_tasks=max_queued_tasks,
             num_retries=num_retries,
             retry_on=retry_on,
             retry_algorithm=retry_algorithm,
@@ -1573,7 +1673,7 @@ class Worker:
     def pool(
         cls: Type[T],
         max_workers: Optional[int] = None,
-        mode: str = "thread",
+        mode: ExecutionMode = ExecutionMode.Threads,
         blocking: bool = False,
         **kwargs: Any,
     ) -> WorkerBuilder:
@@ -1743,11 +1843,14 @@ class WorkerProxy(Typed, ABC):
     init_kwargs: dict = {}
     limits: Optional[Any] = None  # LimitSet instance (processed by WorkerBuilder)
     retry_config: Optional[Any] = None  # RetryConfig instance (processed by WorkerBuilder)
+    max_queued_tasks: Optional[int] = None
+    mode: ClassVar[ExecutionMode]  # ExecutionMode (set by subclasses as class variable)
 
     # Private attributes (defined with PrivateAttr, initialized in post_initialize)
     _stopped: bool = PrivateAttr(default=False)
     _options: dict = PrivateAttr(default_factory=dict)
     _method_cache: dict = PrivateAttr(default_factory=dict)
+    _submission_semaphore: Optional[Any] = PrivateAttr(default=None)
 
     def post_initialize(self) -> None:
         """Initialize private attributes after Typed validation."""
@@ -1755,6 +1858,20 @@ class WorkerProxy(Typed, ABC):
         # Pydantic stores extra fields in __pydantic_extra__
         if hasattr(self, "__pydantic_extra__") and self.__pydantic_extra__:
             self._options = dict(self.__pydantic_extra__)
+
+        # Initialize submission queue semaphore
+        # Skip if blocking mode, sync mode, asyncio mode, or max_queued_tasks is None (bypass queuing)
+        # AsyncIO workers benefit from unlimited concurrent submissions since they handle
+        # concurrency via the event loop, not by blocking threads
+
+        if (
+            self.mode in (ExecutionMode.Sync, ExecutionMode.Asyncio)
+            or self.blocking
+            or self.max_queued_tasks is None
+        ):
+            self._submission_semaphore = None
+        else:
+            self._submission_semaphore = threading.BoundedSemaphore(self.max_queued_tasks)
 
         # Initialize method cache for performance
         self._method_cache = {}
@@ -1784,10 +1901,27 @@ class WorkerProxy(Typed, ABC):
         def method_wrapper(*args, **kwargs):
             # Access private attributes using Pydantic's mechanism
             # Pydantic automatically handles __pydantic_private__ lookup
+
+            # Acquire submission semaphore first (blocks if queue full)
+            # This must happen BEFORE the stopped check to avoid race condition:
+            # Without this order, a thread could check _stopped (False), then block
+            # on semaphore acquisition, then stop() is called, then thread wakes up
+            # and executes the method even though worker is stopped.
+            if self._submission_semaphore is not None:
+                self._submission_semaphore.acquire()
+
+            # Now check if stopped - this is atomic with execution because we
+            # already hold the semaphore. If stopped, release semaphore and raise.
             if self._stopped:
+                if self._submission_semaphore is not None:
+                    self._submission_semaphore.release()
                 raise RuntimeError("Worker is stopped")
 
             future = self._execute_method(name, *args, **kwargs)
+
+            # Wrap future to release semaphore on completion
+            if self._submission_semaphore is not None:
+                future = self._wrap_future_with_semaphore_release(future)
 
             if self.blocking:
                 # Return result directly (blocking)
@@ -1801,6 +1935,33 @@ class WorkerProxy(Typed, ABC):
             cache[name] = method_wrapper
 
         return method_wrapper
+
+    def _wrap_future_with_semaphore_release(self, future: BaseFuture) -> BaseFuture:
+        """Wrap a future to release submission semaphore when complete.
+
+        This ensures the semaphore is released regardless of whether the task
+        succeeded, failed, or was cancelled.
+
+        Args:
+            future: The future to wrap
+
+        Returns:
+            The same future (modified in-place with callback)
+        """
+        if self._submission_semaphore is None:
+            return future  # No semaphore to release
+
+        semaphore = self._submission_semaphore
+
+        # Use add_done_callback to release semaphore when complete
+        def release_semaphore(f):
+            try:
+                semaphore.release()
+            except Exception:
+                pass  # Ignore release errors (shouldn't happen)
+
+        future.add_done_callback(release_semaphore)
+        return future
 
     def _execute_method(self, method_name: str, *args: Any, **kwargs: Any):
         """Execute a method on the worker.

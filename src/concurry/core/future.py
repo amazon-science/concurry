@@ -763,7 +763,102 @@ class AsyncioFuture(BaseFuture):
 
 
 if _IS_RAY_INSTALLED:
+    import queue
+
     import ray
+
+    # Global monitoring infrastructure for all RayFutures
+    _ray_monitor_queue: queue.Queue = queue.Queue()
+    _ray_monitor_thread: Optional[threading.Thread] = None
+    _ray_monitor_lock = threading.Lock()
+
+    def _ray_monitor_worker() -> None:
+        """Global background thread that monitors all RayFuture ObjectRefs.
+
+        This single thread efficiently monitors multiple ObjectRefs using ray.wait(),
+        which is much more efficient than creating a thread per future.
+
+        The thread processes a queue of (object_ref, future) pairs and uses ray.wait()
+        to check which ones have completed, then invokes their callbacks.
+        """
+        # Map from ObjectRef to RayFuture for tracking
+        pending_futures: dict = {}
+
+        while True:
+            try:
+                # Collect new futures from queue (non-blocking with short timeout)
+                try:
+                    while True:
+                        object_ref, future = _ray_monitor_queue.get(timeout=0.01)
+                        if object_ref is None:  # Shutdown signal
+                            return
+                        pending_futures[object_ref] = future
+                except queue.Empty:
+                    pass
+
+                if len(pending_futures) == 0:
+                    # No futures to monitor, sleep briefly
+                    time.sleep(0.01)
+                    continue
+
+                # Check which ObjectRefs are ready (non-blocking)
+                object_refs = list(pending_futures.keys())
+                ready, _ = ray.wait(object_refs, num_returns=len(object_refs), timeout=0)
+
+                # Process completed futures
+                for object_ref in ready:
+                    future = pending_futures.pop(object_ref)
+
+                    # Fetch result/exception and invoke callbacks
+                    try:
+                        result = ray.get(object_ref, timeout=0)
+
+                        with future._lock:
+                            # Only set if not already done (e.g., by .result() call)
+                            if not future._done:
+                                future._result = result
+                                future._done = True
+                                # Invoke all callbacks
+                                for callback in future._callbacks:
+                                    try:
+                                        callback(future)
+                                    except:
+                                        pass  # Ignore callback errors
+                                future._callbacks.clear()
+
+                    except Exception as e:
+                        with future._lock:
+                            # Only set if not already done
+                            if not future._done:
+                                future._exception = e
+                                future._done = True
+                                # Invoke all callbacks even on error
+                                for callback in future._callbacks:
+                                    try:
+                                        callback(future)
+                                    except:
+                                        pass  # Ignore callback errors
+                                future._callbacks.clear()
+
+                # Small sleep to avoid busy-waiting
+                if len(pending_futures) > 0:
+                    time.sleep(0.001)  # 1ms sleep when monitoring futures
+
+            except Exception:
+                # If monitoring fails (e.g., Ray shutdown), continue
+                # Callbacks will be invoked when .result() is called instead
+                time.sleep(0.1)
+
+    def _ensure_ray_monitor_started() -> None:
+        """Ensure the global Ray monitor thread is running."""
+        global _ray_monitor_thread
+
+        with _ray_monitor_lock:
+            if _ray_monitor_thread is None or not _ray_monitor_thread.is_alive():
+                _ray_monitor_thread = threading.Thread(
+                    target=_ray_monitor_worker, daemon=True, name="RayFutureMonitor"
+                )
+                _ray_monitor_thread.start()
 
     class RayFuture(BaseFuture):
         """Wrapper for Ray ObjectRef to provide unified interface.
@@ -859,6 +954,10 @@ if _IS_RAY_INSTALLED:
             self._cancelled = False
             self._callbacks = []
             self._lock = threading.Lock()
+
+            # Register with global monitor thread for automatic callback invocation
+            _ensure_ray_monitor_started()
+            _ray_monitor_queue.put((object_ref, self))
 
         def result(self, timeout: Optional[float] = None) -> Any:
             """Get the result of the future.

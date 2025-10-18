@@ -3,6 +3,7 @@
 import time
 
 import pytest
+from pydantic_core import ValidationError
 
 from concurry import (
     CallLimit,
@@ -56,7 +57,6 @@ class TestLimitPoolCreation:
 
     def test_limitpool_immutability(self):
         """Test that LimitPool is immutable (Typed subclass)."""
-        from pydantic_core import ValidationError
 
         ls = LimitSet(
             limits=[RateLimit(key="tokens", window_seconds=60, capacity=100)], shared=True, mode="sync"

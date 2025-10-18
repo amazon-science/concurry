@@ -3,12 +3,14 @@
 import asyncio
 import inspect
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, ClassVar, Dict, Optional
 
 from morphic.structs import map_collection
 from pydantic import PrivateAttr
 
-from ..future import RayFuture
+from ..constants import ExecutionMode
+from ..future import BaseFuture, RayFuture
+from ..retry import execute_with_retry_auto
 from .base_worker import WorkerProxy, _create_worker_wrapper
 
 # Note: Ray has native support for async methods in actors.
@@ -43,7 +45,6 @@ def _unwrap_future_for_ray(obj: Any) -> Any:
         materialized value if obj is other BaseFuture,
         otherwise obj unchanged
     """
-    from ..future import BaseFuture
 
     if isinstance(obj, RayFuture):
         # Zero-copy: pass ObjectRef directly
@@ -178,6 +179,9 @@ class RayWorkerProxy(WorkerProxy):
         ```
     """
 
+    # Class-level mode attribute (not passed as parameter)
+    mode: ClassVar[ExecutionMode] = ExecutionMode.Ray
+
     actor_options: Optional[Dict[str, Any]] = None  # Ray actor resource options
 
     # Private attributes
@@ -295,8 +299,6 @@ class RayWorkerProxy(WorkerProxy):
             # Create a wrapper that deserializes config and uses execute_with_retry_auto
             def ray_retry_wrapper(*inner_args, **inner_kwargs):
                 import cloudpickle
-
-                from ..retry import execute_with_retry_auto
 
                 # Deserialize retry config inside the Ray task
                 r_config = cloudpickle.loads(retry_config_bytes)

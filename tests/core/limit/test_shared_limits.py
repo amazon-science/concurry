@@ -16,6 +16,7 @@ from concurry.core.limit import (
     RateLimitAlgorithm,
     ResourceLimit,
 )
+from concurry.core.limit.limit_pool import LimitPool
 from concurry.core.limit.limit_set import BaseLimitSet
 
 
@@ -43,6 +44,7 @@ class TestBasicLimitEnforcement:
         # Create worker with CallLimit: 20 calls per second
         w = Counter.options(
             mode=worker_mode,
+            max_workers=1,  # Single worker to ensure count is consistent
             limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=20)],
         ).init(count=5)
 
@@ -87,6 +89,7 @@ class TestBasicLimitEnforcement:
         # Create worker with RateLimit: 50 tokens per second
         w = TokenCounter.options(
             mode=worker_mode,
+            max_workers=1,  # Single worker to ensure count is consistent
             limits=[
                 RateLimit(
                     key="tokens", window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=50
@@ -136,7 +139,9 @@ class TestBasicLimitEnforcement:
 
         # Create worker with ResourceLimit: only 2 concurrent connections
         w = ResourceWorker.options(
-            mode=worker_mode, limits=[ResourceLimit(key="connections", capacity=2)]
+            mode=worker_mode,
+            max_workers=1,  # Single worker to ensure count is consistent
+            limits=[ResourceLimit(key="connections", capacity=2)],
         ).init()
 
         # Submit 10 operations
@@ -340,6 +345,7 @@ class TestMixedLimitTypes:
 
         w = APIWorker.options(
             mode=worker_mode,
+            max_workers=1,  # Single worker to ensure count is consistent
             limits=[
                 CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=5),
                 RateLimit(
@@ -435,6 +441,7 @@ class TestMixedLimitTypes:
 
         w = ComplexWorker.options(
             mode=worker_mode,
+            max_workers=1,  # Single worker to ensure count is consistent
             limits=[
                 CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=20),
                 RateLimit(
@@ -479,7 +486,6 @@ class TestLimitValidation:
 
     def test_list_of_limits_creates_appropriate_limitset(self):
         """Test that list of Limits creates appropriate LimitSet for worker mode."""
-        from concurry.core.limit.limit_pool import LimitPool
 
         class DummyWorker(Worker):
             def process(self):

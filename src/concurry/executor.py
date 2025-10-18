@@ -4,13 +4,16 @@ This module provides a simple Executor() function that mimics the
 concurrent.futures.Executor interface but returns TaskWorker instances.
 """
 
-from typing import Any, Optional, Union
+from typing import Any, Optional
+
+from .core.constants import ExecutionMode, LoadBalancingAlgorithm
+from .core.worker.task_worker import TaskWorker
 
 
 def Executor(
-    mode: str = "thread",
+    mode: ExecutionMode = ExecutionMode.Threads,
     max_workers: Optional[int] = None,
-    load_balancing: Optional[str] = None,
+    load_balancing: Optional[LoadBalancingAlgorithm] = None,
     on_demand: bool = False,
     limits: Optional[Any] = None,
     **kwargs: Any,
@@ -129,7 +132,6 @@ def Executor(
         - Worker: Base class for custom workers
         - Worker Pools: User guide on worker pools
     """
-    from .core.worker.task_worker import TaskWorker
 
     return TaskWorker.options(
         mode=mode,

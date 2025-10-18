@@ -23,6 +23,7 @@ from concurry import (
     RateLimit,
     RateLimitAlgorithm,
     ResourceLimit,
+    TaskWorker,
     Worker,
 )
 from concurry.core.retry import RetryAlgorithm, RetryValidationError
@@ -788,9 +789,13 @@ class TestRetryWithWorkerPools:
 
     def test_retry_in_pool(self, worker_mode):
         """Test retry behavior in worker pools."""
+        # Skip for sync/asyncio modes which don't support max_workers > 1
+        if worker_mode in ["sync", "asyncio"]:
+            pytest.skip("Sync and asyncio modes don't support max_workers > 1")
+
         worker_pool = CounterWorker.options(
             mode=worker_mode,
-            num_pool_members=3,
+            max_workers=3,
             num_retries=5,
             retry_wait=0.01,
         ).init(succeed_after=2)
@@ -850,6 +855,10 @@ class TestRetryWithWorkerPools:
 
     def test_retry_pool_with_limits(self, worker_mode):
         """Test retry in pools with limits."""
+        # Skip for sync/asyncio modes which don't support max_workers > 1
+        if worker_mode in ["sync", "asyncio"]:
+            pytest.skip("Sync and asyncio modes don't support max_workers > 1")
+
         limits = [ResourceLimit(key="connections", capacity=2)]
 
         class LimitedPoolWorker(Worker):
@@ -866,7 +875,7 @@ class TestRetryWithWorkerPools:
 
         pool = LimitedPoolWorker.options(
             mode=worker_mode,
-            num_pool_members=3,
+            max_workers=3,
             limits=limits,
             num_retries=5,
             retry_wait=0.01,
@@ -1195,8 +1204,6 @@ class TestRetryWithTaskWorker:
         """Test TaskWorker.submit() with retry on exception."""
         import time
 
-        from concurry import TaskWorker
-
         # For process/ray modes, closures don't capture state across boundaries
         # Use time-based approach instead
         start_time = time.time()
@@ -1222,7 +1229,6 @@ class TestRetryWithTaskWorker:
 
     def test_taskworker_submit_retry_exhaustion(self, worker_mode):
         """Test TaskWorker.submit() with retry exhaustion."""
-        from concurry import TaskWorker
 
         def always_fails(value: int) -> int:
             raise RuntimeError("Always fails")
@@ -1242,8 +1248,6 @@ class TestRetryWithTaskWorker:
     def test_taskworker_submit_with_retry_until(self, worker_mode):
         """Test TaskWorker.submit() with output validation."""
         import time
-
-        from concurry import TaskWorker
 
         # Use time-based approach for all modes (closures don't work with process/ray)
         start_time = time.time()
@@ -1275,8 +1279,6 @@ class TestRetryWithTaskWorker:
         """Test TaskWorker.submit() with async function and retry."""
         import time
 
-        from concurry import TaskWorker
-
         # Use time-based approach (closures don't work with process/ray)
         start_time = time.time()
 
@@ -1306,8 +1308,6 @@ class TestRetryWithTaskWorker:
         """Test TaskWorker.map() with retry."""
         import random
 
-        from concurry import TaskWorker
-
         # Use random failures (not closures, since they don't work with process/ray)
         def flaky_square(x: int) -> int:
             # Randomly fail with ~50% chance on first few attempts
@@ -1329,7 +1329,6 @@ class TestRetryWithTaskWorker:
 
     def test_taskworker_submit_with_specific_exception(self, worker_mode):
         """Test TaskWorker.submit() retries only on specific exceptions."""
-        from concurry import TaskWorker
 
         def always_value_error() -> str:
             raise ValueError("Retriable error")
@@ -1358,10 +1357,6 @@ class TestRetryWithTaskWorker:
 
     def test_taskworker_submit_with_limits(self, worker_mode):
         """Test TaskWorker.submit() with limits and retry."""
-        import time
-
-        from concurry import LimitSet, ResourceLimit, TaskWorker
-
         limits = LimitSet(
             limits=[ResourceLimit(key="slots", capacity=1)],
             shared=True,
@@ -1400,8 +1395,6 @@ class TestRetryWithTaskWorker:
 
         import random
 
-        from concurry import TaskWorker
-
         # Use random failures (closures don't work with process/ray)
         def flaky_multiply(x: int) -> int:
             # Randomly fail with 40% probability
@@ -1431,8 +1424,6 @@ class TestRetryWithTaskWorker:
 
         import random
 
-        from concurry import TaskWorker
-
         # Use random failures (closures don't work with process/ray)
         def flaky_double(x: int) -> int:
             # Randomly fail with 40% probability
@@ -1459,8 +1450,6 @@ class TestRetryWithTaskWorker:
             pytest.skip("Sync and asyncio modes don't support max_workers > 1")
 
         import time
-
-        from concurry import TaskWorker
 
         # Use time-based approach (closures don't work with process/ray)
         start_time = time.time()
@@ -1491,7 +1480,6 @@ class TestRetryWithTaskWorker:
 
     def test_taskworker_lambda_with_retry(self, worker_mode):
         """Test TaskWorker with lambda functions and retry."""
-        from concurry import TaskWorker
 
         # Lambdas don't maintain state, so we use a list
         attempts = [0]
@@ -1515,8 +1503,6 @@ class TestRetryWithTaskWorker:
         """Test TaskWorker pool where some tasks succeed and some fail."""
         if worker_mode in ["sync", "asyncio"]:
             pytest.skip("Sync and asyncio modes don't support max_workers > 1")
-
-        from concurry import TaskWorker
 
         def conditional_function(x: int) -> int:
             if x % 2 == 0:

@@ -2,11 +2,13 @@
 
 import asyncio
 import inspect
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import PrivateAttr
 
+from ..constants import ExecutionMode
 from ..future import SyncFuture
+from ..retry import execute_with_retry_auto
 from .base_worker import WorkerProxy, _create_worker_wrapper, _unwrap_futures_in_args
 
 
@@ -68,6 +70,9 @@ class SyncWorkerProxy(WorkerProxy):
         w.stop()
         ```
     """
+
+    # Class-level mode attribute (not passed as parameter)
+    mode: ClassVar[ExecutionMode] = ExecutionMode.Sync
 
     # Private attributes (use Any for non-serializable types)
     _worker: Any = PrivateAttr()
@@ -181,8 +186,6 @@ class SyncWorkerProxy(WorkerProxy):
         try:
             # Apply retry logic if configured (for TaskWorker functions)
             if self.retry_config is not None and self.retry_config.num_retries > 0:
-                from ..retry import execute_with_retry_auto
-
                 context = {
                     "method_name": fn.__name__ if hasattr(fn, "__name__") else "anonymous_function",
                     "worker_class_name": "TaskWorker",

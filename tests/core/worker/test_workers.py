@@ -6,6 +6,7 @@ from typing import List
 
 import pytest
 
+from concurry.core.future import ConcurrentFuture, SyncFuture
 from concurry.core.worker import TaskWorker, Worker, worker
 from concurry.utils import _IS_RAY_INSTALLED
 
@@ -395,7 +396,6 @@ class TestTaskWorkerSubmit:
 
     def test_submit_simple_function(self, worker_mode):
         """Test submitting a simple function."""
-        from concurry import TaskWorker
 
         def add(x, y):
             return x + y
@@ -408,7 +408,6 @@ class TestTaskWorkerSubmit:
 
     def test_submit_with_kwargs(self, worker_mode):
         """Test submitting a function with keyword arguments."""
-        from concurry import TaskWorker
 
         def multiply(x, y, factor=1):
             return (x * y) * factor
@@ -421,7 +420,6 @@ class TestTaskWorkerSubmit:
 
     def test_submit_lambda(self, worker_mode):
         """Test submitting a lambda function."""
-        from concurry import TaskWorker
 
         w = TaskWorker.options(mode=worker_mode).init()
         future = w.submit(lambda x: x**2, 5)
@@ -431,7 +429,6 @@ class TestTaskWorkerSubmit:
 
     def test_submit_with_exception(self, worker_mode):
         """Test submitting a function that raises an exception."""
-        from concurry import TaskWorker
 
         def failing_fn():
             raise ValueError("Task failed")
@@ -447,7 +444,6 @@ class TestTaskWorkerSubmit:
 
     def test_submit_multiple_tasks(self, worker_mode):
         """Test submitting multiple tasks."""
-        from concurry import TaskWorker
 
         def compute(x):
             return x * 2
@@ -462,7 +458,6 @@ class TestTaskWorkerSubmit:
 
     def test_submit_blocking_mode(self, worker_mode):
         """Test submit() in blocking mode."""
-        from concurry import TaskWorker
 
         def add(x, y):
             return x + y
@@ -477,7 +472,6 @@ class TestTaskWorkerSubmit:
 
     def test_map_simple(self, worker_mode):
         """Test TaskWorker.map() with a simple function."""
-        from concurry import TaskWorker
 
         def square(x):
             return x**2
@@ -489,7 +483,6 @@ class TestTaskWorkerSubmit:
 
     def test_map_multiple_iterables(self, worker_mode):
         """Test TaskWorker.map() with multiple iterables."""
-        from concurry import TaskWorker
 
         def add(x, y):
             return x + y
@@ -501,7 +494,6 @@ class TestTaskWorkerSubmit:
 
     def test_map_with_kwargs_function(self, worker_mode):
         """Test TaskWorker.map() with a function that has kwargs."""
-        from concurry import TaskWorker
 
         def multiply(x, factor=2):
             return x * factor
@@ -1299,9 +1291,6 @@ class TestWorkerPerformance:
 
         Target: < 0.7µs per creation (optimized from 2.5µs baseline)
         """
-        import time
-
-        from concurry.core.future import SyncFuture
 
         iterations = int(100e3)  # 100k iterations
         start = time.time()
@@ -1375,7 +1364,6 @@ class TestFutureTypeConsistency:
 
     def test_sync_worker_returns_sync_future(self):
         """Verify SyncWorkerProxy returns SyncFuture objects."""
-        from concurry.core.future import SyncFuture
 
         class TestWorker(Worker):
             def method(self):
@@ -1393,7 +1381,6 @@ class TestFutureTypeConsistency:
 
     def test_thread_worker_returns_concurrent_future(self):
         """Verify ThreadWorkerProxy returns ConcurrentFuture objects."""
-        from concurry.core.future import ConcurrentFuture
 
         class TestWorker(Worker):
             def method(self):
@@ -1415,7 +1402,6 @@ class TestFutureTypeConsistency:
         AsyncioWorkerProxy uses concurrent.futures.Future internally for efficient blocking,
         so it returns ConcurrentFuture (not AsyncioFuture) for both sync and async methods.
         """
-        from concurry.core.future import ConcurrentFuture
 
         class TestWorker(Worker):
             def method(self):
@@ -1447,7 +1433,6 @@ class TestFutureTypeConsistency:
 
     def test_process_worker_returns_concurrent_future(self):
         """Verify ProcessWorkerProxy returns ConcurrentFuture objects."""
-        from concurry.core.future import ConcurrentFuture
 
         class TestWorker(Worker):
             def method(self):

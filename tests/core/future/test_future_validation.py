@@ -5,7 +5,7 @@ import concurrent.futures
 
 import pytest
 
-from concurry.core.future import AsyncioFuture, ConcurrentFuture, SyncFuture
+from concurry.core.future import AsyncioFuture, ConcurrentFuture, SyncFuture, wrap_future
 
 
 class TestSyncFutureValidation:
@@ -144,8 +144,6 @@ class TestWrapFutureValidation:
 
     def test_wrap_future_with_invalid_types(self):
         """Test that wrap_future handles various input types."""
-        from concurry.core.future import wrap_future
-
         # Should wrap any non-future object as SyncFuture with that object as result
         wrapped = wrap_future("string")
         assert isinstance(wrapped, SyncFuture)

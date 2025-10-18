@@ -4,11 +4,13 @@ import asyncio
 import queue
 import threading
 from concurrent.futures import Future as PyFuture
-from typing import Any, Dict
+from typing import Any, ClassVar, Dict
 
 from pydantic import PrivateAttr
 
+from ..constants import ExecutionMode
 from ..future import ConcurrentFuture
+from ..retry import execute_with_retry, execute_with_retry_async
 from .base_worker import WorkerProxy, _create_worker_wrapper, _unwrap_futures_in_args
 
 
@@ -105,6 +107,9 @@ class AsyncioWorkerProxy(WorkerProxy):
         # AsyncioWorker: 0.16s (concurrent) ✅ 10x faster!
         ```
     """
+
+    # Class-level mode attribute (not passed as parameter)
+    mode: ClassVar[ExecutionMode] = ExecutionMode.Asyncio
 
     # Private attributes (use Any for non-serializable types)
     _loop: Any = PrivateAttr(default=None)
@@ -335,8 +340,6 @@ class AsyncioWorkerProxy(WorkerProxy):
 
                         # Apply retry logic if configured (for TaskWorker async functions)
                         if self.retry_config is not None and self.retry_config.num_retries > 0:
-                            from ..retry import execute_with_retry_async
-
                             context = {
                                 "method_name": fn.__name__
                                 if hasattr(fn, "__name__")
@@ -371,8 +374,6 @@ class AsyncioWorkerProxy(WorkerProxy):
 
                 # Apply retry logic if configured (for TaskWorker sync functions)
                 if self.retry_config is not None and self.retry_config.num_retries > 0:
-                    from ..retry import execute_with_retry
-
                     context = {
                         "method_name": fn.__name__ if hasattr(fn, "__name__") else "anonymous_function",
                         "worker_class_name": "TaskWorker",
@@ -395,6 +396,9 @@ class AsyncioWorkerProxy(WorkerProxy):
         Args:
             timeout: Maximum time to wait for cleanup in seconds
         """
+        if self._stopped:
+            return
+
         super().stop(timeout)
 
         # Cancel all pending futures
@@ -409,6 +413,10 @@ class AsyncioWorkerProxy(WorkerProxy):
             self._sync_thread.join(timeout=timeout / 2)
 
         # Stop event loop
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._loop is not None and not self._loop.is_closed():
+            try:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            except RuntimeError:
+                # Loop might be closed between check and call
+                pass
             self._loop_thread.join(timeout=timeout / 2)

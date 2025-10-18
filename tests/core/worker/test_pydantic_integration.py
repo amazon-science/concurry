@@ -34,6 +34,10 @@ from morphic import Typed, validate
 from pydantic import BaseModel, Field, ValidationError, validate_call
 
 from concurry import CallLimit, RateLimit, RateLimitAlgorithm, ResourceLimit, Worker
+from concurry.core.worker.asyncio_worker import AsyncioWorkerProxy
+from concurry.core.worker.process_worker import ProcessWorkerProxy
+from concurry.core.worker.sync_worker import SyncWorkerProxy
+from concurry.core.worker.thread_worker import ThreadWorkerProxy
 from concurry.utils import _IS_RAY_INSTALLED
 
 # Worker mode fixture and cleanup are provided by tests/conftest.py
@@ -159,12 +163,6 @@ class TestWorkerProxyTypedValidation:
 
     def test_different_proxy_types_all_use_typed(self):
         """Test that all WorkerProxy subclasses inherit from Typed."""
-        from morphic import Typed
-
-        from concurry.core.worker.asyncio_worker import AsyncioWorkerProxy
-        from concurry.core.worker.process_worker import ProcessWorkerProxy
-        from concurry.core.worker.sync_worker import SyncWorkerProxy
-        from concurry.core.worker.thread_worker import ThreadWorkerProxy
 
         # All proxy classes should be Typed subclasses
         assert issubclass(SyncWorkerProxy, Typed)
@@ -197,8 +195,6 @@ class TestWorkerTypedFeatures:
 
     def test_worker_not_typed_subclass(self):
         """Test that Worker itself does NOT inherit from Typed."""
-        from morphic import Typed
-
         # Worker should NOT be a Typed subclass
         assert not issubclass(Worker, Typed)
 

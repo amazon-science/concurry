@@ -7,12 +7,14 @@ import queue
 import threading
 import traceback
 from concurrent.futures import Future as PyFuture
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import cloudpickle
 from pydantic import PrivateAttr
 
+from ..constants import ExecutionMode
 from ..future import ConcurrentFuture
+from ..retry import execute_with_retry_auto
 from .base_worker import WorkerProxy, _create_worker_wrapper, _unwrap_futures_in_args
 
 
@@ -78,8 +80,6 @@ def _process_worker_main(
 
                     # Apply retry logic if configured (for TaskWorker functions)
                     if retry_config is not None and retry_config.num_retries > 0:
-                        from ..retry import execute_with_retry_auto
-
                         context = {
                             "method_name": fn.__name__ if hasattr(fn, "__name__") else "anonymous_function",
                             "worker_class_name": "TaskWorker",
@@ -166,6 +166,9 @@ class ProcessWorkerProxy(WorkerProxy):
         w.stop()
         ```
     """
+
+    # Class-level mode attribute (not passed as parameter)
+    mode: ClassVar[ExecutionMode] = ExecutionMode.Processes
 
     mp_context: Literal["fork", "spawn", "forkserver"] = "fork"
 

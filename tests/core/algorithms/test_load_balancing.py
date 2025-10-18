@@ -2,6 +2,7 @@
 
 import pytest
 
+from concurry import Worker
 from concurry.core.algorithms.load_balancing import (
     BaseLoadBalancer,
     LeastActiveLoadBalancer,
@@ -356,7 +357,6 @@ class TestLoadBalancingIntegration:
     @pytest.mark.parametrize("algorithm", ["round_robin", "active", "total", "random"])
     def test_load_balancing_with_worker_pools(self, pool_mode, algorithm):
         """Test that all load balancing algorithms work with worker pools across modes."""
-        from concurry import Worker
 
         # Ray is initialized by conftest.py initialize_ray fixture
         class SimpleWorker(Worker):

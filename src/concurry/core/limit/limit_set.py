@@ -383,7 +383,7 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
         - Resource limits: Use Manager.Semaphore for blocking + Manager dict for current usage tracking
         - Rate limits: Store token counts and timestamps in Manager dicts
         - Call limits: Store call counts and timestamps in Manager dicts
-        
+
     Why Both Semaphore and Shared State for ResourceLimits:
         - Semaphore: Provides the blocking/unblocking mechanism (can't be queried for availability)
         - Shared state dict: Provides queryable current usage that all processes can check
@@ -496,12 +496,12 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
                         # Semaphore not available - rollback and return None
                         self._release_acquisitions(acquisitions, requested_amounts)
                         return None
-                    
+
                     # Update shared state (the source of truth across all processes)
                     state = self._resource_state[key]
                     state["current"] = state["current"] + amount
                     self._resource_state[key] = state
-                    
+
                     acquisitions[key] = Acquisition(limit=limit, requested=amount, successful=True)
 
                 elif isinstance(limit, (RateLimit, CallLimit)):
@@ -559,7 +559,7 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
                     return LimitSetAcquisition(
                         limit_set=self, acquisitions=acquisitions, successful=True, config=self.config
                     )
-            
+
             # Failed to acquire (either _can_acquire_all failed or semaphore not available)
             acquisitions = {}
             for key, amount in requested_amounts.items():
@@ -572,7 +572,7 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
 
     def _acquire_resource(self, limit: ResourceLimit, amount: int) -> bool:
         """Acquire resource from multiprocess semaphore.
-        
+
         Returns:
             True if successfully acquired, False if not available
         """
@@ -616,7 +616,7 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
             if isinstance(limit, ResourceLimit):
                 # Release resources
                 self._release_resource(limit, requested)
-                
+
                 # Update shared state (the source of truth across all processes)
                 state = self._resource_state[key]
                 state["current"] = state["current"] - requested
@@ -1019,7 +1019,7 @@ class RaySharedLimitSet(BaseLimitSet):
 def LimitSet(
     limits: List[Limit],
     shared: bool = False,
-    mode: Union[str, ExecutionMode] = "sync",
+    mode: ExecutionMode = ExecutionMode.Sync,
     config: Optional[dict] = None,
 ) -> Union[InMemorySharedLimitSet, MultiprocessSharedLimitSet, RaySharedLimitSet]:
     """Factory function to create appropriate LimitSet implementation.
@@ -1094,8 +1094,7 @@ def LimitSet(
         - Code can safely call self.limits.acquire() without checking if limits exist
     """
     # Convert string to ExecutionMode if needed
-    if isinstance(mode, str):
-        mode = ExecutionMode(mode)
+    mode: ExecutionMode = ExecutionMode(mode)
 
     # Select appropriate implementation
     if mode in (ExecutionMode.Sync, ExecutionMode.Asyncio, ExecutionMode.Threads):

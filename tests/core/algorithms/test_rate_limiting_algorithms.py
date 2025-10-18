@@ -702,6 +702,7 @@ class TestRateLimitingAlgorithms:
         # TokenBucket: capacity=20, rate=100/sec (fast for testing)
         w = Counter.options(
             mode=worker_mode,
+            max_workers=1,  # Single worker to ensure count is consistent
             limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=20)],
         ).init()
 
@@ -772,6 +773,7 @@ class TestRateLimitingAlgorithms:
         # LeakyBucket: capacity=20, rate=100/sec (fast for testing)
         w = Counter.options(
             mode=worker_mode,
+            max_workers=1,  # Single worker to ensure count is consistent
             limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.LeakyBucket, capacity=20)],
         ).init()
 
@@ -842,6 +844,7 @@ class TestRateLimitingAlgorithms:
         # SlidingWindow: capacity=20 (default algorithm, fast rate for testing)
         w = Counter.options(
             mode=worker_mode,
+            max_workers=1,  # Single worker to ensure count is consistent
             limits=[CallLimit(window_seconds=1.0, capacity=20)],  # Uses default SlidingWindow
         ).init()
 
@@ -912,6 +915,7 @@ class TestRateLimitingAlgorithms:
         # FixedWindow: capacity=20, rate=100/sec (fast for testing)
         w = Counter.options(
             mode=worker_mode,
+            max_workers=1,  # Single worker to ensure count is consistent
             limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.FixedWindow, capacity=20)],
         ).init()
 
@@ -983,6 +987,7 @@ class TestRateLimitingAlgorithms:
         # GCRA: capacity=20, rate=100/sec (fast for testing)
         w = Counter.options(
             mode=worker_mode,
+            max_workers=1,  # Single worker to ensure count is consistent
             limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.GCRA, capacity=20)],
         ).init()
 

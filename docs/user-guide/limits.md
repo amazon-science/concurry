@@ -1847,6 +1847,581 @@ For comprehensive retry documentation, see the [Retry Mechanisms Guide](retries.
 4. **Choose simpler algorithms** (FixedWindow, TokenBucket) for high-throughput scenarios
 5. **Use nested acquisition** to minimize resource holding time
 
+## Submission Queue: Client-Side Task Queuing
+
+In addition to rate limiting and resource limits, Concurry provides **submission queuing** to prevent overloading worker backends when submitting large batches of tasks. This feature limits the number of "in-flight" tasks per worker before they even reach the backend execution environment.
+
+### Overview
+
+The `max_queued_tasks` parameter controls how many tasks can be submitted to a worker's backend before blocking on the client side. This prevents issues like:
+
+- **Memory exhaustion** from thousands of pending futures
+- **Backend overload** from too many queued tasks (especially Ray actors)
+- **Network saturation** when submitting large batches to distributed workers
+- **Resource contention** from excessive concurrent task submissions
+
+**Key Characteristics:**
+- **Client-side queuing**: Tasks block during submission, not execution
+- **Per-worker limit**: Each worker (or worker in a pool) has its own independent queue
+- **Transparent to users**: Your submission loops don't need modification
+- **Compatible with all features**: Works seamlessly with limits, retries, polling, and load balancing
+- **Automatic release**: Queue slots released automatically when tasks complete (via future callbacks)
+
+### How It Works
+
+```python
+from concurry import Worker
+
+class DataProcessor(Worker):
+    def process(self, data: str) -> str:
+        return data.upper()
+
+# Create worker with submission queue
+worker = DataProcessor.options(
+    mode="thread",
+    max_queued_tasks=5  # Max 5 tasks "in-flight" at once
+).init()
+
+# Submit 100 tasks
+# - First 5 submit immediately
+# - 6th submission blocks until one of the first 5 completes
+# - As tasks complete, new submissions proceed
+futures = [worker.process(f"data-{i}") for i in range(100)]
+
+# Gather results (submission queue prevents overload)
+results = [f.result() for f in futures]
+
+worker.stop()
+```
+
+**What Happens:**
+1. First 5 submissions succeed immediately (queue has capacity=5)
+2. 6th submission blocks on `worker.process()` call
+3. When 1st task completes, its future callback releases a queue slot
+4. 6th submission proceeds
+5. This continues until all 100 tasks are submitted and completed
+
+### Default Values by Mode
+
+| Mode | Default `max_queued_tasks` | Reasoning |
+|------|----------------------------------|-----------|
+| `sync` | `None` (bypassed) | Immediate execution, no queuing needed |
+| `asyncio` | `None` (bypassed) | Event loop handles concurrency |
+| `thread` | `100` | High concurrency, large queue OK |
+| `process` | `5` | Limited by CPU cores, smaller queue |
+| `ray` | `2` | Distributed, minimize in-flight tasks |
+
+**Blocking Mode:** Automatically bypassed (max_queued_tasks has no effect)
+
+### Basic Usage
+
+#### Single Worker
+
+```python
+from concurry import Worker
+
+class SlowWorker(Worker):
+    def slow_task(self, x: int) -> int:
+        time.sleep(0.1)
+        return x * 2
+
+# Limit in-flight tasks to prevent overload
+worker = SlowWorker.options(
+    mode="process",
+    max_queued_tasks=3  # Max 3 tasks at once
+).init()
+
+# Submit 50 tasks - submission loop blocks as needed
+futures = []
+for i in range(50):
+    # This blocks when queue is full (3 tasks pending)
+    # Automatically unblocks when a task completes
+    f = worker.slow_task(i)
+    futures.append(f)
+
+# All tasks complete successfully
+results = [f.result() for f in futures]
+worker.stop()
+```
+
+#### Worker Pool
+
+```python
+from concurry import Worker
+
+class APIWorker(Worker):
+    def call_api(self, url: str) -> dict:
+        return requests.get(url).json()
+
+# Pool with per-worker queues
+pool = APIWorker.options(
+    mode="thread",
+    max_workers=10,  # 10 workers
+    max_queued_tasks=5,  # 5 in-flight per worker
+    load_balancing="round_robin"
+).init()
+
+# Total capacity: 10 workers × 5 queue = 50 concurrent tasks
+# Submissions beyond 50 block until slots free up
+futures = [pool.call_api(f"https://api.example.com/{i}") for i in range(500)]
+
+results = [f.result() for f in futures]
+pool.stop()
+```
+
+**Per-Worker Queues:**
+- Each worker in the pool has its own independent queue
+- Worker 0: Can have 5 tasks in-flight
+- Worker 1: Can have 5 tasks in-flight
+- ...and so on
+- Load balancing distributes tasks across all workers
+- Total capacity = `max_workers × max_queued_tasks`
+
+### Integration with Synchronization Primitives
+
+The submission queue is designed to work seamlessly with `wait()` and `gather()` - the primary use case for batch task submission:
+
+```python
+from concurry import Worker, gather, wait, ReturnWhen
+
+class DataProcessor(Worker):
+    def process(self, data: str) -> str:
+        time.sleep(0.05)  # Simulate work
+        return data.upper()
+
+worker = DataProcessor.options(
+    mode="thread",
+    max_queued_tasks=10
+).init()
+
+# Submit large batch
+# Submission queue prevents memory/backend overload
+futures = [worker.process(f"item-{i}") for i in range(1000)]
+
+# Gather all results (submission already completed)
+results = gather(futures, timeout=60.0)
+print(f"Processed {len(results)} items")
+
+worker.stop()
+```
+
+**With wait():**
+
+```python
+# Submit batch with submission queue
+futures = [worker.process(data) for data in large_dataset]
+
+# Wait for all to complete
+done, not_done = wait(futures, return_when=ReturnWhen.ALL_COMPLETED, timeout=300.0)
+print(f"Completed: {len(done)}, Pending: {len(not_done)}")
+```
+
+### Integration with Limits
+
+Submission queue and resource limits serve different purposes and work together:
+
+**Submission Queue:**
+- Limits tasks submitted to backend (client-side)
+- Prevents overloading worker queues/memory
+- Applies before task reaches worker
+
+**Resource Limits:**
+- Limits concurrent execution within worker (worker-side)
+- Protects external resources (APIs, databases)
+- Applies during task execution
+
+```python
+from concurry import Worker, ResourceLimit, RateLimit, LimitSet
+
+class DatabaseWorker(Worker):
+    def query(self, sql: str) -> list:
+        # Acquire resource limits during execution
+        with self.limits.acquire(requested={
+            "connections": 1,
+            "queries": 1
+        }) as acq:
+            result = execute_query(sql)
+            acq.update(usage={"queries": 1})
+            return result
+
+# Create shared limits
+limits = LimitSet(
+    limits=[
+        ResourceLimit(key="connections", capacity=5),  # Max 5 concurrent queries
+        RateLimit(key="queries", window_seconds=60, capacity=100)  # 100 queries/min
+    ],
+    shared=True,
+    mode="thread"
+)
+
+# Worker with both submission queue AND limits
+worker = DatabaseWorker.options(
+    mode="thread",
+    max_queued_tasks=10,  # Max 10 submitted at once (client-side)
+    limits=limits  # Max 5 executing concurrently (worker-side)
+).init()
+
+# Submit 100 queries
+# - Submission queue limits to 10 in-flight tasks
+# - Resource limit ensures only 5 execute concurrently
+# - Rate limit ensures no more than 100 queries/minute
+futures = [worker.query(f"SELECT * FROM table_{i}") for i in range(100)]
+results = [f.result() for f in futures]
+
+worker.stop()
+```
+
+**Flow:**
+1. **Submission Queue (Client)**: Task waits here if 10+ tasks already submitted
+2. **Worker Queue (Backend)**: Task enters worker's execution queue
+3. **Resource Limits (Worker)**: Task waits here if 5+ queries already executing
+4. **Execution**: Task runs
+5. **Completion**: Releases resource limit, frees submission queue slot
+
+### Integration with Retries
+
+Submission queue counts original submissions, not retry attempts:
+
+```python
+from concurry import Worker
+
+class FlakeyWorker(Worker):
+    def __init__(self):
+        self.attempt_count = 0
+    
+    def flakey_task(self, fail_count: int) -> str:
+        self.attempt_count += 1
+        if self.attempt_count <= fail_count:
+            raise ValueError(f"Attempt {self.attempt_count} failed")
+        return "Success"
+
+worker = FlakeyWorker.options(
+    mode="thread",
+    num_retries=5,  # Up to 5 retries
+    retry_wait=0.1,
+    max_queued_tasks=3  # Only 3 tasks count toward queue
+).init()
+
+# Submit 3 tasks that will retry multiple times
+# Retries don't count toward submission queue (only original submissions)
+f1 = worker.flakey_task(2)  # Fails 2 times, succeeds on 3rd
+f2 = worker.flakey_task(3)  # Fails 3 times, succeeds on 4th  
+f3 = worker.flakey_task(1)  # Fails 1 time, succeeds on 2nd
+
+# Fourth submission can proceed as soon as ANY of the above completes
+# (regardless of how many retries they needed)
+f4 = worker.flakey_task(2)
+
+results = [f.result() for f in [f1, f2, f3, f4]]
+worker.stop()
+```
+
+**Key Points:**
+- Each `worker.method()` call counts as 1 submission (regardless of retries)
+- Retries happen inside the worker, not counted toward queue
+- Submission slot freed when task fully completes (after all retries)
+
+### High-Volume Scenarios
+
+For scenarios with thousands of tasks (e.g., LLM batch processing), submission queue prevents memory exhaustion:
+
+```python
+from concurry import Worker, RateLimit, LimitSet, gather
+
+class LLMWorker(Worker):
+    def generate(self, prompt: str, max_tokens: int = 100) -> str:
+        with self.limits.acquire(requested={
+            "input_tokens": len(prompt) * 4,  # Rough estimate
+            "output_tokens": max_tokens
+        }) as acq:
+            result = call_llm_api(prompt, max_tokens)
+            acq.update(usage={
+                "input_tokens": result.input_tokens,
+                "output_tokens": result.output_tokens
+            })
+            return result.text
+
+# Create shared limits for API quotas
+limits = LimitSet(
+    limits=[
+        RateLimit(key="input_tokens", window_seconds=60, capacity=400_000),
+        RateLimit(key="output_tokens", window_seconds=60, capacity=100_000),
+    ],
+    shared=True,
+    mode="thread"
+)
+
+# Pool with submission queue for high volume
+pool = LLMWorker.options(
+    mode="thread",
+    max_workers=50,
+    max_queued_tasks=10,  # 10 per worker = 500 total capacity
+    limits=limits
+).init()
+
+# Process 10,000 prompts without memory issues
+# Submission queue prevents creating 10,000 futures at once
+prompts = [f"Prompt {i}" for i in range(10_000)]
+futures = [pool.generate(prompt) for prompt in prompts]
+
+# Gather results in batches to keep memory under control
+batch_size = 1000
+all_results = []
+for i in range(0, len(futures), batch_size):
+    batch = futures[i:i+batch_size]
+    results = gather(batch, timeout=300.0)
+    all_results.extend(results)
+    print(f"Processed {len(all_results)}/{len(prompts)} prompts")
+
+pool.stop()
+```
+
+### On-Demand Workers
+
+On-demand workers (ephemeral, created per request) automatically bypass submission queuing since the pool already limits concurrent workers:
+
+```python
+from concurry import Worker
+
+class OnDemandWorker(Worker):
+    def task(self, x: int) -> int:
+        return x * 2
+
+# On-demand pool manages worker creation
+pool = OnDemandWorker.options(
+    mode="thread",
+    max_workers=10,  # Max 10 concurrent on-demand workers
+    on_demand=True,
+    max_queued_tasks=5  # Ignored for on-demand workers
+).init()
+
+# Pool creates/destroys workers as needed
+# Max 10 workers run concurrently (managed by pool)
+futures = [pool.task(i) for i in range(100)]
+results = [f.result() for f in futures]
+
+pool.stop()
+```
+
+**Why on-demand bypasses submission queue:**
+- On-demand workers are ephemeral (created per request, destroyed after completion)
+- The pool's `max_workers` already limits concurrent workers
+- Each on-demand worker only handles 1 task
+- Adding submission queue would be redundant and cause deadlocks
+
+### Tuning Submission Queue Length
+
+**Guidelines:**
+
+1. **Short, Fast Tasks (< 100ms):**
+   - Use larger queues: `max_queued_tasks=50-100`
+   - Amortizes submission overhead
+   - Keeps workers fed with tasks
+
+2. **Long-Running Tasks (> 1s):**
+   - Use smaller queues: `max_queued_tasks=2-5`
+   - Reduces memory footprint
+   - Prevents excessive pending work
+
+3. **I/O-Bound Tasks:**
+   - Threads: `max_queued_tasks=20-100`
+   - AsyncIO: Bypass (set to `None`)
+   - High concurrency works well
+
+4. **CPU-Bound Tasks:**
+   - Process: `max_queued_tasks=2-5`
+   - Limited by cores, small queue sufficient
+
+5. **Distributed (Ray):**
+   - Ray: `max_queued_tasks=2-5`
+   - Minimize data transfer overhead
+   - Prevent actor queue saturation
+
+**Examples:**
+
+```python
+# Fast I/O tasks - large queue
+worker = FastAPIWorker.options(
+    mode="thread",
+    max_queued_tasks=100
+).init()
+
+# Slow LLM tasks - small queue
+worker = LLMWorker.options(
+    mode="thread",
+    max_queued_tasks=3
+).init()
+
+# CPU-intensive - small queue
+worker = MLWorker.options(
+    mode="process",
+    max_queued_tasks=2
+).init()
+
+# Ray distributed - small queue
+worker = RayWorker.options(
+    mode="ray",
+    max_queued_tasks=2
+).init()
+```
+
+### Monitoring Submission Queues
+
+For worker pools, you can inspect submission queue status:
+
+```python
+pool = Worker.options(
+    mode="thread",
+    max_workers=10,
+    max_queued_tasks=5
+).init()
+
+# Get pool statistics
+stats = pool.get_pool_stats()
+
+print(f"Workers: {stats['total_workers']}")
+print(f"Queue length per worker: {stats['max_queued_tasks']}")
+print(f"Queue info: {stats['submission_queues']}")
+
+# Per-worker queue info
+for queue_info in stats['submission_queues']:
+    print(f"Worker {queue_info['worker_idx']}: capacity={queue_info['capacity']}")
+```
+
+### Best Practices
+
+**1. Match Queue Size to Task Characteristics**
+
+```python
+# ✅ Good: Small queue for expensive operations
+expensive_worker = Worker.options(
+    mode="thread",
+    max_queued_tasks=3  # Don't overload
+).init()
+
+# ✅ Good: Large queue for cheap operations
+cheap_worker = Worker.options(
+    mode="thread",
+    max_queued_tasks=100  # Keep workers fed
+).init()
+```
+
+**2. Use with Synchronization Primitives**
+
+```python
+# ✅ Good: Submission queue + gather
+futures = [worker.process(item) for item in large_batch]
+results = gather(futures, timeout=300.0)
+
+# ✅ Good: Submission queue + wait
+done, not_done = wait(futures, timeout=300.0)
+```
+
+**3. Combine with Resource Limits**
+
+```python
+# ✅ Good: Layered protection
+worker = Worker.options(
+    mode="thread",
+    max_queued_tasks=10,  # Client-side limit
+    limits=[ResourceLimit(key="resources", capacity=5)]  # Worker-side limit
+).init()
+```
+
+**4. Don't Mix with Blocking Mode**
+
+```python
+# ❌ Avoid: Submission queue has no effect in blocking mode
+worker = Worker.options(
+    mode="thread",
+    blocking=True,  # Returns results directly
+    max_queued_tasks=5  # Ignored!
+).init()
+
+# ✅ Good: Use non-blocking mode for submission queue
+worker = Worker.options(
+    mode="thread",
+    blocking=False,  # Returns futures
+    max_queued_tasks=5
+).init()
+```
+
+**5. Let Defaults Work for Most Cases**
+
+```python
+# ✅ Good: Defaults are well-tuned for each mode
+worker_thread = Worker.options(mode="thread").init()  # max_queued_tasks=100
+worker_process = Worker.options(mode="process").init()  # max_queued_tasks=5
+worker_ray = Worker.options(mode="ray").init()  # max_queued_tasks=2
+```
+
+### Advanced: Bypassing Submission Queue
+
+To explicitly bypass submission queue (unlimited in-flight tasks):
+
+```python
+worker = Worker.options(
+    mode="thread",
+    max_queued_tasks=None  # Bypass submission queue
+).init()
+
+# Be careful! Can create thousands of futures at once
+futures = [worker.task(i) for i in range(10_000)]
+```
+
+**When to bypass:**
+- Testing/debugging
+- Very fast tasks with negligible memory footprint
+- Custom batching logic in your code
+- Sync or AsyncIO modes (already bypassed by default)
+
+### Troubleshooting
+
+**Issue: Submissions blocking longer than expected**
+
+```python
+# Problem: Queue too small for workload
+worker = Worker.options(
+    mode="thread",
+    max_queued_tasks=2  # Too small!
+).init()
+
+# Solution: Increase queue length
+worker = Worker.options(
+    mode="thread",
+    max_queued_tasks=20  # Better
+).init()
+```
+
+**Issue: Memory usage high despite submission queue**
+
+```python
+# Problem: Futures themselves consume memory
+futures = [worker.task(i) for i in range(100_000)]  # 100k futures in memory
+
+# Solution: Process in batches
+batch_size = 1000
+for i in range(0, len(data), batch_size):
+    batch_futures = [worker.task(x) for x in data[i:i+batch_size]]
+    results = gather(batch_futures)
+    process_results(results)
+```
+
+**Issue: Deadlock with on-demand workers**
+
+```python
+# Problem: On-demand workers stuck
+pool = Worker.options(
+    mode="thread",
+    on_demand=True,
+    max_workers=5,
+    max_queued_tasks=2  # Can cause issues
+).init()
+
+# Solution: On-demand automatically bypasses submission queue
+# (This is handled automatically by Concurry)
+```
+
 ## See Also
 
 - [Workers Guide](workers.md) - Integrating limits with Workers

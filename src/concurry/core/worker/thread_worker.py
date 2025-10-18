@@ -5,11 +5,13 @@ import inspect
 import queue
 import threading
 from concurrent.futures import Future as PyFuture
-from typing import Any, Dict
+from typing import Any, ClassVar, Dict
 
 from pydantic import PrivateAttr
 
+from ..constants import ExecutionMode
 from ..future import ConcurrentFuture
+from ..retry import execute_with_retry_auto
 from .base_worker import WorkerProxy, _create_worker_wrapper, _unwrap_futures_in_args
 
 
@@ -72,6 +74,9 @@ class ThreadWorkerProxy(WorkerProxy):
         w.stop()
         ```
     """
+
+    # Class-level mode attribute (not passed as parameter)
+    mode: ClassVar[ExecutionMode] = ExecutionMode.Threads
 
     # Private attributes (use Any for non-serializable types)
     _command_queue: Any = PrivateAttr()
@@ -163,8 +168,6 @@ class ThreadWorkerProxy(WorkerProxy):
 
                         # Apply retry logic if configured (for TaskWorker functions)
                         if self.retry_config is not None and self.retry_config.num_retries > 0:
-                            from ..retry import execute_with_retry_auto
-
                             context = {
                                 "method_name": fn.__name__
                                 if hasattr(fn, "__name__")
@@ -282,6 +285,9 @@ class ThreadWorkerProxy(WorkerProxy):
         Args:
             timeout: Maximum time to wait for thread to stop in seconds
         """
+        if self._stopped:
+            return
+
         super().stop(timeout)
 
         # Cancel all pending futures

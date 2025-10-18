@@ -32,7 +32,7 @@ def pytest_configure(config):
     - Default 60-second timeout per test (if not overridden by CLI)
     - Thread-based timeout method (works better with Ray/multiprocessing)
     - Full traceback display on timeout
-    
+
     Note: Timeouts are non-fatal by default - tests continue after timeout.
     Use -x flag to stop on first timeout/failure.
     """
@@ -52,7 +52,7 @@ def pytest_addoption(parser):
     This allows users to override the default timeout:
         pytest --timeout=120  # 2 minute timeout
         pytest --timeout=0    # Disable timeout
-    
+
     Use -x to stop on first failure (including timeouts):
         pytest --timeout=60 -x  # Stop on first timeout/failure
     """

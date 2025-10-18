@@ -12,10 +12,10 @@ from typing import Any, Callable, Dict, List, Optional, Type
 from morphic import Typed
 from pydantic import PrivateAttr
 
+from ..algorithms.load_balancing import LoadBalancer
 from ..constants import ExecutionMode, LoadBalancingAlgorithm
 from ..future import BaseFuture
-from .base_worker import Worker
-from ..algorithms.load_balancing import LoadBalancer
+from .base_worker import Worker, _transform_worker_limits
 
 
 class WorkerProxyPool(Typed, ABC):
@@ -32,6 +32,7 @@ class WorkerProxyPool(Typed, ABC):
     Key Features:
         - Load balancing across multiple workers
         - Shared resource limits across pool
+        - Per-worker submission queues for overload protection
         - On-demand worker creation for bursty workloads
         - Monitoring and statistics
         - Clean shutdown of all workers
@@ -64,15 +65,18 @@ class WorkerProxyPool(Typed, ABC):
             pool = MyWorker.options(
                 mode="thread",
                 max_workers=10,
-                load_balancing="round_robin"
+                load_balancing="round_robin",
+                max_queued_tasks=5  # 5 in-flight tasks per worker
             ).init(arg1, arg2)
 
             # Use like a single worker
+            # Total capacity: 10 workers × 5 queue = 50 concurrent tasks
             future = pool.my_method(x=5)
             result = future.result()
 
             # Get pool statistics
             stats = pool.get_pool_stats()
+            print(f"Submission queue: {stats['max_queued_tasks']} per worker")
 
             # Stop all workers
             pool.stop()
@@ -135,6 +139,7 @@ class WorkerProxyPool(Typed, ABC):
     unwrap_futures: bool
     limits: Optional[Any]  # Shared LimitSet (processed by WorkerBuilder)
     retry_config: Optional[Any] = None  # RetryConfig instance (processed by WorkerBuilder)
+    max_queued_tasks: int = 2
     init_args: tuple
     init_kwargs: dict
 
@@ -146,6 +151,7 @@ class WorkerProxyPool(Typed, ABC):
     _on_demand_workers: List[Any] = PrivateAttr()
     _on_demand_lock: Any = PrivateAttr()
     _on_demand_counter: int = PrivateAttr()  # Counter for on-demand worker indices
+    _worker_semaphores: List[Any] = PrivateAttr()  # Per-worker submission semaphores
 
     def post_initialize(self) -> None:
         """Initialize private attributes after Typed validation."""
@@ -162,8 +168,21 @@ class WorkerProxyPool(Typed, ABC):
         object.__setattr__(self, "_on_demand_lock", threading.Lock())
         object.__setattr__(self, "_on_demand_counter", 0)  # Start at 0 for on-demand
 
+        # Initialize per-worker semaphores list (will be populated after pool initialization)
+        object.__setattr__(self, "_worker_semaphores", [])
+
         # Initialize the pool
         self._initialize_pool()
+
+        # Create per-worker semaphores for persistent pool
+        # Skip if on-demand (each on-demand worker has its own semaphore), blocking mode, or asyncio mode
+        # AsyncIO pools don't need submission queuing since the event loop handles concurrency
+
+        if not self.on_demand and not self.blocking and self.mode != ExecutionMode.Asyncio:
+            # Each worker gets its own semaphore
+            for _ in range(len(self._workers)):
+                semaphore = threading.BoundedSemaphore(self.max_queued_tasks)
+                self._worker_semaphores.append(semaphore)
 
     @abstractmethod
     def _initialize_pool(self) -> None:
@@ -199,31 +218,36 @@ class WorkerProxyPool(Typed, ABC):
         pass
 
     def _wrap_future_with_tracking(self, future: BaseFuture, worker_idx: int) -> BaseFuture:
-        """Wrap a future to track completion for load balancing.
+        """Wrap a future to track completion for load balancing and release semaphore.
 
         Args:
             future: The future to wrap
             worker_idx: Index of the worker that created the future
 
         Returns:
-            Wrapped future that records completion
+            Wrapped future that records completion and releases semaphore
         """
-        # Store original result method
-        original_result = future.result
 
-        def tracked_result(timeout: Optional[float] = None) -> Any:
+        # Use callback to release semaphore when future completes
+        # This ensures semaphore is released regardless of whether .result() is called
+        def on_complete(f):
             try:
-                return original_result(timeout=timeout)
-            finally:
                 # Record completion for load balancer
                 self._load_balancer.record_complete(worker_idx)
+                # Release worker's submission semaphore
+                if len(self._worker_semaphores) > 0:
+                    try:
+                        self._worker_semaphores[worker_idx].release()
+                    except Exception:
+                        pass  # Ignore release errors
+            except Exception:
+                pass  # Ignore any errors in callback
 
-        # Replace result method
-        future.result = tracked_result
+        future.add_done_callback(on_complete)
         return future
 
     def _wrap_future_with_cleanup(self, future: BaseFuture, worker: Any) -> BaseFuture:
-        """Wrap a future to cleanup on-demand worker after result is available.
+        """Wrap a future to cleanup on-demand worker after completion.
 
         Args:
             future: The future to wrap
@@ -232,26 +256,32 @@ class WorkerProxyPool(Typed, ABC):
         Returns:
             Wrapped future that cleanups worker
         """
-        # Store original result method
-        original_result = future.result
 
-        def cleanup_result(timeout: Optional[float] = None) -> Any:
+        def cleanup_callback(f):
+            """Cleanup callback invoked when future completes."""
             try:
-                return original_result(timeout=timeout)
-            finally:
-                # Cleanup on-demand worker
-                try:
-                    worker.stop(timeout=5)
-                except Exception:
-                    pass  # Ignore cleanup errors
-
-                # Remove from tracking
+                # Remove from tracking first
                 with self._on_demand_lock:
                     if worker in self._on_demand_workers:
                         self._on_demand_workers.remove(worker)
 
-        # Replace result method
-        future.result = cleanup_result
+                # Schedule cleanup in a separate thread to avoid deadlock
+                # Calling worker.stop() from within a callback can cause deadlocks
+                # because stop() may try to cancel futures that are invoking this callback
+                def deferred_cleanup():
+                    try:
+                        worker.stop(timeout=5)
+                    except Exception:
+                        pass  # Ignore cleanup errors
+
+                cleanup_thread = threading.Thread(target=deferred_cleanup, daemon=True)
+                cleanup_thread.start()
+
+            except Exception:
+                pass  # Ignore all cleanup errors
+
+        # Use add_done_callback to ensure cleanup happens when future completes
+        future.add_done_callback(cleanup_callback)
         return future
 
     def _wait_for_on_demand_slot(self) -> None:
@@ -310,13 +340,14 @@ class WorkerProxyPool(Typed, ABC):
             pass
 
         def method_wrapper(*args: Any, **kwargs: Any) -> Any:
-            if self._stopped:
-                raise RuntimeError("Worker pool is stopped")
-
             # On-demand mode: create new worker for this call
             if self.on_demand:
-                # Wait for slot if limit enforced
+                # Wait for slot if limit enforced (can block)
                 self._wait_for_on_demand_slot()
+
+                # Check if stopped AFTER waiting for slot to avoid race condition
+                if self._stopped:
+                    raise RuntimeError("Worker pool is stopped")
 
                 # Get next worker index and increment counter
                 with self._on_demand_lock:
@@ -342,11 +373,31 @@ class WorkerProxyPool(Typed, ABC):
                     return wrapped_future
 
             # Persistent pool mode: select worker via load balancer
+            # Check workers exist before proceeding
             if len(self._workers) == 0:
-                raise RuntimeError("Worker pool has no workers")
+                # Check if pool was stopped - give more specific error message
+                if self._stopped:
+                    raise RuntimeError("Worker pool is stopped")
+                else:
+                    raise RuntimeError("Worker pool has no workers")
 
             worker_idx = self._load_balancer.select_worker(len(self._workers))
             worker = self._workers[worker_idx]
+
+            # Acquire worker's submission semaphore first (blocks if queue full)
+            # This must happen BEFORE the stopped check to avoid race condition:
+            # Without this order, a thread could check _stopped (False), then block
+            # on semaphore acquisition, then stop() is called, then thread wakes up
+            # and executes the method even though pool is stopped.
+            if not self.blocking and len(self._worker_semaphores) > 0:
+                self._worker_semaphores[worker_idx].acquire()
+
+            # Now check if stopped - this is atomic with execution because we
+            # already hold the semaphore. If stopped, release semaphore and raise.
+            if self._stopped:
+                if not self.blocking and len(self._worker_semaphores) > 0:
+                    self._worker_semaphores[worker_idx].release()
+                raise RuntimeError("Worker pool is stopped")
 
             # Record start for load balancer
             self._load_balancer.record_start(worker_idx)
@@ -363,13 +414,16 @@ class WorkerProxyPool(Typed, ABC):
             # Non-blocking: check if result is a future (has .result attribute)
             # Some methods like map() return iterators, not futures
             if hasattr(result, "result") and callable(getattr(result, "result")):
-                # Wrap future to track completion
+                # Wrap future to track completion and release semaphore
                 wrapped_future = self._wrap_future_with_tracking(result, worker_idx)
                 return wrapped_future
             else:
                 # Not a future (e.g., iterator from map), return as-is
                 # Record completion immediately since we don't track iterators
                 self._load_balancer.record_complete(worker_idx)
+                # Release semaphore for non-future results
+                if len(self._worker_semaphores) > 0:
+                    self._worker_semaphores[worker_idx].release()
                 return result
 
         # Cache the wrapper (safely, in case it doesn't exist yet during __init__)
@@ -393,9 +447,23 @@ class WorkerProxyPool(Typed, ABC):
             - on_demand_active: Number of active on-demand workers
             - load_balancer: Load balancer statistics
             - stopped: Whether pool is stopped
+            - max_queued_tasks: Per-worker submission queue capacity
+            - submission_queues: List of per-worker queue info
         """
         with self._on_demand_lock:
             on_demand_active = len(self._on_demand_workers)
+
+        # Get semaphore info
+        submission_queue_info = []
+        for idx, sem in enumerate(self._worker_semaphores):
+            # BoundedSemaphore doesn't expose current value directly
+            # We can only provide capacity info
+            submission_queue_info.append(
+                {
+                    "worker_idx": idx,
+                    "capacity": self.max_queued_tasks,
+                }
+            )
 
         return {
             "total_workers": len(self._workers),
@@ -404,6 +472,8 @@ class WorkerProxyPool(Typed, ABC):
             "on_demand_active": on_demand_active,
             "load_balancer": self._load_balancer.get_stats(),
             "stopped": self._stopped,
+            "max_queued_tasks": self.max_queued_tasks,
+            "submission_queues": submission_queue_info,
         }
 
     def get_worker_stats(self, worker_id: int) -> Dict[str, Any]:
@@ -527,8 +597,6 @@ class InMemoryWorkerProxyPool(WorkerProxyPool):
             proxy_cls = TaskWorkerProxyClass
 
         # Process limits with worker_index
-        from .base_worker import _transform_worker_limits
-
         worker_limits = _transform_worker_limits(
             limits=self.limits,
             mode=self.mode,
@@ -536,7 +604,12 @@ class InMemoryWorkerProxyPool(WorkerProxyPool):
             worker_index=worker_index,
         )
 
+        # On-demand workers don't need submission queuing since they're ephemeral
+        # and the pool already limits concurrent on-demand workers
+        worker_queue_length = 999999 if self.on_demand else self.max_queued_tasks
+
         # Create worker instance
+        # Note: mode is NOT passed - it's a class variable set by each proxy subclass
         return proxy_cls(
             worker_cls=self.worker_cls,
             blocking=self.blocking,
@@ -545,6 +618,7 @@ class InMemoryWorkerProxyPool(WorkerProxyPool):
             init_kwargs=self.init_kwargs,
             limits=worker_limits,
             retry_config=self.retry_config,
+            max_queued_tasks=worker_queue_length,
         )
 
     def _get_on_demand_limit(self) -> Optional[int]:
@@ -598,8 +672,6 @@ class MultiprocessWorkerProxyPool(WorkerProxyPool):
             proxy_cls = TaskWorkerProxyClass
 
         # Process limits with worker_index
-        from .base_worker import _transform_worker_limits
-
         worker_limits = _transform_worker_limits(
             limits=self.limits,
             mode=self.mode,
@@ -607,7 +679,12 @@ class MultiprocessWorkerProxyPool(WorkerProxyPool):
             worker_index=worker_index,
         )
 
+        # On-demand workers don't need submission queuing since they're ephemeral
+        # and the pool already limits concurrent on-demand workers
+        worker_queue_length = 999999 if self.on_demand else self.max_queued_tasks
+
         # Create worker instance
+        # Note: mode is NOT passed - it's a class variable set by each proxy subclass
         return proxy_cls(
             worker_cls=self.worker_cls,
             blocking=self.blocking,
@@ -616,6 +693,7 @@ class MultiprocessWorkerProxyPool(WorkerProxyPool):
             init_kwargs=self.init_kwargs,
             limits=worker_limits,
             retry_config=self.retry_config,
+            max_queued_tasks=worker_queue_length,
         )
 
     def _get_on_demand_limit(self) -> Optional[int]:
@@ -667,8 +745,6 @@ class RayWorkerProxyPool(WorkerProxyPool):
             proxy_cls = TaskWorkerProxyClass
 
         # Process limits with worker_index
-        from .base_worker import _transform_worker_limits
-
         worker_limits = _transform_worker_limits(
             limits=self.limits,
             mode=self.mode,
@@ -676,7 +752,12 @@ class RayWorkerProxyPool(WorkerProxyPool):
             worker_index=worker_index,
         )
 
+        # On-demand workers don't need submission queuing since they're ephemeral
+        # and the pool already limits concurrent on-demand workers
+        worker_queue_length = 999999 if self.on_demand else self.max_queued_tasks
+
         # Create worker instance with Ray-specific options
+        # Note: mode is NOT passed - it's a class variable set by each proxy subclass
         return proxy_cls(
             worker_cls=self.worker_cls,
             blocking=self.blocking,
@@ -685,6 +766,7 @@ class RayWorkerProxyPool(WorkerProxyPool):
             init_kwargs=self.init_kwargs,
             limits=worker_limits,
             retry_config=self.retry_config,
+            max_queued_tasks=worker_queue_length,
             actor_options=self.actor_options,
         )
 

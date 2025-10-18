@@ -9,6 +9,7 @@ from concurry import (
     RateLimitAlgorithm,
     ResourceLimit,
 )
+from concurry.core.limit.limit_set import InMemorySharedLimitSet, MultiprocessSharedLimitSet
 
 
 class TestLimitSet:
@@ -304,7 +305,6 @@ class TestLimitSetSharedModes:
 
     def test_limitset_default_not_shared(self):
         """Test that LimitSet defaults to shared=False, mode='sync'."""
-        from concurry.core.limit.limit_set import InMemorySharedLimitSet
 
         limits = LimitSet(
             limits=[
@@ -319,7 +319,6 @@ class TestLimitSetSharedModes:
 
     def test_limitset_non_shared_must_be_sync(self):
         """Test that non-shared LimitSets must have mode='sync'."""
-        from concurry.core.limit.limit_set import InMemorySharedLimitSet
 
         # Valid: shared=False, mode="sync"
         limits = LimitSet(
@@ -350,7 +349,6 @@ class TestLimitSetSharedModes:
 
     def test_limitset_shared_sync_mode(self):
         """Test creating shared LimitSet with sync/thread/asyncio mode."""
-        from concurry.core.limit.limit_set import InMemorySharedLimitSet
 
         # All these should create InMemorySharedLimitSet
         for mode in ["sync", "thread", "asyncio"]:
@@ -370,7 +368,6 @@ class TestLimitSetSharedModes:
 
     def test_limitset_shared_process_mode(self):
         """Test creating shared LimitSet with process mode."""
-        from concurry.core.limit.limit_set import MultiprocessSharedLimitSet
 
         limits = LimitSet(
             limits=[
@@ -401,7 +398,6 @@ class TestLimitSetSharedModes:
 
     def test_limitset_thread_safety_non_shared(self):
         """Test that non-shared LimitSet has threading.Lock."""
-        from concurry.core.limit.limit_set import InMemorySharedLimitSet
 
         limits = LimitSet(limits=[ResourceLimit(key="connections", capacity=5)], shared=False, mode="sync")
 
@@ -415,7 +411,6 @@ class TestLimitSetSharedModes:
 
     def test_limitset_acquire_works_across_modes(self):
         """Test that acquisition works regardless of shared/mode."""
-        from concurry.core.limit.limit_set import InMemorySharedLimitSet, MultiprocessSharedLimitSet
 
         test_cases = [
             (False, "sync", InMemorySharedLimitSet),

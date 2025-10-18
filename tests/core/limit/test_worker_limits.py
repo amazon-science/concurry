@@ -5,11 +5,13 @@ import pytest
 from concurry import (
     CallLimit,
     LimitSet,
+    LoadBalancingAlgorithm,
     RateLimit,
     RateLimitAlgorithm,
     ResourceLimit,
     Worker,
 )
+from concurry.core.limit.limit_pool import LimitPool
 
 # Worker mode fixture and cleanup are provided by tests/conftest.py
 
@@ -597,9 +599,6 @@ class TestLimitPoolWorkerIntegration:
         ]
 
         # Create LimitPool
-        from concurry import LoadBalancingAlgorithm
-        from concurry.core.limit.limit_pool import LimitPool
-
         pool = LimitPool(
             limit_sets=limitsets, load_balancing=LoadBalancingAlgorithm.RoundRobin, worker_index=0
         )

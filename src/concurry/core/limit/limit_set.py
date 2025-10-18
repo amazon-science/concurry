@@ -380,9 +380,14 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
         own copy of the Limit objects after pickling.
 
     State Management:
-        - Resource limits: Use Manager.Semaphore (already shared)
+        - Resource limits: Use Manager.Semaphore for blocking + Manager dict for current usage tracking
         - Rate limits: Store token counts and timestamps in Manager dicts
         - Call limits: Store call counts and timestamps in Manager dicts
+        
+    Why Both Semaphore and Shared State for ResourceLimits:
+        - Semaphore: Provides the blocking/unblocking mechanism (can't be queried for availability)
+        - Shared state dict: Provides queryable current usage that all processes can check
+        - Both are kept in sync: semaphore for concurrency control, dict for state inspection
     """
 
     def __init__(self, limits: List[Limit], shared: bool = True, config: Optional[dict] = None):
@@ -401,14 +406,20 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
         self._lock = self._manager.Lock()
         self._resource_semaphores: Dict[str, Any] = {}
 
+        # Shared state for resource limits (Manager-managed)
+        # Each resource limit gets: {"current": current_usage}
+        self._resource_state: Dict[str, Any] = self._manager.dict()
+
         # Shared state for rate/call limits (Manager-managed)
         # Each limit gets: {tokens: int, history: [(timestamp, amount), ...]}
         self._rate_limit_state: Dict[str, Any] = self._manager.dict()
 
-        # Initialize resource semaphores and rate limit state
+        # Initialize resource semaphores and state
         for limit in self.limits:
             if isinstance(limit, ResourceLimit):
                 self._resource_semaphores[limit.key] = self._manager.Semaphore(limit.capacity)
+                # Track current usage in shared state
+                self._resource_state[limit.key] = self._manager.dict({"current": 0})
             elif isinstance(limit, (RateLimit, CallLimit)):
                 # Initialize shared state for this rate/call limit
                 self._rate_limit_state[limit.key] = self._manager.dict(
@@ -436,9 +447,10 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
             limit = self._limits_by_key[key]
 
             if isinstance(limit, ResourceLimit):
-                # Resource limits use semaphore (already shared)
-                # Just check if capacity allows it
-                if limit._current_usage + amount > limit.capacity:
+                # Use shared state to check current usage
+                # The shared state is the source of truth across all processes
+                state = self._resource_state[key]
+                if state["current"] + amount > limit.capacity:
                     return False
 
             elif isinstance(limit, (RateLimit, CallLimit)):
@@ -459,7 +471,7 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
 
         return True
 
-    def _acquire_all(self, requested_amounts: Dict[str, int]) -> Dict[str, Acquisition]:
+    def _acquire_all(self, requested_amounts: Dict[str, int]) -> Optional[Dict[str, Acquisition]]:
         """Acquire all limits using shared state.
 
         Override parent to update Manager-managed shared state instead of
@@ -469,7 +481,7 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
             requested_amounts: Amount to acquire for each limit
 
         Returns:
-            Mapping of limit key to Acquisition
+            Mapping of limit key to Acquisition if successful, None if not available
         """
         acquisitions = {}
         current_time = time.time()
@@ -480,8 +492,16 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
 
                 if isinstance(limit, ResourceLimit):
                     # For ResourceLimit, acquire from semaphore if available
-                    self._acquire_resource(limit, amount)
-                    limit._current_usage += amount
+                    if not self._acquire_resource(limit, amount):
+                        # Semaphore not available - rollback and return None
+                        self._release_acquisitions(acquisitions, requested_amounts)
+                        return None
+                    
+                    # Update shared state (the source of truth across all processes)
+                    state = self._resource_state[key]
+                    state["current"] = state["current"] + amount
+                    self._resource_state[key] = state
+                    
                     acquisitions[key] = Acquisition(limit=limit, requested=amount, successful=True)
 
                 elif isinstance(limit, (RateLimit, CallLimit)):
@@ -514,9 +534,11 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
             with self._lock:
                 if self._can_acquire_all(requested_amounts):
                     acquisitions = self._acquire_all(requested_amounts)
-                    return LimitSetAcquisition(
-                        limit_set=self, acquisitions=acquisitions, successful=True, config=self.config
-                    )
+                    if acquisitions is not None:
+                        return LimitSetAcquisition(
+                            limit_set=self, acquisitions=acquisitions, successful=True, config=self.config
+                        )
+                    # acquisitions is None means semaphore wasn't available, retry
 
             # Check timeout
             if timeout is not None:
@@ -533,33 +555,38 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
         with self._lock:
             if self._can_acquire_all(requested_amounts):
                 acquisitions = self._acquire_all(requested_amounts)
-                return LimitSetAcquisition(
-                    limit_set=self, acquisitions=acquisitions, successful=True, config=self.config
-                )
-            else:
-                acquisitions = {}
-                for key, amount in requested_amounts.items():
-                    limit = self._limits_by_key[key]
-                    acquisitions[key] = Acquisition(limit=limit, requested=amount, successful=False)
+                if acquisitions is not None:
+                    return LimitSetAcquisition(
+                        limit_set=self, acquisitions=acquisitions, successful=True, config=self.config
+                    )
+            
+            # Failed to acquire (either _can_acquire_all failed or semaphore not available)
+            acquisitions = {}
+            for key, amount in requested_amounts.items():
+                limit = self._limits_by_key[key]
+                acquisitions[key] = Acquisition(limit=limit, requested=amount, successful=False)
 
-                return LimitSetAcquisition(
-                    limit_set=self, acquisitions=acquisitions, successful=False, config=self.config
-                )
+            return LimitSetAcquisition(
+                limit_set=self, acquisitions=acquisitions, successful=False, config=self.config
+            )
 
-    def _acquire_resource(self, limit: ResourceLimit, amount: int) -> None:
-        """Acquire resource from multiprocess semaphore."""
+    def _acquire_resource(self, limit: ResourceLimit, amount: int) -> bool:
+        """Acquire resource from multiprocess semaphore.
+        
+        Returns:
+            True if successfully acquired, False if not available
+        """
         semaphore = self._resource_semaphores[limit.key]
         acquired_count = 0
         for i in range(amount):
             if semaphore.acquire(blocking=False):
                 acquired_count += 1
             else:
-                # Failed - rollback
+                # Failed - rollback and return False
                 for j in range(acquired_count):
                     semaphore.release()
-                raise RuntimeError(
-                    f"Failed to acquire ResourceLimit '{limit.key}' despite _can_acquire check"
-                )
+                return False
+        return True
 
     def _release_resource(self, limit: ResourceLimit, amount: int) -> None:
         """Release resource to multiprocess semaphore."""
@@ -589,7 +616,11 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
             if isinstance(limit, ResourceLimit):
                 # Release resources
                 self._release_resource(limit, requested)
-                limit._current_usage -= requested
+                
+                # Update shared state (the source of truth across all processes)
+                state = self._resource_state[key]
+                state["current"] = state["current"] - requested
+                self._resource_state[key] = state
 
             elif isinstance(limit, (RateLimit, CallLimit)):
                 # For Rate/Call limits, clean up history in shared state

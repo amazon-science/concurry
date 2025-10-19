@@ -1,0 +1,229 @@
+# Cursor Rules: Concurry Architecture
+
+For comprehensive architecture details, see [docs/architecture/limits.md](../../docs/architecture/limits.md)
+
+## Limit System Architecture Rules
+
+### Layer 1: Limit Classes (Data Containers)
+
+**RULE**: Limit objects are **NOT thread-safe** and must never be used directly for synchronization.
+
+- `Limit`, `RateLimit`, `CallLimit`, `ResourceLimit` are pure data containers
+- No internal locking or thread-safety
+- All state (`_impl`, `_current_usage`) is unprotected
+- `can_acquire()` is NOT thread-safe
+- ✅ **DO**: Use within LimitSet for thread-safe operations
+- ❌ **DON'T**: Call `limit.can_acquire()` from multiple threads
+- ❌ **DON'T**: Add locks or synchronization to Limit classes
+
+### Layer 2: LimitSet (Thread-Safe Executor)
+
+**RULE**: `LimitSet` is a factory function that returns appropriate backend implementation. All thread-safety happens here.
+
+- Returns `InMemorySharedLimitSet`, `MultiprocessSharedLimitSet`, or `RaySharedLimitSet`
+- Always use `LimitSet()` factory, never instantiate backends directly
+- All acquisition/release must happen through LimitSet methods
+- Lock granularity: Hold lock only during check + acquire and release
+- ✅ **DO**: Use `with limitset.acquire()` for all acquisitions
+- ✅ **DO**: Make `LimitSetAcquisition.__enter__` / `__exit__` the only acquisition/release entry points
+- ❌ **DON'T**: Hold lock during user code execution
+- ❌ **DON'T**: Call `limit.can_acquire()` directly from LimitSet - always under lock
+
+**RULE**: Multiprocess and Ray backends must use centralized shared state, NOT local Limit object state.
+
+- `MultiprocessSharedLimitSet`: Use `Manager.dict()` for all limit state
+- `RaySharedLimitSet`: Use `LimitTrackerActor` for all limit state
+- Override `_can_acquire_all()` to check shared state, not `limit.can_acquire()`
+- Local Limit objects are COPIES after pickling, not shared
+- ✅ **DO**: Check `self._resource_state` / `self._rate_limit_state` in `_can_acquire_all()`
+- ❌ **DON'T**: Trust `limit._current_usage` or `limit._impl` state in multiprocess/Ray
+
+### Layer 3: LimitPool (Load-Balanced Wrapper)
+
+**RULE**: `LimitPool` is **private** to each worker (NOT shared). LimitSets within pool ARE shared.
+
+- Each worker gets own `LimitPool` instance
+- No cross-worker synchronization in LimitPool (fast, scalable)
+- LimitSets within pool are shared (coordinated limiting)
+- Must be `morphic.Typed` subclass (immutable public attributes)
+- ✅ **DO**: Create one LimitPool per worker with unique `worker_index`
+- ✅ **DO**: Use `PrivateAttr` for `_balancer`
+- ❌ **DON'T**: Share LimitPool across workers
+- ❌ **DON'T**: Add synchronization primitives to LimitPool
+
+**RULE**: LimitPool must support serialization for Ray/Process workers.
+
+- Implement `__getstate__` to exclude `_balancer` (contains lock)
+- Implement `__setstate__` to recreate `_balancer` from config
+- Store only serializable state in public attributes
+- ✅ **DO**: Exclude non-serializable state in `__getstate__`
+- ✅ **DO**: Recreate non-serializable state in `__setstate__`
+- ❌ **DON'T**: Store `threading.Lock` or other non-picklable objects in public attributes
+
+**RULE**: LimitPool does NOT support string key indexing.
+
+- Only integer indexing: `pool[0]` returns LimitSet
+- String keys ambiguous when LimitSets have different keys
+- ✅ **DO**: Use `pool[index]["key"]` to get Limit from specific LimitSet
+- ❌ **DON'T**: Implement `__getitem__` for string keys
+- ❌ **DON'T**: Assume all LimitSets have same keys
+
+### Worker Integration
+
+**RULE**: Workers **always** have `self.limits` available, even without configuration.
+
+- `limits=None` → Empty LimitPool with empty LimitSet
+- Always wrap in LimitPool (unified interface)
+- For Ray/Process single workers: Pass `List[Limit]`, wrap inside actor/process
+- For pools: Pass LimitSet/List[LimitSet], wrap in LimitPool with unique `worker_index` per worker
+- ✅ **DO**: Use `_transform_worker_limits()` to normalize all inputs to LimitPool
+- ✅ **DO**: Create empty LimitPool for `limits=None`
+- ❌ **DON'T**: Set `self.limits = None` on workers
+- ❌ **DON'T**: Assume `self.limits` can be None
+
+**RULE**: Worker pools must assign unique `worker_index` to each worker's LimitPool.
+
+- Enables round-robin offset for load distribution
+- Worker N gets `worker_index=N`
+- On-demand workers use incrementing counter for indices
+- ✅ **DO**: Pass `worker_index` to `_transform_worker_limits()` for each worker
+- ✅ **DO**: Use `_on_demand_counter` for on-demand worker indices
+- ❌ **DON'T**: Reuse same `worker_index` for multiple workers in a pool
+
+**RULE**: Mode compatibility must be validated when passing LimitSet to Worker.
+
+- `InMemorySharedLimitSet` only with `sync`, `thread`, `asyncio` workers
+- `MultiprocessSharedLimitSet` only with `process` workers
+- `RaySharedLimitSet` only with `ray` workers
+- ✅ **DO**: Call `_validate_mode_compatibility()` in `_transform_worker_limits()`
+- ✅ **DO**: Raise clear ValueError for incompatible modes
+- ❌ **DON'T**: Allow mode mismatches (will cause runtime failures)
+
+### Acquisition Flow Rules
+
+**RULE**: Config must be copied during acquisition to prevent mutations.
+
+- `LimitSetAcquisition.__init__`: `self.config = dict(config) if config else {}`
+- Prevents user code from mutating LimitSet's config
+- ✅ **DO**: Copy config dict in `LimitSetAcquisition.__init__`
+- ❌ **DON'T**: Store reference to LimitSet's config dict
+
+**RULE**: RateLimits must be updated before context exit. CallLimit/ResourceLimit must NOT be updated.
+
+- `LimitSetAcquisition.__exit__`: Validate all RateLimits updated
+- Raise `RuntimeError` if any RateLimit not updated
+- CallLimit: usage always 1, no update needed
+- ResourceLimit: acquired = used, no update needed
+- ✅ **DO**: Track `_updated_keys` in `LimitSetAcquisition.update()`
+- ✅ **DO**: Validate all RateLimits in `_updated_keys` before release
+- ❌ **DON'T**: Require update for CallLimit or ResourceLimit
+
+**RULE**: Atomic multi-limit acquisition must hold lock for entire check + acquire operation.
+
+- Prevents TOCTOU (Time-Of-Check-Time-Of-Use) races
+- Check `_can_acquire_all()` and `_acquire_all()` under same lock hold
+- Brief lock hold (microseconds) - acceptable
+- ✅ **DO**: Wrap check + acquire in single `with self._lock`
+- ❌ **DON'T**: Release lock between check and acquire
+- ❌ **DON'T**: Hold lock during user code execution
+
+### Partial Acquisition Rules
+
+**RULE**: CallLimit and ResourceLimit are automatically included with default=1 when not specified in `requested`.
+
+- Empty `requested` → Acquire ALL limits (RateLimits must raise ValueError)
+- Non-empty `requested` → Acquire specified + auto-add CallLimit/ResourceLimit with default=1
+- RateLimits NOT auto-added (must be explicit)
+- ✅ **DO**: Auto-include CallLimit/ResourceLimit in `_build_requested_amounts()`
+- ✅ **DO**: Raise ValueError if RateLimit not specified when acquiring all
+- ❌ **DON'T**: Auto-include unspecified RateLimits
+
+### Extension Rules
+
+**RULE**: New Limit types must update both base and backend-specific implementations.
+
+When adding new Limit type:
+1. Subclass `Limit`, implement abstract methods
+2. Update `BaseLimitSet._acquire_all()` with new limit type case
+3. Update `BaseLimitSet._release_acquisitions()` with new limit type case
+4. Update `MultiprocessSharedLimitSet._can_acquire_all()` with shared state handling
+5. Update `RaySharedLimitSet` / `LimitTrackerActor` with centralized state handling
+
+**RULE**: New load balancing algorithms must handle serialization for Ray/Process.
+
+When adding new algorithm:
+1. Add to `LoadBalancingAlgorithm` enum
+2. Create balancer class inheriting from `BaseLoadBalancer`
+3. Update `LimitPool.post_initialize()` to instantiate new balancer
+4. If balancer has non-serializable state, update `LimitPool.__getstate__` / `__setstate__`
+
+**RULE**: New LimitSet backends must handle shared state correctly for their execution mode.
+
+When adding new backend:
+1. Subclass `BaseLimitSet`
+2. Implement all abstract methods (`acquire`, `try_acquire`, `release_limit_set_acquisition`, etc.)
+3. If state not naturally shared: Override `_can_acquire_all()` to use shared state source
+4. Update `LimitSet` factory function to return new backend for specific mode
+5. Update `_validate_mode_compatibility()` to handle new backend
+
+### Code Quality Rules
+
+**RULE**: Never bypass frozen model protection incorrectly.
+
+- Use `object.__setattr__(self, "limits", limit_pool)` to set limits on frozen Typed/BaseModel workers
+- This is safe because it's done once in `__init__`, not during concurrent execution
+- ✅ **DO**: Use `object.__setattr__` in `_create_worker_wrapper()` to set `self.limits`
+- ❌ **DON'T**: Use `object.__setattr__` for arbitrary attribute modifications
+- ❌ **DON'T**: Modify frozen attributes after initialization
+
+**RULE**: Follow explicit check patterns from Concurry coding standards.
+
+- Use `len(collection) == 0` not `not collection`
+- Use `value is None` not `not value`
+- Always include type hints
+- See main Concurry cursor rules for full coding standards
+
+### Testing Rules
+
+**RULE**: Test all execution modes for Limit features.
+
+- Use `worker_mode` fixture for tests that work with all modes
+- Use `pool_mode` or explicit skip for pool-specific tests
+- Test `InMemorySharedLimitSet`, `MultiprocessSharedLimitSet`, and `RaySharedLimitSet`
+- Test serialization for Ray/Process workers
+- ✅ **DO**: Parametrize tests across all modes
+- ✅ **DO**: Test mode compatibility validation
+- ❌ **DON'T**: Test only one execution mode
+
+**RULE**: Test both successful and failed acquisitions.
+
+- Test `try_acquire()` success and failure paths
+- Test timeout scenarios
+- Test atomic rollback on partial failure
+- Test RateLimit update validation
+- ✅ **DO**: Test error paths (missing update, timeout, invalid usage)
+- ✅ **DO**: Test acquisition rollback on partial failure
+- ❌ **DON'T**: Only test happy paths
+
+## Quick Reference
+
+| Concern | Responsibility | Thread-Safe? |
+|---------|----------------|--------------|
+| Define constraints | `Limit` (RateLimit, CallLimit, ResourceLimit) | ❌ NO |
+| Acquire/release | `LimitSet` (factory → backend implementation) | ✅ YES |
+| Load balancing | `LimitPool` (private per worker) | ❌ N/A (no sharing) |
+| Worker integration | `_transform_worker_limits()`, `_create_worker_wrapper()` | ✅ YES (via LimitSet) |
+
+| Backend | Mode | Synchronization | Shared State |
+|---------|------|----------------|--------------|
+| `InMemorySharedLimitSet` | sync, thread, asyncio | `threading.Lock` | Local objects (naturally shared) |
+| `MultiprocessSharedLimitSet` | process | `Manager.Lock()` | `Manager.dict()` (centralized) |
+| `RaySharedLimitSet` | ray | Ray actor | `LimitTrackerActor` (centralized) |
+
+| Input | Transformation | Output |
+|-------|---------------|--------|
+| `None` | Create empty LimitSet | LimitPool([empty_limitset]) |
+| `List[Limit]` | Create LimitSet | LimitPool([limitset]) |
+| `LimitSet` | Wrap in LimitPool | LimitPool([limitset]) |
+| `List[LimitSet]` | Aggregate in LimitPool | LimitPool(limitsets) |
+| `LimitPool` | Pass through | LimitPool (unchanged) |

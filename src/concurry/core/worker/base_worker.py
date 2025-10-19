@@ -514,7 +514,7 @@ def _unwrap_futures_in_args(
 class WorkerBuilder(Typed):
     """Builder for creating worker instances with deferred initialization.
 
-    This class holds configuration from .options() or .pool() calls and provides
+    This class holds configuration from .options() calls and provides
     a .init() method to instantiate the actual worker with initialization arguments.
 
     This is a Typed class that validates all configuration at creation time and
@@ -1626,57 +1626,6 @@ class Worker:
             retry_jitter=retry_jitter,
             retry_until=retry_until,
             options=kwargs,  # Pass **kwargs as options dict
-        )
-
-    @classmethod
-    @validate
-    def pool(
-        cls: Type[T],
-        max_workers: Optional[conint(ge=0)] = None,
-        mode: ExecutionMode = ExecutionMode.Threads,
-        blocking: Optional[bool] = None,
-        **kwargs: Any,
-    ) -> WorkerBuilder:
-        """Configure a worker pool (not yet implemented).
-
-        Returns a WorkerBuilder configured for pool mode. When implemented,
-        this will create a pool of workers that share the same interface
-        as a single worker but with automatic load balancing.
-
-        Args:
-            max_workers: Maximum number of workers in the pool
-            mode: Execution mode for workers in the pool
-            blocking: If True, method calls return results directly instead of futures
-            **kwargs: Additional options for the worker pool
-
-        Returns:
-            A WorkerBuilder that will create a worker pool
-
-        Raises:
-            NotImplementedError: Pool support will be added in a future update
-
-        Example (future API):
-            ```python
-            # Create pool of workers
-            pool = MyWorker.pool(max_workers=5, mode="thread").init(multiplier=3)
-
-            # Use exactly like a single worker
-            future = pool.process(10)
-            result = future.result()  # Dispatches to available worker
-            ```
-        """
-        # Import here to avoid circular imports
-        from ...config import global_config
-
-        # Get defaults for this mode from global config
-        mode_defaults = global_config.get_defaults(mode)
-
-        # Apply default for blocking if not specified
-        if blocking is None:
-            blocking = mode_defaults.blocking
-
-        return WorkerBuilder(
-            worker_cls=cls, mode=mode, blocking=blocking, is_pool=True, max_workers=max_workers, **kwargs
         )
 
     def __new__(cls, *args, **kwargs):

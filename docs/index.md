@@ -147,6 +147,13 @@ Concurry follows best practices:
 - [API Reference](api/index.md) - Detailed API documentation
 - [Examples](examples.md) - Real-world usage examples
 
+## Architecture
+
+Deep dives into Concurry's internal design and implementation:
+
+- [Configuration System](architecture/configuration.md) - How global configuration works
+- [Synchronization System](architecture/synchronization.md) - Design of wait() and gather() primitives
+
 ## Community and Support
 
 - 🐛 [Report Issues](https://github.com/amazon-science/concurry/issues)

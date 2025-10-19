@@ -1,17 +1,80 @@
 # Getting Started
 
-This guide will walk you through the core concepts and basic usage of Concurry.
+This guide will walk you through Concurry's core concepts using a practical example: **making batch LLM calls 50x faster**.
 
-## Core Concepts
+## The Problem: Sequential Code is Slow
 
-Concurry provides five main components:
+Let's say you need to call an LLM API 1,000 times (e.g., evaluating AI-generated responses for safety). Sequential code is painfully slow:
 
-1. **Workers** - Actor pattern for stateful concurrent operations across sync, thread, process, asyncio, and Ray
-2. **Worker Pools** - Scale workers with automatic load balancing and shared resource management
-3. **Limits** - Resource and rate limiting with composable limit types
-4. **Retry Mechanisms** - Automatic retry with configurable strategies and output validation
-5. **Unified Future Interface** - A consistent API for working with futures from any framework
-6. **Progress Tracking** - Beautiful, informative progress bars with rich features
+```python
+import litellm
+from tqdm import tqdm
+
+def call_llm(prompt: str, model: str, temperature: float) -> str:
+    """Call LLM API with a prompt."""
+    response = litellm.completion(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature,
+    )
+    return response.choices[0].message.content
+
+# Load 1,000 prompts
+prompts = [...]  # Your prompts here
+
+# ❌ Sequential: Call LLM one at a time
+model = "gpt-4o-mini"
+responses = []
+for prompt in tqdm(prompts, desc="Processing"):
+    response = call_llm(prompt, model, temperature=0.1)
+    responses.append(response)
+
+# Time: ~775 seconds (12+ minutes!) 😱
+```
+
+**Why is this slow?** Each API call waits for the previous one to complete. Your CPU sits idle while waiting for network I/O.
+
+## The Solution: Concurry Workers
+
+With Concurry, make all calls concurrently with just **3 lines of code changed**:
+
+```python
+from concurry import Worker
+from tqdm import tqdm
+import litellm
+
+# 1. Wrap your logic in a Worker class
+class LLM(Worker):
+    def __init__(self, model: str, temperature: float):
+        self.model = model
+        self.temperature = temperature
+    
+    def call_llm(self, prompt: str) -> str:
+        """Call LLM API with a prompt."""
+        response = litellm.completion(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=self.temperature,
+        )
+        return response.choices[0].message.content
+
+# 2. Create a pool of workers instead of a single instance
+llm = LLM.options(
+    mode='thread',      # Use thread-based concurrency (great for I/O)
+    max_workers=100     # 100 concurrent calls
+).init(model="gpt-4o-mini", temperature=0.1)
+
+# 3. Submit all tasks and collect results using futures
+futures = [llm.call_llm(prompt) for prompt in tqdm(prompts, desc="Submitting")]
+responses = [f.result() for f in tqdm(futures, desc="Collecting")]
+
+# Time: ~16 seconds (50x faster!) 🚀
+```
+
+**What changed?**
+- Added `.options(mode='thread', max_workers=100).init(...)` → Creates a pool of 100 workers
+- Called `.result()` on futures → Waits for each task to complete
+- That's it! 50x speedup with minimal code changes.
 
 ## Installation
 
@@ -21,172 +84,376 @@ First, install Concurry:
 pip install concurry
 ```
 
-For Ray support:
+For distributed computing with Ray:
 
 ```bash
 pip install concurry[ray]
 ```
 
-## Quick Start: Futures
+## What Just Happened?
 
-The unified future interface lets you work with futures from different frameworks using a consistent API:
+Let's break down the key concepts:
+
+### 1. Workers: Stateful Concurrent Actors
+
+A **Worker** is a class that runs concurrently in the background. Think of it as a dedicated assistant that handles tasks for you:
 
 ```python
-from concurry.core.future import wrap_future
-from concurrent.futures import ThreadPoolExecutor
-
-def compute_task(x):
-    """A simple computation task."""
-    return x ** 2
-
-# Create futures using any framework
-with ThreadPoolExecutor() as executor:
-    future = executor.submit(compute_task, 42)
+class LLM(Worker):
+    def __init__(self, model: str, temperature: float):
+        self.model = model          # Worker state
+        self.temperature = temperature
     
-    # Wrap in unified interface
-    unified_future = wrap_future(future)
-    
-    # Use consistent API
-    result = unified_future.result(timeout=5)
-    print(f"Result: {result}")  # Output: Result: 1764
+    def call_llm(self, prompt: str) -> str:
+        # This method runs in the background
+        return litellm.completion(...)
 ```
 
-### Why Unified Futures?
+**Key points:**
+- Workers maintain state (e.g., `self.model`, `self.temperature`)
+- Each method call runs in the background
+- Workers are isolated - one worker's state doesn't affect another
 
-The unified future interface provides:
+### 2. Worker Pools: Parallel Execution
 
-1. **Framework Agnostic Code**: Write once, run with any executor
-2. **Consistent API**: Same methods across all future types
-3. **Async/Await Support**: All futures support `await` syntax
-4. **Automatic Wrapping**: Smart detection of future types
-
-### Supported Future Types
-
-Concurry automatically handles:
-
-- `concurrent.futures.Future` (threading, multiprocessing)
-- `asyncio.Future`
-- Ray's `ObjectRef` (with `concurry[ray]`)
-- Custom `BaseFuture` implementations
-
-## Quick Start: Progress Bars
-
-Create beautiful progress bars with rich features:
+When you use `.options(max_workers=100)`, Concurry creates a **pool** of 100 workers:
 
 ```python
-from concurry.utils.progress import ProgressBar
-import time
-
-# Wrap any iterable
-items = range(100)
-for item in ProgressBar(items, desc="Processing"):
-    time.sleep(0.01)
-    # Progress bar automatically updates and shows success!
-
-# Or create a manual progress bar
-pbar = ProgressBar(total=100, desc="Manual Progress")
-for i in range(100):
-    time.sleep(0.01)
-    pbar.update(1)
-pbar.success("Complete!")
+llm = LLM.options(
+    mode='thread',      # How workers run (thread, process, asyncio, ray)
+    max_workers=100     # How many workers in the pool
+).init(model="gpt-4o-mini", temperature=0.1)
 ```
 
-### Progress Bar Features
+**What happens:**
+- Concurry creates 100 worker threads
+- Each worker can handle one API call at a time
+- 100 API calls can run concurrently
+- Load balancing automatically distributes work across workers
 
-- **Automatic State Tracking**: Success/failure/stop with color coding
-- **Multiple Styles**: Auto-detect notebook, terminal, or Ray environments
-- **Flexible Updates**: Manual or automatic updates with batching
-- **Rich Customization**: Colors, units, descriptions, and more
+### 3. Futures: Asynchronous Results
 
-## Combining Futures and Progress
-
-The real power comes from combining both:
+When you call a worker method, you get a **future** - a placeholder for a result that will arrive later:
 
 ```python
-from concurry.core.future import wrap_future
-from concurry.utils.progress import ProgressBar
-from concurrent.futures import ThreadPoolExecutor
-import time
+# Submit a task - returns immediately with a future
+future = llm.call_llm("What is AI?")
 
-def process_item(item):
-    """Process a single item."""
-    time.sleep(0.1)
-    return item * 2
+# Do other work here...
 
-def parallel_processing(items):
-    """Process items in parallel with progress tracking."""
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        # Submit all tasks
-        futures = [wrap_future(executor.submit(process_item, i)) for i in items]
-        
-        # Track progress
-        results = []
-        for future in ProgressBar(futures, desc="Processing"):
-            result = future.result()
-            results.append(result)
-        
-        return results
-
-# Process 20 items in parallel
-items = range(20)
-results = parallel_processing(items)
-print(f"Processed {len(results)} items")
+# Get the result when you need it (blocks until complete)
+response = future.result()
 ```
+
+**Common pattern:**
+```python
+# Submit all tasks first (fast - just queuing work)
+futures = [llm.call_llm(prompt) for prompt in prompts]
+
+# Collect results later (blocks until each completes)
+responses = [f.result() for f in futures]
+```
+
+This is why Concurry is fast: you submit all 1,000 tasks at once, and 100 workers process them concurrently!
+
+### 4. Unified Interface: One API, Multiple Backends
+
+The same code works across different execution modes:
+
+```python
+# Thread-based (great for I/O like API calls)
+llm = LLM.options(mode='thread', max_workers=100).init(...)
+
+# Process-based (great for CPU-heavy work)
+llm = LLM.options(mode='process', max_workers=8).init(...)
+
+# Async-based (even more I/O efficiency)
+llm = LLM.options(mode='asyncio').init(...)
+
+# Distributed with Ray (scale across machines!)
+llm = LLM.options(mode='ray', max_workers=1000).init(...)
+```
+
+**Just change one parameter**, and your code runs on different backends. No need to learn ThreadPoolExecutor, ProcessPoolExecutor, asyncio, and Ray separately!
+
+## Core Concepts
+
+Concurry provides powerful building blocks for production-grade concurrent systems:
+
+### 1. **Workers** - Stateful Concurrent Actors
+The core abstraction. Workers run in the background across sync, thread, process, asyncio, and Ray modes.
+
+### 2. **Worker Pools** - Automatic Load Balancing
+Scale to hundreds of workers with automatic work distribution and configurable load balancing strategies.
+
+### 3. **Limits** - Rate Limiting & Resource Control
+Enforce API rate limits, token budgets, and resource constraints across all workers with atomic multi-resource acquisition.
+
+### 4. **Retry Mechanisms** - Automatic Fault Tolerance
+Built-in exponential backoff, exception filtering, and output validation. Automatically retries failed tasks.
+
+### 5. **Unified Future Interface** - Framework-Agnostic Results
+Consistent API for working with futures from any framework (threading, asyncio, Ray, etc.)
+
+### 6. **Progress Tracking** - Beautiful Progress Bars
+Rich, color-coded progress bars with success/failure states that work in terminals and notebooks
 
 ## Best Practices
 
-### 1. Always Wrap External Futures
+### 1. Choose the Right Execution Mode
 
 ```python
-# Good - wrap external futures
-future = wrap_future(executor.submit(task))
+# I/O-bound (API calls, database queries, file I/O)
+# → Use 'thread' mode with many workers
+llm = LLM.options(mode='thread', max_workers=100).init(...)
 
-# Less ideal - work directly with framework futures
-# (loses unified interface benefits)
+# CPU-bound (data processing, ML inference)
+# → Use 'process' mode with workers ≈ CPU cores
+processor = DataProcessor.options(mode='process', max_workers=8).init(...)
+
+# Heavy I/O with async libraries (aiohttp, httpx)
+# → Use 'asyncio' mode for even better performance
+api = AsyncAPI.options(mode='asyncio').init(...)
+
+# Distributed across machines
+# → Use 'ray' mode for cluster computing
+model = LargeModel.options(mode='ray', max_workers=1000).init(...)
 ```
 
-### 2. Use Context Managers for Progress Bars
+### 2. Always Clean Up Workers
 
 ```python
-# Manual progress bar
-pbar = ProgressBar(total=100, desc="Work")
+# ✅ Good: Use context managers for automatic cleanup
+with LLM.options(mode='thread', max_workers=100).init(...) as llm:
+    futures = [llm.call_llm(prompt) for prompt in prompts]
+    responses = [f.result() for f in futures]
+# Workers automatically stopped here
+
+# ⚠️ Or manually call stop()
+llm = LLM.options(mode='thread', max_workers=100).init(...)
 try:
-    for i in range(100):
-        # do work
-        pbar.update(1)
-    pbar.success()
-except Exception as e:
-    pbar.failure(str(e))
-    raise
+    futures = [llm.call_llm(prompt) for prompt in prompts]
+    responses = [f.result() for f in futures]
+finally:
+    llm.stop()  # Always clean up!
 ```
 
-### 3. Set Appropriate Timeouts
+### 3. Handle Errors in Parallel Execution
 
 ```python
-# Always set timeouts for future.result()
-try:
-    result = future.result(timeout=30)
-except TimeoutError:
-    print("Task took too long")
-    future.cancel()
+from concurrent.futures import TimeoutError
+
+# Collect results with error handling
+results = []
+errors = []
+
+for i, future in enumerate(futures):
+    try:
+        result = future.result(timeout=30)  # Set reasonable timeout
+        results.append(result)
+    except TimeoutError:
+        errors.append((i, "Timeout"))
+    except Exception as e:
+        errors.append((i, str(e)))
+
+print(f"Success: {len(results)}, Failed: {len(errors)}")
 ```
 
-### 4. Handle Errors Gracefully
+### 4. Use Worker State for Configuration
+
+```python
+# ✅ Good: Store configuration in worker state
+class LLM(Worker):
+    def __init__(self, model: str, temperature: float, max_tokens: int):
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens  # Reused across all calls
+    
+    def call_llm(self, prompt: str) -> str:
+        return litellm.completion(
+            model=self.model,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens
+        )
+
+# ❌ Bad: Pass same config every time
+class BadLLM(Worker):
+    def call_llm(self, prompt: str, model: str, temperature: float) -> str:
+        # Wasteful - passing same values repeatedly
+        return litellm.completion(...)
+```
+
+### 5. Submit All Tasks Before Collecting Results
+
+```python
+# ✅ Good: Submit all tasks first, then collect
+futures = [llm.call_llm(prompt) for prompt in prompts]  # Fast - just queuing
+responses = [f.result() for f in futures]  # Blocks as needed
+
+# ❌ Bad: Submit and wait one at a time
+responses = []
+for prompt in prompts:
+    future = llm.call_llm(prompt)
+    response = future.result()  # Blocks immediately - no parallelism!
+    responses.append(response)
+```
+
+## Adding Production Features
+
+Once you have the basics working, Concurry makes it easy to add production-grade features with minimal code:
+
+### Rate Limiting
+
+Protect your API from rate limit errors by enforcing limits across all workers:
+
+```python
+from concurry import Worker, RateLimit, CallLimit
+
+class LLM(Worker):
+    def __init__(self, model: str, temperature: float):
+        self.model = model
+        self.temperature = temperature
+    
+    def call_llm(self, prompt: str) -> str:
+        # Rate limits automatically enforced
+        with self.limits.acquire(requested={"tokens": 1000}) as acq:
+            response = litellm.completion(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+            )
+            
+            # Report actual token usage for accurate limiting
+            tokens_used = response.usage.total_tokens
+            acq.update(usage={"tokens": tokens_used})
+            
+            return response.choices[0].message.content
+
+# Create pool with shared rate limits
+llm = LLM.options(
+    mode='thread',
+    max_workers=100,
+    limits=[
+        CallLimit(window_seconds=60, capacity=500),     # 500 calls/minute
+        RateLimit(key="tokens", window_seconds=60, capacity=50_000)  # 50k tokens/min
+    ]
+).init(model="gpt-4o-mini", temperature=0.1)
+
+# All 100 workers share the same rate limits
+futures = [llm.call_llm(prompt) for prompt in prompts]
+responses = [f.result() for f in futures]
+```
+
+### Automatic Retries
+
+Handle transient errors automatically with exponential backoff:
+
+```python
+import openai
+
+llm = LLM.options(
+    mode='thread',
+    max_workers=100,
+    
+    # Retry configuration
+    num_retries=5,                                      # Try up to 5 times
+    retry_algorithm="exponential",                       # Exponential backoff
+    retry_wait=1.0,                                      # Start with 1s wait
+    retry_on=[openai.RateLimitError, openai.APIConnectionError],  # Which errors to retry
+    retry_until=lambda r: len(r) > 10                   # Retry until output is valid
+).init(model="gpt-4o-mini", temperature=0.1)
+
+# Automatically retries on rate limits or connection errors
+futures = [llm.call_llm(prompt) for prompt in prompts]
+responses = [f.result() for f in futures]
+```
+
+### Progress Tracking
+
+Add beautiful progress bars to track your batch processing:
 
 ```python
 from concurry.utils.progress import ProgressBar
 
-pbar = ProgressBar(total=100)
-try:
-    for i in range(100):
-        if something_goes_wrong():
-            raise ValueError("Error occurred")
-        pbar.update(1)
-    pbar.success()
-except Exception as e:
-    pbar.failure(f"Failed: {e}")
-    raise
+# Submit tasks with progress
+futures = []
+for prompt in ProgressBar(prompts, desc="Submitting"):
+    futures.append(llm.call_llm(prompt))
+
+# Collect results with progress
+responses = []
+for future in ProgressBar(futures, desc="Processing"):
+    responses.append(future.result())
 ```
+
+### All Together: Production-Ready LLM Worker
+
+Combine all features for a robust production system:
+
+```python
+from concurry import Worker, RateLimit, CallLimit
+from concurry.utils.progress import ProgressBar
+import openai
+import litellm
+
+class ProductionLLM(Worker):
+    def __init__(self, model: str, temperature: float):
+        self.model = model
+        self.temperature = temperature
+    
+    def call_llm(self, prompt: str) -> dict:
+        """Call LLM with rate limiting and error handling."""
+        with self.limits.acquire(requested={"tokens": 2000}) as acq:
+            response = litellm.completion(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+            )
+            
+            # Report actual usage
+            tokens_used = response.usage.total_tokens
+            acq.update(usage={"tokens": tokens_used})
+            
+            return {
+                "text": response.choices[0].message.content,
+                "tokens": tokens_used
+            }
+
+# Production configuration
+llm = ProductionLLM.options(
+    # Execution
+    mode='thread',
+    max_workers=100,
+    
+    # Rate limiting (shared across all workers)
+    limits=[
+        CallLimit(window_seconds=60, capacity=500),
+        RateLimit(key="tokens", window_seconds=60, capacity=50_000)
+    ],
+    
+    # Automatic retries
+    num_retries=5,
+    retry_algorithm="exponential",
+    retry_wait=1.0,
+    retry_on=[openai.RateLimitError, openai.APIConnectionError]
+).init(model="gpt-4o-mini", temperature=0.1)
+
+# Process with progress tracking
+with llm:  # Auto-cleanup with context manager
+    futures = [llm.call_llm(p) for p in ProgressBar(prompts, desc="Submitting")]
+    responses = [f.result() for f in ProgressBar(futures, desc="Processing")]
+
+print(f"Processed {len(responses)} prompts")
+print(f"Total tokens: {sum(r['tokens'] for r in responses)}")
+```
+
+**What you get:**
+- 🚀 **50x faster** than sequential code
+- 🚦 **Rate limiting** prevents API errors
+- 🔁 **Automatic retries** on transient failures
+- 📊 **Progress tracking** for visibility
+- 🧹 **Automatic cleanup** with context managers
+- ⚡ **Production-ready** with minimal code
 
 ## Next Steps
 

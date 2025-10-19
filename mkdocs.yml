@@ -29,6 +29,8 @@ nav:
     - Progress: api/progress.md
   - Architecture:
     - Configuration System: architecture/configuration.md
+    - Retry System: architecture/retries.md
+    - Synchronization System: architecture/synchronization.md
   - Examples: examples.md
   - Contributing: contributing.md
   - Changelog: changelog.md

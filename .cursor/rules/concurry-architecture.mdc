@@ -2,7 +2,135 @@
 
 For comprehensive architecture details, see [docs/architecture/limits.md](../../docs/architecture/limits.md)
 
-## Limit System Architecture Rules
+## Synchronization Architecture and Rules
+
+**CRITICAL**: Follow these rules when working with `wait()`, `gather()`, or future implementations.
+
+See [Architecture: Synchronization System](docs/architecture/synchronization.md) for full details.
+
+### BaseFuture Implementations
+
+**Rule 1**: Each future type has a specific state management strategy:
+- `SyncFuture`: Caches everything (immutable at creation)
+- `ConcurrentFuture`: Pure delegation wrapper (NO caching of `_result`, `_exception`, `_done`, `_cancelled`)
+- `AsyncioFuture`: Pure delegation wrapper (NO caching of `_result`, `_exception`, `_done`)
+- `RayFuture`: Caches state after fetching (stores `_result`, `_exception`, `_done`, `_cancelled`)
+
+**Rule 2**: NEVER set `_done=True` without fetching the result:
+```python
+# ❌ WRONG - RayFuture bug
+def done(self) -> bool:
+    ready, _ = ray.wait([self._object_ref], timeout=0)
+    if len(ready) > 0:
+        self._done = True  # ❌ BUG: _result is still None!
+        return True
+
+# ✅ CORRECT
+def done(self) -> bool:
+    if self._done:
+        return True
+    ready, _ = ray.wait([self._object_ref], timeout=0)
+    return len(ready) > 0  # Don't set _done here
+```
+
+**Rule 3**: All futures must raise consistent exception types:
+- Raise `concurrent.futures.CancelledError`, NOT `asyncio.CancelledError`
+- Raise `TimeoutError`, NOT `ray.exceptions.GetTimeoutError`
+
+**Rule 4**: Callbacks must receive the wrapper (BaseFuture), not the underlying future:
+```python
+# ✅ CORRECT
+def add_done_callback(self, fn: Callable) -> None:
+    self._future.add_done_callback(lambda _: fn(self))  # Pass self, not _
+```
+
+**Rule 5**: Always use `wrap_future()` when accepting external futures:
+```python
+# ✅ CORRECT
+from concurry.core.future import wrap_future
+
+futures_list = [wrap_future(f) for f in external_futures]
+```
+
+### wait() and gather() Functions
+
+**Rule 6**: Cannot mix structure and variadic arguments:
+```python
+# ❌ WRONG
+futures = [f1, f2, f3]
+wait(futures, f4, f5)  # Raises ValueError
+
+# ✅ CORRECT
+wait([f1, f2, f3, f4, f5])  # Pass as list
+wait(f1, f2, f3, f4, f5)     # Pass individually
+```
+
+**Rule 7**: Dict inputs must return dicts with preserved keys:
+```python
+tasks = {"task1": f1, "task2": f2}
+results = gather(tasks)
+# Must return: {"task1": r1, "task2": r2}
+```
+
+**Rule 8**: Always call `fut.result(timeout=0)` after `wait()` completes:
+```python
+# ✅ CORRECT
+done, not_done = wait(futures_list, ...)
+for fut in done:
+    result = fut.result(timeout=0)  # timeout=0 is safe, future is done
+```
+
+**Rule 9**: Ray batch checking must use single `ray.wait()` call:
+```python
+# ✅ CORRECT - batch all Ray futures
+ready, not_ready = ray.wait(
+    ray_futures, 
+    num_returns=len(ray_futures),  # Check all at once
+    timeout=0
+)
+```
+
+### Polling Strategies
+
+**Rule 10**: All polling intervals must come from `global_config`:
+```python
+# ❌ WRONG
+strategy = FixedPollingStrategy(interval=0.01)  # Hardcoded!
+
+# ✅ CORRECT
+from concurry.config import global_config
+defaults = global_config.defaults
+strategy = FixedPollingStrategy(interval=defaults.polling_fixed_interval)
+```
+
+**Rule 11**: New polling strategies must inherit from `BasePollingStrategy`:
+```python
+class CustomStrategy(BasePollingStrategy):
+    aliases = ["custom", PollingAlgorithm.Custom]
+    
+    def get_next_interval(self) -> float: ...
+    def record_completion(self) -> None: ...
+    def record_no_completion(self) -> None: ...
+    def reset(self) -> None: ...
+```
+
+### Extension Guidelines
+
+**Adding New Future Type**:
+1. Inherit from `BaseFuture` and implement all abstract methods
+2. Define `__slots__` with minimal fields (delegate when possible)
+3. Use `FUTURE_UUID_PREFIX` class variable
+4. Update `wrap_future()` function to detect new type
+5. Update `_check_futures_batch()` for batch optimization (if applicable)
+
+**Adding New Polling Strategy**:
+1. Inherit from `BasePollingStrategy` (Registry + MutableTyped)
+2. Define `aliases` for factory creation
+3. Add to `PollingAlgorithm` enum
+4. Add configuration defaults to `GlobalDefaults`
+5. Update strategy creation in `wait()` and `gather()`
+
+## Limit System Architecture and Rules
 
 ### Layer 1: Limit Classes (Data Containers)
 
@@ -205,7 +333,390 @@ When adding new backend:
 - ✅ **DO**: Test acquisition rollback on partial failure
 - ❌ **DON'T**: Only test happy paths
 
-## Quick Reference
+## Retry Architecture and Rules
+
+For comprehensive architecture details, see [docs/architecture/retries.md](../../docs/architecture/retries.md)
+
+**RULE**: ALL retry logic must execute actor-side (inside worker), NEVER client-side.
+
+- Retry loops run in actor/process/thread context
+- Avoids round-trip latency for each retry
+- Only final result crosses process boundary
+- ✅ **DO**: Apply retry in `execute_with_retry` / `execute_with_retry_async`
+- ❌ **DON'T**: Implement retry logic in WorkerProxy or client-side code
+
+**RULE**: Zero overhead when disabled: `num_retries=0` must have NO performance impact.
+
+- Short-circuit in `_create_retry_config()`: Return `None` if `num_retries == 0`
+- Short-circuit in `_create_worker_wrapper()`: Skip retry wrapping if config is `None`
+- Short-circuit in `_execute_task()`: Direct execution if `num_retries == 0`
+- ✅ **DO**: Check `num_retries > 0` before any retry logic
+- ❌ **DON'T**: Create RetryConfig or wrapper overhead when retries disabled
+
+### RetryConfig (Configuration Class)
+
+**RULE**: RetryConfig is `morphic.Typed` (Pydantic-based) for validation, defaults from global_config.
+
+- All fields default to `None`, resolved in `post_initialize()` from `global_config`
+- Validation via `@field_validator` decorators
+- Frozen after initialization (immutable public attributes)
+- ✅ **DO**: Load defaults from `global_config.clone()` in `post_initialize()`
+- ✅ **DO**: Use `object.__setattr__` to set defaults (frozen instance)
+- ❌ **DON'T**: Hardcode default values in field definitions
+
+**RULE**: `retry_on` must be list of exception classes or callables accepting `(exception, **context)`.
+
+- Validator converts single item to list
+- Exception classes must be `BaseException` subclasses
+- Callables must return `bool`
+- ✅ **DO**: Check both `isinstance(item, type)` and `callable(item)` in validator
+- ❌ **DON'T**: Accept arbitrary objects
+
+**RULE**: `retry_until` must be list of callables accepting `(result, **context)`.
+
+- Validator converts single item to list
+- All validators must return `True` for result to be valid (AND logic)
+- ✅ **DO**: Pass result and full context to validators
+- ❌ **DON'T**: Use OR logic (any validator passing)
+
+### Retry Execution Functions
+
+**RULE**: Provide THREE execution functions for different contexts.
+
+1. `execute_with_retry(func, args, kwargs, config, context)` - Sync functions
+2. `execute_with_retry_async(async_func, args, kwargs, config, context)` - Async functions
+3. `execute_with_retry_auto(fn, args, kwargs, config, context)` - TaskWorker dispatcher
+
+- `execute_with_retry_auto` detects function type and dispatches to appropriate function
+- Use `inspect.iscoroutinefunction(fn)` for detection
+- Use `asyncio.run()` to run async retry in sync contexts
+- ✅ **DO**: Use `execute_with_retry_auto` ONLY in `_execute_task` (TaskWorker)
+- ✅ **DO**: Use `execute_with_retry` for sync methods, `execute_with_retry_async` for async methods
+- ❌ **DON'T**: Use `execute_with_retry_auto` in regular method wrappers (not needed)
+
+**RULE**: Context dict must include all debugging information.
+
+```python
+context = {
+    "method_name": str,        # Function/method name
+    "worker_class": str,       # Worker class name or "TaskWorker"
+    "attempt": int,            # Current attempt (1-indexed, updated in loop)
+    "elapsed_time": float,     # Seconds since first attempt (updated in loop)
+    "args": tuple,             # Original positional arguments
+    "kwargs": dict,            # Original keyword arguments
+}
+```
+
+- ✅ **DO**: Update `attempt` and `elapsed_time` each loop iteration
+- ✅ **DO**: Pass context to filters, validators, and error messages
+- ❌ **DON'T**: Omit any context fields
+
+**RULE**: Retry loop must handle both exceptions and validation failures.
+
+```python
+for attempt in 1..max_attempts:
+    try:
+        result = func(*args, **kwargs)
+        
+        # Check validators if configured
+        if config.retry_until:
+            is_valid, error_msg = _validate_result(result, validators, context)
+            if is_valid:
+                return result
+            else:
+                collect_validation_error(error_msg)
+                if last_attempt:
+                    raise RetryValidationError(...)
+                sleep_and_continue()
+        else:
+            return result
+    
+    except Exception as e:
+        if not _should_retry_on_exception(e, filters, context):
+            raise  # Not retriable
+        if last_attempt:
+            raise  # Exhausted retries
+        sleep_and_continue()
+```
+
+- ✅ **DO**: Check validators even on successful execution
+- ✅ **DO**: Collect all results and errors for `RetryValidationError`
+- ❌ **DON'T**: Skip validation on intermediate attempts
+- ❌ **DON'T**: Ignore exception filters
+
+### Worker Method Wrapping
+
+**RULE**: Use TWO different wrapping strategies based on execution mode.
+
+1. **__getattribute__ Interception** (sync, thread, process, asyncio):
+   - Wrap methods on first access
+   - Mark with `__wrapped_with_retry__` flag to avoid double-wrapping
+   - Only wrap public methods (no `_` prefix), callables, not classes
+
+2. **Pre-Wrapped Methods** (Ray only):
+   - Wrap methods at class level before `ray.remote()`
+   - Iterate `worker_cls.__dict__` (only direct methods, not inherited)
+   - Bind `self` at call time via `original_method.__get__(self, type(self))`
+
+- ✅ **DO**: Use `for_ray` parameter to select strategy in `_create_worker_wrapper()`
+- ✅ **DO**: Skip inherited methods in Ray pre-wrapping
+- ❌ **DON'T**: Use `__getattribute__` for Ray (breaks signature inspection)
+- ❌ **DON'T**: Wrap private methods or special methods
+
+**RULE**: Preserve method attributes in wrappers.
+
+```python
+wrapped.__name__ = method.__name__
+wrapped.__doc__ = method.__doc__
+wrapped.__wrapped_with_retry__ = True  # Marker flag
+```
+
+- ✅ **DO**: Copy `__name__` and `__doc__` to wrapper
+- ✅ **DO**: Set `__wrapped_with_retry__` marker for cache detection
+- ❌ **DON'T**: Lose method metadata
+
+### TaskWorker Integration
+
+**RULE**: Apply retry in `_execute_task` method, NOT in `submit()`.
+
+- `submit()` is public → would be wrapped by `__getattribute__` → double-wrapping
+- `_execute_task()` is private → NOT wrapped by `__getattribute__` → single retry application
+- ✅ **DO**: Check `self.retry_config is not None and num_retries > 0` in `_execute_task()`
+- ✅ **DO**: Use `execute_with_retry_auto()` to handle both sync and async functions
+- ❌ **DON'T**: Apply retry logic in `submit()` or `map()` methods
+
+**RULE**: TaskWorker context must use "TaskWorker" as worker class name.
+
+```python
+context = {
+    "method_name": fn.__name__ if hasattr(fn, "__name__") else "anonymous_function",
+    "worker_class_name": "TaskWorker",  # Always "TaskWorker", not actual class
+}
+```
+
+- ✅ **DO**: Use `"TaskWorker"` literal for `worker_class_name`
+- ✅ **DO**: Handle anonymous functions gracefully
+- ❌ **DON'T**: Use actual worker proxy class name
+
+### Backoff Algorithms
+
+**RULE**: Support three backoff algorithms with Full Jitter.
+
+1. **Linear**: `wait = base_wait * attempt`
+2. **Exponential** (default): `wait = base_wait * (2 ** (attempt - 1))`
+3. **Fibonacci**: `wait = base_wait * fibonacci(attempt)`
+
+**RULE**: Apply Full Jitter after backoff calculation.
+
+```python
+calculated_wait = algorithm(attempt, base_wait)
+
+if config.retry_jitter > 0:
+    wait = random.uniform(0, calculated_wait)  # Full Jitter
+else:
+    wait = calculated_wait
+
+return max(0, wait)
+```
+
+- ✅ **DO**: Apply jitter AFTER algorithm calculation
+- ✅ **DO**: Use `random.uniform(0, calculated_wait)` for Full Jitter
+- ❌ **DON'T**: Use partial jitter or fixed jitter amounts
+- ❌ **DON'T**: Allow negative wait times
+
+**RULE**: Fibonacci sequence starts at 1: `[1, 1, 2, 3, 5, 8, 13, ...]`.
+
+```python
+def _fibonacci(n: int) -> int:
+    if n <= 2:
+        return 1
+    a, b = 1, 1
+    for _ in range(n - 2):
+        a, b = b, a + b
+    return b
+```
+
+- ✅ **DO**: Return 1 for `n <= 2`
+- ❌ **DON'T**: Start sequence at 0 or use different indexing
+
+### Exception Filtering
+
+**RULE**: Check all filters in order, return True on first match.
+
+```python
+def _should_retry_on_exception(exception, retry_on_filters, context):
+    for filter_item in retry_on_filters:
+        if isinstance(filter_item, type):
+            # Exception class
+            if isinstance(exception, filter_item):
+                return True
+        elif callable(filter_item):
+            # Callable filter
+            try:
+                if filter_item(exception=exception, **context):
+                    return True
+            except Exception:
+                continue  # If filter raises, skip it
+    return False
+```
+
+- ✅ **DO**: Check both exception classes and callables
+- ✅ **DO**: Catch and ignore exceptions from filters
+- ❌ **DON'T**: Let filter exceptions propagate
+- ❌ **DON'T**: Use AND logic (all filters must match)
+
+### Output Validation
+
+**RULE**: All validators must return True for result to be valid (AND logic).
+
+```python
+def _validate_result(result, validators, context):
+    for validator in validators:
+        try:
+            if not validator(result=result, **context):
+                return False, f"Validator '{validator.__name__}' returned False"
+        except Exception as e:
+            return False, f"Validator '{validator.__name__}' raised: {e}"
+    return True, None
+```
+
+- ✅ **DO**: Require ALL validators to return True
+- ✅ **DO**: Catch validator exceptions and treat as validation failure
+- ✅ **DO**: Return descriptive error messages
+- ❌ **DON'T**: Use OR logic (any validator passing)
+- ❌ **DON'T**: Let validator exceptions propagate
+
+### RetryValidationError
+
+**RULE**: RetryValidationError must be pickleable for multiprocessing.
+
+```python
+class RetryValidationError(Exception):
+    def __reduce__(self):
+        """Support pickling for multiprocessing."""
+        return (
+            self.__class__,
+            (self.attempts, self.all_results, self.validation_errors, self.method_name),
+        )
+```
+
+- ✅ **DO**: Implement `__reduce__` for pickle support
+- ✅ **DO**: Store all results and validation errors from all attempts
+- ❌ **DON'T**: Omit any attributes from `__reduce__`
+
+## Integration Rules
+
+### Interaction with Limits
+
+**RULE**: Retry and limits are independent but coordinated systems.
+
+- Each retry is a complete new method invocation
+- Limits acquired/released via context manager for each attempt
+- Failed attempts release limits immediately (context manager `__exit__`)
+- ✅ **DO**: Let user methods handle limit acquisition normally
+- ✅ **DO**: Rely on context manager to release limits on exception
+- ❌ **DON'T**: Manually manage limits in retry logic
+- ❌ **DON'T**: Hold limits across retry sleep periods
+
+**Flow**:
+```
+Retry Loop
+  ↓
+  User Method
+    ↓
+    with self.limits.acquire():  ← Acquire
+      ... method body ...
+      acq.update()
+    ← Limits released (even on exception)
+  ↓
+  Check exception/validation
+  ↓
+  Sleep + retry if needed
+```
+
+### Serialization
+
+**RULE**: Handle Ray and Process serialization requirements.
+
+**For Process mode**:
+- `RetryConfig`: Pickleable by default (Pydantic model)
+- `RetryValidationError`: Implement `__reduce__`
+- User functions: Must be pickleable
+
+**For Ray mode**:
+- Regular workers: `RetryConfig` passed during actor creation (no special handling)
+- TaskWorker: Serialize `RetryConfig` with `cloudpickle` to avoid Pydantic lock issues
+
+```python
+# In ray_worker.py _execute_task for TaskWorker
+retry_config_bytes = cloudpickle.dumps(self.retry_config)
+
+def ray_retry_wrapper(*args, **kwargs):
+    r_config = cloudpickle.loads(retry_config_bytes)
+    return execute_with_retry_auto(fn, args, kwargs, r_config, context)
+```
+
+- ✅ **DO**: Use `cloudpickle.dumps/loads` for RetryConfig in Ray TaskWorker
+- ❌ **DON'T**: Pass RetryConfig directly to Ray remote function for TaskWorker
+
+## Extension Rules
+
+### Adding New Retry Algorithms
+
+1. Add to `RetryAlgorithm` enum in `constants.py`
+2. Implement in `calculate_retry_wait()` in `retry.py`
+3. Add default to `GlobalDefaults` in `config.py`
+4. Jitter is applied AFTER algorithm calculation (don't modify jitter logic)
+
+### Adding Context Fields
+
+1. Add field to `context` dict in `execute_with_retry` / `execute_with_retry_async`
+2. Update docstring to document new field
+3. Pass to filters/validators via `**context`
+4. Update architecture doc with new field
+
+### Adding Validator/Filter Features
+
+1. Ensure backward compatibility (new features should be optional)
+2. Add validation in `RetryConfig` validators
+3. Pass additional context via `context` dict
+4. Document in RetryConfig docstring
+
+## Testing Rules
+
+**RULE**: Test across all execution modes using `worker_mode` fixture.
+
+- Test regular workers AND TaskWorker
+- Test sync and async methods/functions
+- Test serialization for process/ray modes
+- ✅ **DO**: Parametrize with `worker_mode` fixture
+- ✅ **DO**: Test both method wrapping and TaskWorker integration
+- ❌ **DON'T**: Test only one mode or worker type
+
+**RULE**: Test all retry features in isolation AND integration.
+
+- Unit tests in `test_retry.py`: RetryConfig, algorithms, filters, validators
+- Integration tests in `test_worker_retry.py`: Retry + workers, retry + limits, retry + pools
+- ✅ **DO**: Test edge cases: zero retries, exhausted retries, validation failures
+- ✅ **DO**: Test interaction with limits, pools, Pydantic validation
+- ❌ **DON'T**: Only test happy path
+
+## Common Pitfalls to Avoid
+
+❌ **DON'T**: Apply retry in `submit()` method (causes double-wrapping)
+❌ **DON'T**: Use closure capture for retry logic in process/ray modes
+❌ **DON'T**: Forget to set `num_retries > 0` in RetryConfig
+❌ **DON'T**: Set future timeout too short for retry delays
+❌ **DON'T**: Use `__getattribute__` for Ray workers (breaks signature)
+❌ **DON'T**: Forget `__reduce__` for RetryValidationError
+❌ **DON'T**: Hold limits across retry sleep periods
+❌ **DON'T**: Apply retry client-side
+
+------------------------------------------------------------
+
+# Quick References
+
+### Limits - Quick Reference
 
 | Concern | Responsibility | Thread-Safe? |
 |---------|----------------|--------------|
@@ -227,3 +738,30 @@ When adding new backend:
 | `LimitSet` | Wrap in LimitPool | LimitPool([limitset]) |
 | `List[LimitSet]` | Aggregate in LimitPool | LimitPool(limitsets) |
 | `LimitPool` | Pass through | LimitPool (unchanged) |
+
+### Retry mechanisms - Quick Reference
+
+| Component | Location | Purpose | Key Methods |
+|-----------|----------|---------|-------------|
+| `RetryConfig` | `retry.py` | Configuration | `post_initialize()`, validators |
+| `execute_with_retry` | `retry.py` | Sync retry loop | Main retry logic |
+| `execute_with_retry_async` | `retry.py` | Async retry loop | Async retry logic |
+| `execute_with_retry_auto` | `retry.py` | TaskWorker dispatcher | Sync/async detection |
+| `_create_worker_wrapper` | `base_worker.py` | Method wrapping | Creates wrapper class |
+| `create_retry_wrapper` | `retry.py` | Single method wrapper | Wraps one method |
+| `calculate_retry_wait` | `retry.py` | Backoff + jitter | Returns wait time |
+| `_should_retry_on_exception` | `retry.py` | Exception filtering | Returns bool |
+| `_validate_result` | `retry.py` | Output validation | Returns (bool, error) |
+
+| Execution Mode | Wrapping Strategy | TaskWorker Function |
+|----------------|-------------------|---------------------|
+| sync, thread, process, asyncio | `__getattribute__` | `execute_with_retry_auto` |
+| ray | Pre-wrapped at class level | `cloudpickle` + `execute_with_retry_auto` |
+
+| Algorithm | Formula | Example (base=1.0) |
+|-----------|---------|-------------------|
+| Linear | `base * attempt` | 1, 2, 3, 4, 5, ... |
+| Exponential | `base * 2^(attempt-1)` | 1, 2, 4, 8, 16, ... |
+| Fibonacci | `base * fib(attempt)` | 1, 1, 2, 3, 5, 8, ... |
+
+Then apply Full Jitter: `random.uniform(0, calculated_wait)`

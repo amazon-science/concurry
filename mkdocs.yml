@@ -12,14 +12,14 @@ nav:
   - Installation: installation.md
   - User Guide:
     - Getting Started: user-guide/getting-started.md
-    - Configuration: user-guide/configuration.md
     - Workers: user-guide/workers.md
     - Worker Pools: user-guide/pools.md
-    - Synchronization: user-guide/synchronization.md
-    - Limits: user-guide/limits.md
-    - Retry Mechanisms: user-guide/retries.md
     - Futures: user-guide/futures.md
+    - Synchronization: user-guide/synchronization.md
+    - Rate and Resource Limits: user-guide/limits.md
+    - Automatic Retries: user-guide/retries.md
     - Progress Tracking: user-guide/progress.md
+    - Configuration: user-guide/configuration.md
   - API Reference:
     - Overview: api/index.md
     - Workers: api/workers.md
@@ -28,9 +28,11 @@ nav:
     - Futures: api/futures.md
     - Progress: api/progress.md
   - Architecture:
-    - Configuration System: architecture/configuration.md
+    - Worker Pool System: architecture/workers.md
+    - Limit System: architecture/limits.md
     - Retry System: architecture/retries.md
     - Synchronization System: architecture/synchronization.md
+    - Configuration System: architecture/configuration.md
   - Examples: examples.md
   - Contributing: contributing.md
   - Changelog: changelog.md

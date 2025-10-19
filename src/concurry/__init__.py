@@ -6,6 +6,8 @@ across asyncio, threads, processes and distributed systems.
 """
 
 # Core types
+# Global configuration
+from .config import global_config, temp_config
 from .core import (
     ALL_COMPLETED,
     FIRST_COMPLETED,
@@ -85,6 +87,9 @@ __all__ = [
     "RetryValidationError",
     # Utilities
     "ProgressBar",
+    # Global configuration
+    "global_config",
+    "temp_config",
 ]
 
 # Conditionally export RayFuture if Ray is installed

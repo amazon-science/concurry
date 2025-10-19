@@ -7,7 +7,7 @@ from typing import Any, Callable, ClassVar, Optional, Type, TypeVar
 
 from morphic import Typed, validate
 from morphic.structs import map_collection
-from pydantic import ConfigDict, PrivateAttr
+from pydantic import ConfigDict, PrivateAttr, confloat, conint
 
 from ..constants import ExecutionMode, LoadBalancingAlgorithm
 from ..future import BaseFuture
@@ -523,94 +523,78 @@ def _unwrap_futures_in_args(
     return unwrapped_args, unwrapped_kwargs
 
 
-class WorkerBuilder:
+class WorkerBuilder(Typed):
     """Builder for creating worker instances with deferred initialization.
 
     This class holds configuration from .options() or .pool() calls and provides
     a .init() method to instantiate the actual worker with initialization arguments.
+
+    This is a Typed class that validates all configuration at creation time and
+    provides immutable configuration with validation.
     """
 
-    def __init__(
-        self,
-        worker_cls: Type["Worker"],
-        mode: ExecutionMode,
-        blocking: bool = False,
-        max_workers: Optional[int] = None,
-        load_balancing: Optional[LoadBalancingAlgorithm] = None,
-        on_demand: bool = False,
-        max_queued_tasks: Optional[int] = None,
-        # Retry parameters
-        num_retries: int = 0,
-        retry_on: Optional[Any] = None,
-        retry_algorithm: RetryAlgorithm = RetryAlgorithm.Exponential,
-        retry_wait: float = 1.0,
-        retry_jitter: float = 0.3,
-        retry_until: Optional[Any] = None,
-        **options: Any,
-    ):
-        """Initialize the worker builder.
+    # Public configuration fields (immutable after creation)
+    worker_cls: Type["Worker"]
+    mode: ExecutionMode
+    blocking: bool
+    max_workers: Optional[conint(ge=0)]
+    load_balancing: Optional[LoadBalancingAlgorithm]
+    on_demand: bool
+    max_queued_tasks: Optional[conint(ge=0)]
+    # Retry parameters
+    num_retries: conint(ge=0)
+    retry_on: Optional[Any]
+    retry_algorithm: RetryAlgorithm
+    retry_wait: confloat(ge=0)
+    retry_jitter: confloat(ge=0, le=1)
+    retry_until: Optional[Any]
+    # Extra options dictionary
+    options: dict[str, Any]
 
-        Args:
-            worker_cls: The worker class to instantiate
-            mode: Execution mode (sync, thread, process, asyncio, ray)
-            blocking: If True, method calls return results directly instead of futures
-            max_workers: Maximum number of workers in pool (None = single worker)
-            load_balancing: Load balancing algorithm for pool
-            on_demand: If True, create workers on-demand
-            num_retries: Maximum number of retry attempts
-            retry_on: Exception types or callables that trigger retries
-            retry_algorithm: Backoff strategy (linear, exponential, fibonacci)
-            retry_wait: Minimum wait time between retries
-            retry_jitter: Jitter factor (0-1)
-            retry_until: Validation functions for output
-            **options: Additional options for the worker/pool
+    @classmethod
+    def pre_initialize(cls, data: dict) -> None:
+        """Validate configuration before initialization.
 
-        Raises:
-            ValueError: If deprecated init_args/init_kwargs are passed or invalid configuration
+        This method is called by Typed before field validation.
         """
-        if "init_args" in options:
+        # Check for deprecated parameters
+        if "init_args" in data.get("options", {}):
             raise ValueError(
                 "The 'init_args' parameter is no longer supported. "
                 "Use .init(*args) instead. "
                 "Example: Worker.options(mode='thread').init(arg1, arg2)"
             )
-        if "init_kwargs" in options:
+        if "init_kwargs" in data.get("options", {}):
             raise ValueError(
                 "The 'init_kwargs' parameter is no longer supported. "
                 "Use .init(**kwargs) instead. "
                 "Example: Worker.options(mode='thread').init(key1=val1, key2=val2)"
             )
 
-        mode: ExecutionMode = ExecutionMode(mode)
-        # Note: Do NOT set default max_workers here - None means single worker
-        # Defaults are only used when explicitly creating a pool (_should_create_pool returns True)
+    def post_initialize(self) -> None:
+        """Validate pool configuration after initialization.
 
-        # Determine max_queued_tasks (use defaults if not specified)
-        if max_queued_tasks is None:
-            max_queued_tasks: Optional[int] = self._get_default_max_queued_tasks(mode)
+        This method is called by Typed after all fields are set.
+        """
+        # Validate max_workers for different modes
+        if self.max_workers is not None:
+            # Sync and Asyncio must have max_workers=1 or None
+            if self.mode in (ExecutionMode.Sync, ExecutionMode.Asyncio):
+                if self.max_workers != 1:
+                    raise ValueError(
+                        f"max_workers must be 1 for {self.mode.value} mode, got {self.max_workers}"
+                    )
 
-        # Determine load_balancing algorithm
-        if load_balancing is None:
-            load_balancing: LoadBalancingAlgorithm = self._get_default_load_balancing(on_demand)
-        load_balancing: LoadBalancingAlgorithm = LoadBalancingAlgorithm(load_balancing)
+        # Validate on_demand for different modes
+        if self.on_demand:
+            # Sync and Asyncio don't support on_demand
+            if self.mode in (ExecutionMode.Sync, ExecutionMode.Asyncio):
+                raise ValueError(f"on_demand mode is not supported for {self.mode.value} execution")
 
-        self._worker_cls = worker_cls
-        self._mode = mode
-        self._blocking = blocking
-        self._max_workers = max_workers
-        self._load_balancing = load_balancing
-        self._on_demand = on_demand
-        self._max_queued_tasks = max_queued_tasks
-        self._num_retries = num_retries
-        self._retry_on = retry_on
-        self._retry_algorithm = retry_algorithm
-        self._retry_wait = retry_wait
-        self._retry_jitter = retry_jitter
-        self._retry_until = retry_until
-        self._options = options
-
-        # Validate configuration
-        self._validate_pool_config()
+            # With on_demand and max_workers=0, validate limits
+            if self.max_workers == 0:
+                # This is valid for Thread, Process, and Ray
+                pass
 
     def _create_retry_config(self) -> Optional[Any]:
         """Create RetryConfig from retry parameters.
@@ -620,101 +604,18 @@ class WorkerBuilder:
         """
 
         # Fast path: if num_retries is 0, don't create config
-        if self._num_retries == 0:
+        if self.num_retries == 0:
             return None
 
         # Create RetryConfig
         return RetryConfig(
-            num_retries=self._num_retries,
-            retry_on=self._retry_on if self._retry_on is not None else [Exception],
-            retry_algorithm=RetryAlgorithm(self._retry_algorithm),
-            retry_wait=self._retry_wait,
-            retry_jitter=self._retry_jitter,
-            retry_until=self._retry_until,
+            num_retries=self.num_retries,
+            retry_on=self.retry_on if self.retry_on is not None else [Exception],
+            retry_algorithm=RetryAlgorithm(self.retry_algorithm),
+            retry_wait=self.retry_wait,
+            retry_jitter=self.retry_jitter,
+            retry_until=self.retry_until,
         )
-
-    def _validate_pool_config(self) -> None:
-        """Validate pool configuration parameters.
-
-        Raises:
-            ValueError: If configuration is invalid
-        """
-        execution_mode = self._mode
-
-        # Validate max_workers for different modes
-        if self._max_workers is not None:
-            if self._max_workers < 0:
-                raise ValueError("max_workers must be non-negative")
-
-            # Sync and Asyncio must have max_workers=1 or None
-            if execution_mode in (ExecutionMode.Sync, ExecutionMode.Asyncio):
-                if self._max_workers != 1:
-                    raise ValueError(
-                        f"max_workers must be 1 for {execution_mode.value} mode, got {self._max_workers}"
-                    )
-
-        # Validate on_demand for different modes
-        if self._on_demand:
-            # Sync and Asyncio don't support on_demand
-            if execution_mode in (ExecutionMode.Sync, ExecutionMode.Asyncio):
-                raise ValueError(f"on_demand mode is not supported for {execution_mode.value} execution")
-
-            # With on_demand and max_workers=0, validate limits
-            if self._max_workers == 0:
-                # This is valid for Thread, Process, and Ray
-                pass
-
-    @classmethod
-    def _get_default_max_workers(cls, execution_mode: ExecutionMode) -> int:
-        """Get default max_workers for pool based on mode.
-
-        Returns:
-            Default number of workers for the mode
-        """
-        if execution_mode == ExecutionMode.Sync:
-            return 1
-        elif execution_mode == ExecutionMode.Asyncio:
-            return 1
-        elif execution_mode == ExecutionMode.Threads:
-            return 24
-        elif execution_mode == ExecutionMode.Processes:
-            return 4
-        elif execution_mode == ExecutionMode.Ray:
-            return 0  # Unlimited for on-demand
-        else:
-            return 1
-
-    @classmethod
-    def _get_default_max_queued_tasks(cls, execution_mode: ExecutionMode) -> Optional[int]:
-        """Get default submission queue length for pool based on execution mode.
-
-        Returns:
-            Default submission queue length for the mode (None for sync/asyncio to bypass queuing)
-        """
-        if execution_mode == ExecutionMode.Sync:
-            return None  # No queueing for sync mode
-        elif execution_mode == ExecutionMode.Asyncio:
-            return None  # No queueing for asyncio mode
-        elif execution_mode == ExecutionMode.Threads:
-            return 100
-        elif execution_mode == ExecutionMode.Processes:
-            return 5
-        elif execution_mode == ExecutionMode.Ray:
-            return 2
-        else:
-            raise ValueError(f"Unsupported execution mode: {execution_mode}")
-
-    @classmethod
-    def _get_default_load_balancing(cls, on_demand: bool) -> LoadBalancingAlgorithm:
-        """Get default load balancing algorithm.
-
-        Returns:
-            Default load balancing algorithm
-        """
-        if on_demand:
-            return LoadBalancingAlgorithm.Random  # Random is best for ephemeral workers
-        else:
-            return LoadBalancingAlgorithm.RoundRobin  # Round-robin is best for persistent pools
 
     def _should_create_pool(self) -> bool:
         """Determine if a pool should be created.
@@ -723,11 +624,11 @@ class WorkerBuilder:
             True if pool should be created, False for single worker
         """
         # On-demand always creates pool
-        if self._on_demand:
+        if self.on_demand:
             return True
 
         # max_workers > 1 creates pool
-        if self._max_workers is not None and self._max_workers > 1:
+        if self.max_workers is not None and self.max_workers > 1:
             return True
 
         return False
@@ -748,7 +649,7 @@ class WorkerBuilder:
             return
 
         # Check if worker class is a Pydantic BaseModel subclass
-        is_pydantic_based = isinstance(self._worker_cls, type) and issubclass(self._worker_cls, BaseModel)
+        is_pydantic_based = isinstance(self.worker_cls, type) and issubclass(self.worker_cls, BaseModel)
 
         if not is_pydantic_based:
             return
@@ -760,7 +661,7 @@ class WorkerBuilder:
             if execution_mode != ExecutionMode.Ray:
                 # Warn that Ray mode won't work with this worker
                 warnings.warn(
-                    f"Worker class '{self._worker_cls.__name__}' inherits from Pydantic BaseModel. "
+                    f"Worker class '{self.worker_cls.__name__}' inherits from Pydantic BaseModel. "
                     f"This worker will NOT be compatible with Ray mode due to Ray's actor wrapping "
                     f"conflicting with Pydantic's __setattr__. Consider using composition instead of "
                     f"inheritance if you need Ray support.",
@@ -774,10 +675,10 @@ class WorkerBuilder:
         # Raise error if actually trying to use Ray mode
         if execution_mode == ExecutionMode.Ray:
             raise ValueError(
-                f"Cannot create Ray worker with Pydantic-based class '{self._worker_cls.__name__}'. "
+                f"Cannot create Ray worker with Pydantic-based class '{self.worker_cls.__name__}'. "
                 f"Ray's actor wrapping mechanism conflicts with Pydantic's __setattr__ implementation. "
                 f"\n\nWorkaround: Use composition instead of inheritance:\n"
-                f"  class {self._worker_cls.__name__}(Worker):\n"
+                f"  class {self.worker_cls.__name__}(Worker):\n"
                 f"      def __init__(self, ...):\n"
                 f"          self.config = YourPydanticModel(...)\n"
                 f"\nThis applies to both morphic.Typed and pydantic.BaseModel."
@@ -831,7 +732,7 @@ class WorkerBuilder:
         from .thread_worker import ThreadWorkerProxy
 
         # Convert mode string to ExecutionMode
-        execution_mode = self._mode
+        execution_mode = self.mode
 
         # Check for Ray + Pydantic incompatibility
         self._check_ray_pydantic_compatibility(execution_mode)
@@ -853,8 +754,8 @@ class WorkerBuilder:
             raise ValueError(f"Unsupported execution mode: {execution_mode}")
 
         # If this is TaskWorker, create a combined proxy class with TaskWorkerMixin
-        if self._worker_cls is TaskWorker or (
-            isinstance(self._worker_cls, type) and issubclass(self._worker_cls, TaskWorker)
+        if self.worker_cls is TaskWorker or (
+            isinstance(self.worker_cls, type) and issubclass(self.worker_cls, TaskWorker)
         ):
             # Create a dynamic class that combines the base proxy with TaskWorkerMixin
             # Use TaskWorkerMixin as the first base class so its methods take precedence
@@ -865,7 +766,7 @@ class WorkerBuilder:
             )
 
         # Process limits (always, even if None - creates empty LimitPool)
-        processed_options = dict(self._options)
+        processed_options = dict(self.options)
         processed_options["limits"] = _transform_worker_limits(
             limits=processed_options.get("limits"),
             mode=execution_mode,
@@ -882,11 +783,11 @@ class WorkerBuilder:
         # Typed expects all parameters as keyword arguments
         # Note: mode is NOT passed - it's a class variable set by each proxy subclass
         return proxy_cls(
-            worker_cls=self._worker_cls,
+            worker_cls=self.worker_cls,
             init_args=args,
             init_kwargs=kwargs,
-            blocking=self._blocking,
-            max_queued_tasks=self._max_queued_tasks,
+            blocking=self.blocking,
+            max_queued_tasks=self.max_queued_tasks,
             **processed_options,
         )
 
@@ -903,6 +804,8 @@ class WorkerBuilder:
         Raises:
             ValueError: If trying to create Ray pool with Pydantic-based class
         """
+        # Import here to avoid circular imports
+        from ...config import global_config
         from .worker_pool import (
             InMemoryWorkerProxyPool,
             MultiprocessWorkerProxyPool,
@@ -910,7 +813,7 @@ class WorkerBuilder:
         )
 
         # Convert mode string to ExecutionMode
-        execution_mode = ExecutionMode(self._mode)
+        execution_mode = ExecutionMode(self.mode)
 
         # Check for Ray + Pydantic incompatibility
         self._check_ray_pydantic_compatibility(execution_mode)
@@ -918,14 +821,14 @@ class WorkerBuilder:
         # Process limits for pool (always, even if None - creates empty LimitPool)
         # Note: worker_index will be assigned per-worker in pool initialization
         limits = _transform_worker_limits(
-            limits=self._options.get("limits"),
+            limits=self.options.get("limits"),
             mode=execution_mode,
             is_pool=True,
             worker_index=0,  # Placeholder, actual indices assigned per worker
         )
 
         # Update options with processed limits
-        pool_options = dict(self._options)
+        pool_options = dict(self.options)
         pool_options["limits"] = limits
 
         # Create retry config if needed
@@ -944,20 +847,21 @@ class WorkerBuilder:
             raise ValueError(f"Unsupported execution mode for pool: {execution_mode}")
 
         # Apply default max_workers for pool if not specified
-        max_workers = self._max_workers
+        max_workers = self.max_workers
         if max_workers is None:
-            max_workers = self._get_default_max_workers(execution_mode)
+            mode_defaults = global_config.get_defaults(execution_mode)
+            max_workers = mode_defaults.max_workers
 
         # Create pool instance
         return pool_cls(
-            worker_cls=self._worker_cls,
+            worker_cls=self.worker_cls,
             mode=execution_mode,
             max_workers=max_workers,
-            load_balancing=self._load_balancing,
-            on_demand=self._on_demand,
-            blocking=self._blocking,
-            max_queued_tasks=self._max_queued_tasks,
-            unwrap_futures=self._options.get("unwrap_futures", True),
+            load_balancing=self.load_balancing,
+            on_demand=self.on_demand,
+            blocking=self.blocking,
+            max_queued_tasks=self.max_queued_tasks,
+            unwrap_futures=self.options.get("unwrap_futures", True),
             limits=limits,
             init_args=args,
             init_kwargs=kwargs,
@@ -1443,16 +1347,16 @@ class Worker:
         cls: Type[T],
         mode: ExecutionMode = ExecutionMode.Sync,
         blocking: bool = False,
-        max_workers: Optional[int] = None,
+        max_workers: Optional[conint(ge=0)] = None,
         load_balancing: Optional[LoadBalancingAlgorithm] = None,
         on_demand: bool = False,
-        max_queued_tasks: Optional[int] = None,
+        max_queued_tasks: Optional[conint(ge=0)] = None,
         # Retry parameters
         num_retries: int = 0,
         retry_on: Optional[Any] = None,
         retry_algorithm: RetryAlgorithm = RetryAlgorithm.Exponential,
-        retry_wait: float = 1.0,
-        retry_jitter: float = 0.3,
+        retry_wait: confloat(ge=0) = 1.0,
+        retry_jitter: confloat(ge=0, le=1) = 0.3,
         retry_until: Optional[Any] = None,
         **kwargs: Any,
     ) -> WorkerBuilder:
@@ -1651,6 +1555,23 @@ class Worker:
                 ).init()
                 ```
         """
+        # Import here to avoid circular imports
+        from ...config import global_config
+
+        # Get defaults for this mode from global config
+        mode_defaults = global_config.get_defaults(mode)
+
+        # Apply defaults for max_queued_tasks if not specified
+        if max_queued_tasks is None:
+            max_queued_tasks = mode_defaults.max_queued_tasks
+
+        # Apply defaults for load_balancing if not specified
+        if load_balancing is None:
+            if on_demand:
+                load_balancing = mode_defaults.load_balancing_on_demand
+            else:
+                load_balancing = mode_defaults.load_balancing
+
         return WorkerBuilder(
             worker_cls=cls,
             mode=mode,
@@ -1665,14 +1586,14 @@ class Worker:
             retry_wait=retry_wait,
             retry_jitter=retry_jitter,
             retry_until=retry_until,
-            **kwargs,
+            options=kwargs,  # Pass **kwargs as options dict
         )
 
     @classmethod
     @validate
     def pool(
         cls: Type[T],
-        max_workers: Optional[int] = None,
+        max_workers: Optional[conint(ge=0)] = None,
         mode: ExecutionMode = ExecutionMode.Threads,
         blocking: bool = False,
         **kwargs: Any,
@@ -1848,8 +1769,8 @@ class WorkerProxy(Typed, ABC):
 
     # Private attributes (defined with PrivateAttr, initialized in post_initialize)
     _stopped: bool = PrivateAttr(default=False)
-    _options: dict = PrivateAttr(default_factory=dict)
-    _method_cache: dict = PrivateAttr(default_factory=dict)
+    _options: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _method_cache: dict[str, Any] = PrivateAttr(default_factory=dict)
     _submission_semaphore: Optional[Any] = PrivateAttr(default=None)
 
     def post_initialize(self) -> None:

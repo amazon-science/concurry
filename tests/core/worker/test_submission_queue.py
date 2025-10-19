@@ -123,10 +123,10 @@ class TestSubmissionQueueBasics:
         # Default values: sync/asyncio=None (bypass), thread=100, process=5, ray=2
         expected = {
             "sync": None,
-            "thread": 100,
-            "process": 5,
+            "thread": 1000,
+            "process": 100,
             "asyncio": None,
-            "ray": 2,
+            "ray": 3,
         }
         assert worker.max_queued_tasks == expected[worker_mode]
         worker.stop()

@@ -7,10 +7,10 @@ with load balancing, on-demand creation, and shared resource limits.
 import multiprocessing as mp
 import threading
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any, Callable, Optional, Type
 
 from morphic import Typed
-from pydantic import PrivateAttr
+from pydantic import PrivateAttr, conint
 
 from ..algorithms.load_balancing import LoadBalancer
 from ..constants import ExecutionMode, LoadBalancingAlgorithm
@@ -132,26 +132,26 @@ class WorkerProxyPool(Typed, ABC):
     # Public fields (immutable after creation)
     worker_cls: Type[Worker]
     mode: ExecutionMode
-    max_workers: int
+    max_workers: conint(ge=0)
     load_balancing: LoadBalancingAlgorithm
     on_demand: bool
     blocking: bool
     unwrap_futures: bool
     limits: Optional[Any]  # Shared LimitSet (processed by WorkerBuilder)
     retry_config: Optional[Any] = None  # RetryConfig instance (processed by WorkerBuilder)
-    max_queued_tasks: int = 2
+    max_queued_tasks: Optional[conint(ge=0)] = None  # Default comes from global_config
     init_args: tuple
     init_kwargs: dict
 
     # Private attributes (mutable, type-checked)
     _load_balancer: Any = PrivateAttr()
-    _workers: List[Any] = PrivateAttr()
+    _workers: list[Any] = PrivateAttr()
     _stopped: bool = PrivateAttr()
-    _method_cache: Dict[str, Callable] = PrivateAttr()
-    _on_demand_workers: List[Any] = PrivateAttr()
+    _method_cache: dict[str, Callable] = PrivateAttr()
+    _on_demand_workers: list[Any] = PrivateAttr()
     _on_demand_lock: Any = PrivateAttr()
     _on_demand_counter: int = PrivateAttr()  # Counter for on-demand worker indices
-    _worker_semaphores: List[Any] = PrivateAttr()  # Per-worker submission semaphores
+    _worker_semaphores: list[Any] = PrivateAttr()  # Per-worker submission semaphores
 
     def post_initialize(self) -> None:
         """Initialize private attributes after Typed validation."""
@@ -436,7 +436,7 @@ class WorkerProxyPool(Typed, ABC):
 
         return method_wrapper
 
-    def get_pool_stats(self) -> Dict[str, Any]:
+    def get_pool_stats(self) -> dict[str, Any]:
         """Get pool statistics.
 
         Returns:
@@ -448,7 +448,7 @@ class WorkerProxyPool(Typed, ABC):
             - load_balancer: Load balancer statistics
             - stopped: Whether pool is stopped
             - max_queued_tasks: Per-worker submission queue capacity
-            - submission_queues: List of per-worker queue info
+            - submission_queues: list of per-worker queue info
         """
         with self._on_demand_lock:
             on_demand_active = len(self._on_demand_workers)
@@ -476,7 +476,7 @@ class WorkerProxyPool(Typed, ABC):
             "submission_queues": submission_queue_info,
         }
 
-    def get_worker_stats(self, worker_id: int) -> Dict[str, Any]:
+    def get_worker_stats(self, worker_id: int) -> dict[str, Any]:
         """Get statistics for a specific worker.
 
         Args:
@@ -712,7 +712,7 @@ class RayWorkerProxyPool(WorkerProxyPool):
         - Ray: Multiple workers with Ray-based distributed execution
     """
 
-    actor_options: Optional[Dict[str, Any]] = None  # Ray actor resource options
+    actor_options: Optional[dict[str, Any]] = None  # Ray actor resource options
 
     def _initialize_pool(self) -> None:
         """Initialize the worker pool."""

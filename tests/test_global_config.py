@@ -65,28 +65,6 @@ class TestGlobalConfig:
         assert global_config.thread.max_queued_tasks == 1000
         assert global_config.ray.max_queued_tasks == 3
 
-    def test_config_per_mode_defaults(self):
-        """Test that each mode has correct defaults."""
-        # Sync
-        assert global_config.sync.max_workers == 1
-        assert global_config.sync.max_queued_tasks is None
-
-        # Asyncio
-        assert global_config.asyncio.max_workers == 1
-        assert global_config.asyncio.max_queued_tasks is None
-
-        # Thread
-        assert global_config.thread.max_workers == 30
-        assert global_config.thread.max_queued_tasks == 1000
-
-        # Process
-        assert global_config.process.max_workers == 4
-        assert global_config.process.max_queued_tasks == 100
-
-        # Ray
-        assert global_config.ray.max_workers == 0
-        assert global_config.ray.max_queued_tasks == 3
-
     def test_config_get_defaults_method(self):
         """Test get_defaults() method."""
         thread_defaults = global_config.get_defaults(ExecutionMode.Threads)
@@ -266,3 +244,392 @@ class TestTempConfig:
             worker = SimpleWorker.options(mode="thread", max_queued_tasks=999).init(value=1)
             assert worker.max_queued_tasks == 999
             worker.stop()
+
+    def test_temp_config_blocking(self):
+        """Test temporary config for blocking mode."""
+        initial_value = global_config.thread.blocking
+
+        with temp_config(thread_blocking=True):
+            assert global_config.thread.blocking is True
+
+        # Restored
+        assert global_config.thread.blocking == initial_value
+
+    def test_temp_config_retry_parameters(self):
+        """Test temporary config for retry parameters."""
+        initial_retries = global_config.thread.num_retries
+        initial_wait = global_config.thread.retry_wait
+        initial_jitter = global_config.thread.retry_jitter
+
+        with temp_config(thread_num_retries=5, thread_retry_wait=2.0, thread_retry_jitter=0.5):
+            assert global_config.thread.num_retries == 5
+            assert global_config.thread.retry_wait == 2.0
+            assert global_config.thread.retry_jitter == 0.5
+
+        # Restored
+        assert global_config.thread.num_retries == initial_retries
+        assert global_config.thread.retry_wait == initial_wait
+        assert global_config.thread.retry_jitter == initial_jitter
+
+    def test_all_defaults_from_config(self):
+        """Test that all Worker.options() defaults come from global_config."""
+        # Modify all defaults
+        with temp_config(
+            thread_blocking=True,
+            thread_max_queued_tasks=777,
+            thread_num_retries=10,
+            thread_retry_wait=5.0,
+            thread_retry_jitter=0.8,
+        ):
+            # Create worker without specifying any options
+            worker = SimpleWorker.options(mode="thread").init(value=1)
+
+            # All should use the temp_config values
+            assert worker.blocking is True
+            assert worker.max_queued_tasks == 777
+            # Note: retry config is internal, we can't easily test it here
+            # but the fact that worker creation succeeds means defaults were applied
+
+            worker.stop()
+
+
+class TestHierarchicalConfig:
+    """Test hierarchical configuration with global defaults and fallback."""
+
+    def test_global_defaults_apply_to_all_modes(self):
+        """Test that global defaults apply to all modes."""
+        # Set a global default
+        with temp_config(global_num_retries=5):
+            # All modes should use this default
+            thread_defaults = global_config.get_defaults(ExecutionMode.Threads)
+            ray_defaults = global_config.get_defaults(ExecutionMode.Ray)
+            process_defaults = global_config.get_defaults(ExecutionMode.Processes)
+
+            assert thread_defaults.num_retries == 5
+            assert ray_defaults.num_retries == 5
+            assert process_defaults.num_retries == 5
+
+    def test_mode_specific_overrides_global(self):
+        """Test that mode-specific values override global defaults."""
+        with temp_config(
+            global_num_retries=5,  # Global default
+            thread_num_retries=10,  # Thread-specific override
+        ):
+            thread_defaults = global_config.get_defaults(ExecutionMode.Threads)
+            ray_defaults = global_config.get_defaults(ExecutionMode.Ray)
+
+            # Thread uses override
+            assert thread_defaults.num_retries == 10
+            # Ray uses global default
+            assert ray_defaults.num_retries == 5
+
+    def test_fallback_to_global_when_mode_specific_is_none(self):
+        """Test fallback behavior when mode-specific value is None."""
+        # Initially, thread has no mode-specific override for retry_algorithm
+        # So it should use the global default
+        thread_defaults = global_config.get_defaults(ExecutionMode.Threads)
+        from concurry.core.retry import RetryAlgorithm
+
+        # Should use global default (Exponential)
+        assert thread_defaults.retry_algorithm == RetryAlgorithm.Exponential
+
+        # Now set a mode-specific override
+        global_config.thread.retry_algorithm = RetryAlgorithm.Linear
+        thread_defaults = global_config.get_defaults(ExecutionMode.Threads)
+        assert thread_defaults.retry_algorithm == RetryAlgorithm.Linear
+
+        # Reset
+        global_config.reset_to_defaults()
+
+    def test_global_config_has_defaults_attribute(self):
+        """Test that global_config has a defaults attribute."""
+        assert hasattr(global_config, "defaults")
+        assert global_config.defaults.num_retries == 0
+        assert global_config.defaults.retry_wait == 1.0
+        assert global_config.defaults.retry_jitter == 0.3
+
+    def test_modifying_global_defaults_affects_all_modes(self):
+        """Test that modifying global defaults affects all modes."""
+        # Save initial values
+        initial_thread_retries = global_config.get_defaults(ExecutionMode.Threads).num_retries
+        initial_ray_retries = global_config.get_defaults(ExecutionMode.Ray).num_retries
+
+        # Modify global default
+        global_config.defaults.num_retries = 7
+
+        # All modes should see the change (if they don't have mode-specific overrides)
+        # Note: thread and ray have None for num_retries, so they fall back to global
+        thread_defaults = global_config.get_defaults(ExecutionMode.Threads)
+        ray_defaults = global_config.get_defaults(ExecutionMode.Ray)
+
+        assert thread_defaults.num_retries == 7
+        assert ray_defaults.num_retries == 7
+
+        # Reset
+        global_config.reset_to_defaults()
+
+    def test_temp_config_with_global_overrides(self):
+        """Test temp_config with global_ prefix."""
+        with temp_config(global_retry_wait=5.0, global_retry_jitter=0.9):
+            # All modes should use these values
+            thread_defaults = global_config.get_defaults(ExecutionMode.Threads)
+            ray_defaults = global_config.get_defaults(ExecutionMode.Ray)
+
+            assert thread_defaults.retry_wait == 5.0
+            assert thread_defaults.retry_jitter == 0.9
+            assert ray_defaults.retry_wait == 5.0
+            assert ray_defaults.retry_jitter == 0.9
+
+        # After context, should be restored
+        thread_defaults = global_config.get_defaults(ExecutionMode.Threads)
+        assert thread_defaults.retry_wait == 1.0
+        assert thread_defaults.retry_jitter == 0.3
+
+    def test_temp_config_global_and_mode_specific(self):
+        """Test temp_config with both global and mode-specific overrides."""
+        with temp_config(
+            global_num_retries=3,  # Global: all modes
+            thread_num_retries=10,  # Thread-specific override
+            ray_max_queued_tasks=20,  # Ray-specific override
+        ):
+            thread_defaults = global_config.get_defaults(ExecutionMode.Threads)
+            ray_defaults = global_config.get_defaults(ExecutionMode.Ray)
+            process_defaults = global_config.get_defaults(ExecutionMode.Processes)
+
+            # Thread uses mode-specific for num_retries
+            assert thread_defaults.num_retries == 10
+            # Ray uses global for num_retries, mode-specific for max_queued_tasks
+            assert ray_defaults.num_retries == 3
+            assert ray_defaults.max_queued_tasks == 20
+            # Process uses global for num_retries
+            assert process_defaults.num_retries == 3
+
+    def test_retry_algorithm_from_config(self):
+        """Test that retry_algorithm comes from global config."""
+        from concurry.core.retry import RetryAlgorithm
+
+        with temp_config(global_retry_algorithm=RetryAlgorithm.Linear):
+            worker = SimpleWorker.options(mode="thread").init(value=1)
+            # Worker should be created successfully with Linear algorithm
+            worker.stop()
+
+    def test_unwrap_futures_from_config(self):
+        """Test that unwrap_futures comes from global config."""
+        # Default should be True
+        worker1 = SimpleWorker.options(mode="thread").init(value=1)
+        assert worker1.unwrap_futures is True
+        worker1.stop()
+
+        # Override globally
+        with temp_config(global_unwrap_futures=False):
+            worker2 = SimpleWorker.options(mode="thread").init(value=1)
+            assert worker2.unwrap_futures is False
+            worker2.stop()
+
+        # Back to default
+        worker3 = SimpleWorker.options(mode="thread").init(value=1)
+        assert worker3.unwrap_futures is True
+        worker3.stop()
+
+    def test_stop_timeout_in_config(self):
+        """Test that stop_timeout is available in config."""
+        # Verify it's in the config
+        assert hasattr(global_config.defaults, "stop_timeout")
+        assert global_config.defaults.stop_timeout == 30.0
+
+        # Can be modified
+        with temp_config(global_stop_timeout=60.0):
+            assert global_config.defaults.stop_timeout == 60.0
+
+        # Restored
+        assert global_config.defaults.stop_timeout == 30.0
+
+
+class TestWorkerTimeoutConfigs:
+    """Test that workers use configured timeout values."""
+
+    def test_thread_worker_uses_config_timeout(self):
+        """Test thread worker uses configured command queue timeout."""
+        with temp_config(thread_worker_command_queue_timeout=0.5):
+            worker = SimpleWorker.options(mode="thread").init(value=1)
+            assert worker.command_queue_timeout == 0.5
+            worker.stop()
+
+    def test_process_worker_uses_config_timeouts(self):
+        """Test process worker uses configured result queue timeouts."""
+        with temp_config(
+            process_worker_result_queue_timeout=60.0,
+            process_worker_result_queue_cleanup_timeout=2.0,
+        ):
+            worker = SimpleWorker.options(mode="process").init(value=1)
+            assert worker.result_queue_timeout == 60.0
+            assert worker.result_queue_cleanup_timeout == 2.0
+            worker.stop()
+
+    def test_asyncio_worker_uses_config_timeouts(self):
+        """Test asyncio worker uses configured timeouts."""
+        with temp_config(
+            asyncio_worker_loop_ready_timeout=60.0,
+            asyncio_worker_thread_ready_timeout=45.0,
+            asyncio_worker_sync_queue_timeout=0.5,
+        ):
+            worker = SimpleWorker.options(mode="asyncio").init(value=1)
+            assert worker.loop_ready_timeout == 60.0
+            assert worker.thread_ready_timeout == 45.0
+            assert worker.sync_queue_timeout == 0.5
+            worker.stop()
+
+    def test_config_values_fixed_at_creation(self):
+        """Test that config values are fixed at worker creation, not dynamic."""
+        # Create worker with initial config
+        worker = SimpleWorker.options(mode="thread").init(value=1)
+        initial_timeout = worker.command_queue_timeout
+
+        # Change global config AFTER worker creation
+        global_config.thread.worker_command_queue_timeout = 999.0
+
+        # Worker should still use initial value
+        assert worker.command_queue_timeout == initial_timeout
+        assert worker.command_queue_timeout != 999.0
+
+        worker.stop()
+        global_config.reset_to_defaults()
+
+    def test_pool_uses_config_timeouts(self):
+        """Test that worker pools use configured timeouts."""
+        with temp_config(
+            thread_pool_on_demand_cleanup_timeout=10.0,
+            thread_pool_on_demand_slot_max_wait=120.0,
+        ):
+            pool = SimpleWorker.options(mode="thread", max_workers=3).init(value=1)
+            assert pool.on_demand_cleanup_timeout == 10.0
+            assert pool.on_demand_slot_max_wait == 120.0
+            pool.stop()
+
+
+class TestPollingStrategyConfigs:
+    """Test that polling strategies use configured values."""
+
+    def test_polling_fixed_interval_from_config(self):
+        """Test that Fixed polling uses config interval."""
+        from concurry import wait
+        from concurry.core.constants import PollingAlgorithm
+
+        with temp_config(global_polling_fixed_interval=0.05):
+            worker = SimpleWorker.options(mode="thread").init(value=1)
+
+            # Create futures
+            futures = [worker.process(i) for i in range(5)]
+
+            # wait() should use configured interval
+            done, not_done = wait(futures, polling=PollingAlgorithm.Fixed)
+
+            assert len(done) == 5
+            assert len(not_done) == 0
+
+            worker.stop()
+
+    def test_polling_adaptive_intervals_from_config(self):
+        """Test that Adaptive polling uses config intervals."""
+        from concurry import wait
+        from concurry.core.constants import PollingAlgorithm
+
+        with temp_config(
+            global_polling_adaptive_min_interval=0.0005,
+            global_polling_adaptive_max_interval=0.5,
+            global_polling_adaptive_initial_interval=0.05,
+        ):
+            worker = SimpleWorker.options(mode="thread").init(value=1)
+
+            # Create futures
+            futures = [worker.process(i) for i in range(5)]
+
+            # wait() should use configured intervals
+            done, not_done = wait(futures, polling=PollingAlgorithm.Adaptive)
+
+            assert len(done) == 5
+            assert len(not_done) == 0
+
+            worker.stop()
+
+
+class TestAsyncioAndRayMonitorConfigs:
+    """Test asyncio future and Ray monitor config fields."""
+
+    def test_asyncio_future_poll_interval_from_config(self):
+        """Test that asyncio future uses configured poll interval."""
+        with temp_config(global_asyncio_future_poll_interval=1e-5):
+            worker = SimpleWorker.options(mode="asyncio").init(value=1)
+
+            # Make a call that returns a future
+            future = worker.process(10)
+            result = future.result()
+
+            assert result == 11
+
+            worker.stop()
+
+    def test_ray_monitor_config_fields_exist(self):
+        """Test that Ray monitor config fields are accessible."""
+        from concurry import global_config
+
+        # Verify all Ray monitor fields exist
+        assert hasattr(global_config.defaults, "ray_monitor_queue_get_timeout")
+        assert hasattr(global_config.defaults, "ray_monitor_no_futures_sleep")
+        assert hasattr(global_config.defaults, "ray_monitor_sleep")
+        assert hasattr(global_config.defaults, "ray_monitor_error_sleep")
+
+        # Verify default values
+        assert global_config.defaults.ray_monitor_queue_get_timeout == 0.01
+        assert global_config.defaults.ray_monitor_no_futures_sleep == 0.01
+        assert global_config.defaults.ray_monitor_sleep == 0.001
+        assert global_config.defaults.ray_monitor_error_sleep == 0.1
+
+    def test_ray_monitor_config_can_be_modified(self):
+        """Test that Ray monitor config can be modified via temp_config."""
+        with temp_config(
+            global_ray_monitor_queue_get_timeout=0.02,
+            global_ray_monitor_no_futures_sleep=0.03,
+            global_ray_monitor_sleep=0.002,
+            global_ray_monitor_error_sleep=0.2,
+        ):
+            from concurry import global_config
+
+            assert global_config.defaults.ray_monitor_queue_get_timeout == 0.02
+            assert global_config.defaults.ray_monitor_no_futures_sleep == 0.03
+            assert global_config.defaults.ray_monitor_sleep == 0.002
+            assert global_config.defaults.ray_monitor_error_sleep == 0.2
+
+        # Verify restored after context
+        from concurry import global_config
+
+        assert global_config.defaults.ray_monitor_queue_get_timeout == 0.01
+        assert global_config.defaults.ray_monitor_no_futures_sleep == 0.01
+        assert global_config.defaults.ray_monitor_sleep == 0.001
+        assert global_config.defaults.ray_monitor_error_sleep == 0.1
+
+
+class TestRateLimiterConfigs:
+    """Test rate limiter config fields."""
+
+    def test_rate_limiter_min_wait_time_exists(self):
+        """Test that rate limiter config field is accessible."""
+        from concurry import global_config
+
+        # Verify field exists
+        assert hasattr(global_config.defaults, "rate_limiter_min_wait_time")
+
+        # Verify default value
+        assert global_config.defaults.rate_limiter_min_wait_time == 0.01
+
+    def test_rate_limiter_min_wait_time_can_be_modified(self):
+        """Test that rate limiter config can be modified via temp_config."""
+        with temp_config(global_rate_limiter_min_wait_time=0.05):
+            from concurry import global_config
+
+            assert global_config.defaults.rate_limiter_min_wait_time == 0.05
+
+        # Verify restored after context
+        from concurry import global_config
+
+        assert global_config.defaults.rate_limiter_min_wait_time == 0.01

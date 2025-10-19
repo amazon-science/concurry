@@ -75,7 +75,6 @@ def _transform_worker_limits(
             return empty_limitset  # Will be wrapped in LimitPool by _create_worker_wrapper
         return LimitPool(
             limit_sets=[empty_limitset],
-            load_balancing=LoadBalancingAlgorithm.RoundRobin,
             worker_index=worker_index,
         )
 
@@ -95,7 +94,6 @@ def _transform_worker_limits(
                 empty_limitset = LimitSet(limits=[], shared=False, mode=ExecutionMode.Sync)
             return LimitPool(
                 limit_sets=[empty_limitset],
-                load_balancing=LoadBalancingAlgorithm.RoundRobin,
                 worker_index=worker_index,
             )
 
@@ -110,7 +108,6 @@ def _transform_worker_limits(
                 limitset = LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync)
             return LimitPool(
                 limit_sets=[limitset],
-                load_balancing=LoadBalancingAlgorithm.RoundRobin,
                 worker_index=worker_index,
             )
 
@@ -142,9 +139,7 @@ def _transform_worker_limits(
                             f"RaySharedLimitSet is not compatible with worker mode '{mode}'. "
                             f"Use mode='ray' workers."
                         )
-            return LimitPool(
-                limit_sets=limits, load_balancing=LoadBalancingAlgorithm.RoundRobin, worker_index=worker_index
-            )
+            return LimitPool(limit_sets=limits, worker_index=worker_index)
 
         raise ValueError("List must contain either all Limit objects or all LimitSet objects")
 
@@ -179,7 +174,6 @@ def _transform_worker_limits(
                 new_limitset = LimitSet(limits=limits_list, shared=False, mode=ExecutionMode.Sync)
                 return LimitPool(
                     limit_sets=[new_limitset],
-                    load_balancing=LoadBalancingAlgorithm.RoundRobin,
                     worker_index=worker_index,
                 )
 
@@ -202,9 +196,7 @@ def _transform_worker_limits(
                     f"RaySharedLimitSet is not compatible with worker mode '{mode}'. Use mode='ray' workers."
                 )
 
-        return LimitPool(
-            limit_sets=[limits], load_balancing=LoadBalancingAlgorithm.RoundRobin, worker_index=worker_index
-        )
+        return LimitPool(limit_sets=[limits], worker_index=worker_index)
 
     raise ValueError(
         f"limits parameter must be None, LimitSet, LimitPool, List[Limit], or List[LimitSet], "
@@ -298,8 +290,6 @@ def _create_worker_wrapper(
                     # Wrap in LimitPool with worker_index=0 (single worker)
                     limit_pool = LimitPool(
                         limit_sets=[limit_set],
-                        load_balancing=LoadBalancingAlgorithm.RoundRobin,
-                        worker_index=0,
                     )
                 else:
                     # Already a LimitPool, use it directly
@@ -324,9 +314,7 @@ def _create_worker_wrapper(
                 # Create private LimitSet with mode=sync (uses threading.Lock, works everywhere)
                 limit_set = LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync)
                 # Wrap in LimitPool with worker_index=0 (single worker)
-                limit_pool = LimitPool(
-                    limit_sets=[limit_set], load_balancing=LoadBalancingAlgorithm.RoundRobin, worker_index=0
-                )
+                limit_pool = LimitPool(limit_sets=[limit_set])
             else:
                 # Already a LimitPool, use it directly
                 limit_pool = limits
@@ -765,6 +753,9 @@ class WorkerBuilder(Typed):
                 {},
             )
 
+        # Import here to avoid circular imports
+        from ...config import global_config
+
         # Process limits (always, even if None - creates empty LimitPool)
         processed_options = dict(self.options)
         processed_options["limits"] = _transform_worker_limits(
@@ -778,6 +769,23 @@ class WorkerBuilder(Typed):
         retry_config = self._create_retry_config()
         if retry_config is not None:
             processed_options["retry_config"] = retry_config
+
+        # Get mode defaults for worker timeouts (from global config)
+        mode_defaults = global_config.get_defaults(execution_mode)
+
+        # Pass mode-specific timeouts to proxy (based on execution mode)
+        if execution_mode == ExecutionMode.Threads:
+            processed_options["command_queue_timeout"] = mode_defaults.worker_command_queue_timeout
+        elif execution_mode == ExecutionMode.Processes:
+            processed_options["result_queue_timeout"] = mode_defaults.worker_result_queue_timeout
+            processed_options["result_queue_cleanup_timeout"] = (
+                mode_defaults.worker_result_queue_cleanup_timeout
+            )
+        elif execution_mode == ExecutionMode.Asyncio:
+            processed_options["loop_ready_timeout"] = mode_defaults.worker_loop_ready_timeout
+            processed_options["thread_ready_timeout"] = mode_defaults.worker_thread_ready_timeout
+            processed_options["sync_queue_timeout"] = mode_defaults.worker_sync_queue_timeout
+        # Sync and Ray modes have no worker-specific timeouts
 
         # Create proxy with init args/kwargs
         # Typed expects all parameters as keyword arguments
@@ -851,6 +859,13 @@ class WorkerBuilder(Typed):
         if max_workers is None:
             mode_defaults = global_config.get_defaults(execution_mode)
             max_workers = mode_defaults.max_workers
+
+        # Get mode defaults for pool timeouts (from global config)
+        mode_defaults = global_config.get_defaults(execution_mode)
+
+        # Pass pool-specific timeouts (all modes with pools need these for on-demand workers)
+        pool_options["on_demand_cleanup_timeout"] = mode_defaults.pool_on_demand_cleanup_timeout
+        pool_options["on_demand_slot_max_wait"] = mode_defaults.pool_on_demand_slot_max_wait
 
         # Create pool instance
         return pool_cls(
@@ -1346,17 +1361,17 @@ class Worker:
     def options(
         cls: Type[T],
         mode: ExecutionMode = ExecutionMode.Sync,
-        blocking: bool = False,
+        blocking: Optional[bool] = None,
         max_workers: Optional[conint(ge=0)] = None,
         load_balancing: Optional[LoadBalancingAlgorithm] = None,
         on_demand: bool = False,
         max_queued_tasks: Optional[conint(ge=0)] = None,
         # Retry parameters
-        num_retries: int = 0,
+        num_retries: Optional[conint(ge=0)] = None,
         retry_on: Optional[Any] = None,
-        retry_algorithm: RetryAlgorithm = RetryAlgorithm.Exponential,
-        retry_wait: confloat(ge=0) = 1.0,
-        retry_jitter: confloat(ge=0, le=1) = 0.3,
+        retry_algorithm: Optional[RetryAlgorithm] = None,
+        retry_wait: Optional[confloat(ge=0)] = None,
+        retry_jitter: Optional[confloat(ge=0, le=1)] = None,
         retry_until: Optional[Any] = None,
         **kwargs: Any,
     ) -> WorkerBuilder:
@@ -1378,18 +1393,19 @@ class Worker:
                 Accepts string or ExecutionMode enum value
             blocking: If True, method calls return results directly instead of futures
                 Accepts bool or string representation ("true", "false", "1", "0")
+                Default value determined by global_config.<mode>.blocking
             max_workers: Maximum number of workers in pool (optional)
                 - If None or 1: Creates single worker
                 - If > 1: Creates worker pool with specified size
                 - Sync/Asyncio: Must be 1 or None (raises error otherwise)
-                - Thread: Default 24 when pool requested
-                - Process: Default 4 when pool requested
-                - Ray: Default 0 (unlimited for on-demand)
+                - Default value determined by global_config.<mode>.max_workers
             load_balancing: Load balancing algorithm (optional)
-                - "round_robin": Distribute requests evenly (default for pools)
+                - "round_robin": Distribute requests evenly
                 - "least_active": Select worker with fewest active calls
                 - "least_total": Select worker with fewest total calls
-                - "random": Random selection (default for on-demand)
+                - "random": Random selection
+                - Default value determined by global_config.<mode>.load_balancing (for pools)
+                  or global_config.<mode>.load_balancing_on_demand (for on-demand pools)
             on_demand: If True, create workers on-demand per request (default: False)
                 - Workers are created for each request and destroyed after completion
                 - Useful for bursty workloads or resource-constrained environments
@@ -1403,32 +1419,37 @@ class Worker:
                 - Automatically bypassed in blocking mode (unlimited submissions allowed)
                 - Automatically bypassed in sync and asyncio modes
                 - Prevents overload when submitting large batches (e.g., 5000+ tasks to Ray)
-                - Default values: sync/asyncio (None), thread (100), process (5), ray (2)
+                - Default value determined by global_config.<mode>.max_queued_tasks
                 - See user guide for detailed usage: /docs/user-guide/limits.md#submission-queue
-            unwrap_futures: If True (default), automatically unwrap BaseFuture arguments
+            unwrap_futures: If True, automatically unwrap BaseFuture arguments
                 by calling .result() on them before passing to worker methods. This enables
                 seamless composition of workers. Set to False to pass futures as-is.
+                Default value determined by global_config.<mode>.unwrap_futures
             limits: Resource protection and rate limiting (optional, defaults to empty LimitSet)
                 - Pass LimitSet: Workers share the same limit pool
                 - Pass List[Limit]: Each worker gets private limits (creates shared LimitSet for pools)
                 - Omit parameter: Workers get empty LimitSet (self.limits.acquire() always succeeds)
                 Workers always have self.limits available, even when no limits configured.
                 See Worker docstring "Resource Protection with Limits" section for details.
-            num_retries: Maximum number of retry attempts after initial failure (default: 0)
+            num_retries: Maximum number of retry attempts after initial failure
                 Total attempts = num_retries + 1 (initial attempt).
                 Set to 0 to disable retries (zero overhead).
+                Default value determined by global_config.<mode>.num_retries
             retry_on: Exception types or callables that trigger retries (optional)
                 - Single exception class: retry_on=ValueError
                 - List of exceptions: retry_on=[ValueError, ConnectionError]
                 - Callable filter: retry_on=lambda exception, **ctx: "retry" in str(exception)
                 - Mixed list: retry_on=[ValueError, custom_filter]
                 Default: [Exception] (retry on all exceptions when num_retries > 0)
-            retry_algorithm: Backoff strategy for wait times (default: "exponential")
-            retry_wait: Minimum wait time between retries in seconds (default: 1.0)
+            retry_algorithm: Backoff strategy for wait times
+                Default value determined by global_config.<mode>.retry_algorithm
+            retry_wait: Minimum wait time between retries in seconds
                 Base wait time before applying strategy and jitter.
-            retry_jitter: Jitter factor between 0 and 1 (default: 0.3)
+                Default value determined by global_config.<mode>.retry_wait
+            retry_jitter: Jitter factor between 0 and 1
                 Uses Full Jitter algorithm from AWS: sleep = random(0, calculated_wait).
                 Set to 0 to disable jitter. Prevents thundering herd when many workers retry.
+                Default value determined by global_config.<mode>.retry_jitter
             retry_until: Validation functions for output (optional)
                 - Single validator: retry_until=lambda result, **ctx: result.get("status") == "success"
                 - List of validators: retry_until=[validator1, validator2] (all must pass)
@@ -1561,16 +1582,34 @@ class Worker:
         # Get defaults for this mode from global config
         mode_defaults = global_config.get_defaults(mode)
 
-        # Apply defaults for max_queued_tasks if not specified
+        # Apply defaults for all parameters if not specified
+        if blocking is None:
+            blocking = mode_defaults.blocking
+
         if max_queued_tasks is None:
             max_queued_tasks = mode_defaults.max_queued_tasks
 
-        # Apply defaults for load_balancing if not specified
         if load_balancing is None:
             if on_demand:
                 load_balancing = mode_defaults.load_balancing_on_demand
             else:
                 load_balancing = mode_defaults.load_balancing
+
+        if num_retries is None:
+            num_retries = mode_defaults.num_retries
+
+        if retry_algorithm is None:
+            retry_algorithm = mode_defaults.retry_algorithm
+
+        if retry_wait is None:
+            retry_wait = mode_defaults.retry_wait
+
+        if retry_jitter is None:
+            retry_jitter = mode_defaults.retry_jitter
+
+        # Apply default for unwrap_futures if not in kwargs
+        if "unwrap_futures" not in kwargs:
+            kwargs["unwrap_futures"] = mode_defaults.unwrap_futures
 
         return WorkerBuilder(
             worker_cls=cls,
@@ -1595,7 +1634,7 @@ class Worker:
         cls: Type[T],
         max_workers: Optional[conint(ge=0)] = None,
         mode: ExecutionMode = ExecutionMode.Threads,
-        blocking: bool = False,
+        blocking: Optional[bool] = None,
         **kwargs: Any,
     ) -> WorkerBuilder:
         """Configure a worker pool (not yet implemented).
@@ -1626,6 +1665,16 @@ class Worker:
             result = future.result()  # Dispatches to available worker
             ```
         """
+        # Import here to avoid circular imports
+        from ...config import global_config
+
+        # Get defaults for this mode from global config
+        mode_defaults = global_config.get_defaults(mode)
+
+        # Apply default for blocking if not specified
+        if blocking is None:
+            blocking = mode_defaults.blocking
+
         return WorkerBuilder(
             worker_cls=cls, mode=mode, blocking=blocking, is_pool=True, max_workers=max_workers, **kwargs
         )
@@ -1764,7 +1813,7 @@ class WorkerProxy(Typed, ABC):
     init_kwargs: dict = {}
     limits: Optional[Any] = None  # LimitSet instance (processed by WorkerBuilder)
     retry_config: Optional[Any] = None  # RetryConfig instance (processed by WorkerBuilder)
-    max_queued_tasks: Optional[int] = None
+    max_queued_tasks: Optional[conint(ge=0)] = None
     mode: ClassVar[ExecutionMode]  # ExecutionMode (set by subclasses as class variable)
 
     # Private attributes (defined with PrivateAttr, initialized in post_initialize)
@@ -1897,11 +1946,12 @@ class WorkerProxy(Typed, ABC):
         """
         raise NotImplementedError("Subclasses must implement _execute_method")
 
-    def stop(self, timeout: float = 30) -> None:
+    def stop(self, timeout: confloat(ge=0) = 30) -> None:
         """Stop the worker and clean up resources.
 
         Args:
-            timeout: Maximum time to wait for cleanup in seconds
+            timeout: Maximum time to wait for cleanup in seconds.
+                Default value is determined by global_config.<mode>.stop_timeout
         """
         # Pydantic allows setting private attributes even on frozen models
         self._stopped = True

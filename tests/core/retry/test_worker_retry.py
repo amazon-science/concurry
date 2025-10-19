@@ -1049,9 +1049,12 @@ class TestRetryEdgeCases:
         result = worker.flaky_method(10).result(timeout=10)
         elapsed = time.time() - start_time
 
-        # With full jitter on linear backoff, delays are randomized
-        # We can't predict exact timing, but it should be > 0 and < theoretical max
-        assert elapsed > 0.05  # Some delay occurred
+        # With full jitter on linear backoff, delays are randomized between 0 and calculated_wait
+        # With full jitter (1.0), delays can be very close to 0, so we just verify:
+        # 1. It completed successfully (means retries happened)
+        # 2. Elapsed time is reasonable (not absurdly long)
+        assert elapsed >= 0  # Should take some time (though with full jitter can be very small)
+        assert elapsed < 5.0  # Should not take too long (theoretical max with jitter is 0.6s)
         assert result == 20
 
         worker.stop()

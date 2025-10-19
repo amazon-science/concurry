@@ -6,7 +6,7 @@ import threading
 from concurrent.futures import Future as PyFuture
 from typing import Any, ClassVar, Dict
 
-from pydantic import PrivateAttr
+from pydantic import PrivateAttr, confloat
 
 from ..constants import ExecutionMode
 from ..future import ConcurrentFuture
@@ -111,6 +111,11 @@ class AsyncioWorkerProxy(WorkerProxy):
     # Class-level mode attribute (not passed as parameter)
     mode: ClassVar[ExecutionMode] = ExecutionMode.Asyncio
 
+    # Configuration (NO defaults - values passed from WorkerBuilder via global config)
+    loop_ready_timeout: confloat(ge=0)
+    thread_ready_timeout: confloat(ge=0)
+    sync_queue_timeout: confloat(ge=0)
+
     # Private attributes (use Any for non-serializable types)
     _loop: Any = PrivateAttr(default=None)
     _worker: Any = PrivateAttr(default=None)
@@ -136,7 +141,7 @@ class AsyncioWorkerProxy(WorkerProxy):
         self._loop_thread.start()
 
         # Wait for event loop to be ready
-        if not self._loop_ready.wait(timeout=30):
+        if not self._loop_ready.wait(timeout=self.loop_ready_timeout):
             raise RuntimeError("Failed to start asyncio event loop")
 
         # Create dedicated thread for sync methods
@@ -146,7 +151,7 @@ class AsyncioWorkerProxy(WorkerProxy):
         self._sync_thread.start()
 
         # Wait for sync thread to be ready
-        if not self._sync_thread_ready.wait(timeout=30):
+        if not self._sync_thread_ready.wait(timeout=self.thread_ready_timeout):
             raise RuntimeError("Failed to start sync worker thread")
 
         # Initialize the worker
@@ -167,7 +172,7 @@ class AsyncioWorkerProxy(WorkerProxy):
         """Initialize the worker instance in the event loop."""
         future = asyncio.run_coroutine_threadsafe(self._async_initialize(), self._loop)
         try:
-            future.result(timeout=30)
+            future.result(timeout=self.thread_ready_timeout)
         except Exception as e:
             raise RuntimeError(f"Worker initialization failed: {e}")
 
@@ -192,7 +197,7 @@ class AsyncioWorkerProxy(WorkerProxy):
             try:
                 # Get command with timeout to allow checking stopped flag
                 try:
-                    command = self._sync_queue.get(timeout=0.1)
+                    command = self._sync_queue.get(timeout=self.sync_queue_timeout)
                 except queue.Empty:
                     continue
 
@@ -394,7 +399,8 @@ class AsyncioWorkerProxy(WorkerProxy):
         """Stop the worker, sync thread, and event loop.
 
         Args:
-            timeout: Maximum time to wait for cleanup in seconds
+            timeout: Maximum time to wait for cleanup in seconds.
+                Default value is determined by global_config.<mode>.stop_timeout
         """
         if self._stopped:
             return

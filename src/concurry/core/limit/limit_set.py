@@ -297,8 +297,12 @@ class InMemorySharedLimitSet(BaseLimitSet):
         self, requested: Optional[Dict[str, int]] = None, timeout: Optional[float] = None
     ) -> LimitSetAcquisition:
         """Acquire all limits atomically, blocking until available."""
+        from ...config import global_config
+
         requested_amounts = self._build_requested_amounts(requested)
         start_time = time.time()
+        local_config = global_config.clone()
+        sleep_time = local_config.defaults.limit_set_acquire_sleep
 
         while True:
             with self._lock:
@@ -314,7 +318,7 @@ class InMemorySharedLimitSet(BaseLimitSet):
                 if elapsed >= timeout:
                     raise TimeoutError(f"Failed to acquire all limits within {timeout}s")
 
-            time.sleep(0.01)
+            time.sleep(sleep_time)
 
     def try_acquire(self, requested: Optional[Dict[str, int]] = None) -> LimitSetAcquisition:
         """Try to acquire all limits atomically without blocking."""
@@ -527,8 +531,12 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
         self, requested: Optional[Dict[str, int]] = None, timeout: Optional[float] = None
     ) -> LimitSetAcquisition:
         """Acquire all limits atomically, blocking until available."""
+        from ...config import global_config
+
         requested_amounts = self._build_requested_amounts(requested)
         start_time = time.time()
+        local_config = global_config.clone()
+        sleep_time = local_config.defaults.limit_set_acquire_sleep
 
         while True:
             with self._lock:
@@ -546,7 +554,7 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
                 if elapsed >= timeout:
                     raise TimeoutError(f"Failed to acquire all limits within {timeout}s")
 
-            time.sleep(0.01)
+            time.sleep(sleep_time)
 
     def try_acquire(self, requested: Optional[Dict[str, int]] = None) -> LimitSetAcquisition:
         """Try to acquire all limits atomically without blocking."""
@@ -937,8 +945,12 @@ class RaySharedLimitSet(BaseLimitSet):
         self, requested: Optional[Dict[str, int]] = None, timeout: Optional[float] = None
     ) -> LimitSetAcquisition:
         """Acquire all limits atomically, blocking until available."""
+        from ...config import global_config
+
         requested_amounts = self._build_requested_amounts(requested)
         start_time = time.time()
+        local_config = global_config.clone()
+        sleep_time = local_config.defaults.limit_set_acquire_sleep
 
         import ray
 
@@ -962,7 +974,7 @@ class RaySharedLimitSet(BaseLimitSet):
                 if elapsed >= timeout:
                     raise TimeoutError(f"Failed to acquire all limits within {timeout}s")
 
-            time.sleep(0.01)
+            time.sleep(sleep_time)
 
     def try_acquire(self, requested: Optional[Dict[str, int]] = None) -> LimitSetAcquisition:
         """Try to acquire all limits atomically without blocking."""

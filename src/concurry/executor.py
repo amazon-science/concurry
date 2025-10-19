@@ -11,7 +11,7 @@ from .core.worker.task_worker import TaskWorker
 
 
 def Executor(
-    mode: ExecutionMode = ExecutionMode.Threads,
+    mode: ExecutionMode,
     max_workers: Optional[int] = None,
     load_balancing: Optional[LoadBalancingAlgorithm] = None,
     on_demand: bool = False,
@@ -32,14 +32,14 @@ def Executor(
             - If None or 1: Creates single worker
             - If > 1: Creates worker pool with specified size
             - Sync/Asyncio: Must be 1 or None (raises error otherwise)
-            - Thread: Default 24 when pool requested
-            - Process: Default 4 when pool requested
-            - Ray: Default 0 (unlimited for on-demand)
+            - Default value determined by global_config.<mode>.max_workers
         load_balancing: Load balancing algorithm (optional)
-            - "round_robin": Distribute requests evenly (default for pools)
+            - "round_robin": Distribute requests evenly
             - "least_active": Select worker with fewest active calls
             - "least_total": Select worker with fewest total calls
-            - "random": Random selection (default for on-demand)
+            - "random": Random selection
+            - Default value determined by global_config.<mode>.load_balancing (for pools)
+              or global_config.<mode>.load_balancing_on_demand (for on-demand pools)
         on_demand: If True, create workers on-demand per task (default: False)
             - Workers are created for each task and destroyed after completion
             - Useful for bursty workloads or resource-constrained environments

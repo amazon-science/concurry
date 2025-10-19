@@ -685,6 +685,317 @@ def test_custom_ray_init(self):
 
 ---
 
+## Fixing Failing Tests: NEVER Skip, Always Fix
+
+### Critical Rule: Fix the Root Cause, Don't Skip Tests
+
+**When an existing test fails, the problem is most likely with the implementation, NOT the test. Unless the test was added in the current session, it would have been a passing testcase earlier.**
+Your responsibility is to:
+1. **Identify the root cause** of the test failure
+2. **Fix the implementation** to make the test pass
+3. **NEVER skip or comment out failing tests** unless explicitly instructed by the user
+
+### Decision Tree for Failing Tests
+When you encounter a failing test, follow this decision tree:
+```
+Test fails
+   ├── Is the test itself wrong/outdated?
+   │   ├── YES → Ask user before modifying test
+   │   └── NO → Continue to next question
+   │
+   ├── Is this a NEW test you just wrote?
+   │   ├── YES → Fix your test or implementation
+   │   └── NO → This is an EXISTING test, continue
+   │
+   ├── Is the fix small/localized (< 50 lines, single file)?
+   │   ├── YES → Fix it autonomously
+   │   │        - Debug the root cause
+   │   │        - Implement the fix
+   │   │        - Verify the test passes
+   │   │        - Check for regressions
+   │   └── NO → This is a large change, continue
+   │
+   └── Is the fix large/complex (multiple files, architectural change)?
+       ├── YES → STOP and ask the user
+       │        - Explain the root cause
+       │        - Describe the required fix
+       │        - Estimate the scope of changes
+       │        - Wait for user's decision
+       └── NO → Re-evaluate, this should be YES or covered above
+```
+
+### Examples: Correct Behavior
+
+#### ✅ Example 1: Small Fix - Autonomous Correction
+
+```
+Scenario: Test test_retry_with_max_attempts is failing
+Error: AssertionError: assert 2 == 3
+
+AI Response:
+"I see the test is failing because the retry logic is only attempting 2 times 
+instead of 3. Looking at the code, the issue is in retry.py line 145 - the 
+loop counter is off by one. I'll fix this now."
+
+[AI fixes the implementation in retry.py]
+[AI reruns the test to verify it passes]
+[AI checks for regressions in related tests]
+
+"Fixed! The retry logic now correctly attempts 3 times as expected."
+```
+
+#### ✅ Example 2: Large Change - Stop and Ask
+
+```
+Scenario: Test test_multiprocess_shared_limit fails
+Error: RuntimeError: Cannot pickle LimitPool across processes
+
+AI Response:
+"This test is failing because LimitPool cannot be shared across processes due 
+to pickling issues. The root cause is that we're using threading primitives 
+(Lock, Semaphore) that don't work across processes.
+
+To fix this properly, we need to:
+1. Refactor LimitPool to use multiprocessing.Manager() for shared state
+2. Create separate ThreadLimitPool and ProcessLimitPool classes
+3. Update the factory logic to choose the right implementation
+4. This affects ~5 files and changes the architecture
+
+This is a significant change. Would you like me to:
+A) Implement this refactoring now
+B) Create a temporary workaround for this test
+C) File this as a known issue and skip this specific test
+
+How would you like to proceed?"
+```
+
+#### ✅ Example 3: Test Might Be Wrong - Ask First
+
+```
+Scenario: Test test_worker_timeout_default fails
+Error: AssertionError: assert 10.0 == 5.0
+
+AI Response:
+"This test is asserting that the default timeout is 5.0 seconds, but the 
+implementation is returning 10.0 seconds. Before I change anything, I need 
+to clarify:
+
+Is 10.0 the correct default (test is wrong), or is 5.0 the correct default 
+(implementation is wrong)?
+
+Looking at the configuration in global_config.py, the default is set to 10.0, 
+which suggests the test may be outdated. Should I update the test to expect 
+10.0, or should I change the configuration default to 5.0?"
+```
+
+### ❌ Examples: WRONG Behavior
+
+#### ❌ Example 1: Skipping Without Fixing
+
+```python
+# WRONG - NEVER DO THIS
+def test_retry_with_max_attempts(self, worker_mode):
+    if worker_mode in ("process", "ray"):
+        pytest.skip("Test fails for process and ray modes")  # ❌ BAD
+    
+    # test logic...
+```
+
+**Why this is wrong**: You're hiding a real bug. Process and Ray modes should 
+work correctly. The failure indicates a bug that needs to be fixed.
+
+#### ❌ Example 2: Commenting Out Failing Tests
+
+```python
+# WRONG - NEVER DO THIS
+# def test_shared_limit_pool(self, pool_mode):  # ❌ Commented out because failing
+#     """Test shared limit pool across workers."""
+#     # ... test logic
+```
+
+**Why this is wrong**: This test was written for a reason. Commenting it out 
+means the functionality is broken and you're hiding it.
+
+#### ❌ Example 3: Changing Test to Match Wrong Behavior
+
+```python
+# WRONG - NEVER DO THIS without asking
+def test_retry_attempts(self, worker_mode):
+    # Original test expected 3 attempts
+    # assert num_attempts == 3  # ❌ Changed without understanding why
+    assert num_attempts == 2  # AI changed this to make test pass
+```
+
+**Why this is wrong**: You changed the test without understanding if the 
+implementation is wrong or if the test expectations changed. Ask first.
+
+### Acceptable Reasons to Skip Tests
+
+Only skip tests in these specific scenarios:
+
+#### 1. Feature Not Supported by Mode
+
+```python
+def test_parallel_execution(self, worker_mode):
+    """Test parallel execution across multiple workers."""
+    if worker_mode in ("sync", "asyncio"):
+        pytest.skip("Sync and asyncio modes don't support multiple workers")
+    
+    # This feature genuinely requires multiple workers
+    # ...
+```
+
+**Valid because**: Sync and asyncio modes fundamentally don't support 
+`max_workers > 1`. This is by design, not a bug.
+
+#### 2. External Dependency Missing
+
+```python
+@pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
+def test_ray_specific_feature(self):
+    """Test Ray-specific functionality."""
+    # ...
+```
+
+**Valid because**: Can't test Ray features if Ray isn't installed.
+
+#### 3. Platform-Specific Limitation
+
+```python
+@pytest.mark.skipif(sys.platform == "win32", reason="fork() not available on Windows")
+def test_fork_behavior(self):
+    """Test fork-specific behavior."""
+    # ...
+```
+
+**Valid because**: Some OS features genuinely aren't available on all platforms.
+
+#### 4. User Explicitly Requested Skip
+
+```python
+def test_expensive_computation(self):
+    """Test with 1M iterations - takes 5 minutes."""
+    pytest.skip("User requested to skip expensive tests for now")
+    # ...
+```
+
+**Valid because**: User made an explicit decision to skip this temporarily.
+
+### Debugging Strategy
+
+When a test fails, follow this systematic approach:
+
+1. **Read the error message carefully**
+   - What assertion failed?
+   - What was expected vs. actual?
+   - Where did the failure occur?
+
+2. **Understand the test's intent**
+   - What feature is being tested?
+   - What behavior should happen?
+   - Is this test still relevant?
+
+3. **Trace the execution path**
+   - Step through the code mentally or with a debugger
+   - Identify where the actual behavior diverges from expected
+   - Look for edge cases or race conditions
+
+4. **Identify the root cause**
+   - Is it a logic error?
+   - Is it a configuration issue?
+   - Is it a race condition?
+   - Is it a missing feature?
+
+5. **Determine fix complexity**
+   - Small fix: < 50 lines, single file, no architectural changes → Fix autonomously
+   - Large fix: Multiple files, architectural changes, unclear scope → Stop and ask user
+
+6. **Implement and verify**
+   - Make the fix
+   - Run the failing test to verify it passes
+   - Run related tests to check for regressions
+   - Run the full test suite if making significant changes
+
+### Common Test Failure Patterns
+
+#### Pattern 1: Timing/Race Conditions
+
+```
+Symptom: Test passes sometimes, fails other times
+Root Cause: Race condition or insufficient timeout
+Fix: Add proper synchronization or increase timeout
+```
+
+#### Pattern 2: Mode-Specific Behavior
+
+```
+Symptom: Test passes for some modes, fails for others
+Root Cause: Mode-specific edge case not handled
+Fix: Add mode-specific handling in implementation (NOT in test)
+```
+
+#### Pattern 3: Configuration Changes
+
+```
+Symptom: Test expects old default value
+Root Cause: Default configuration was changed
+Fix: Ask user if test or config is correct
+```
+
+#### Pattern 4: Missing Feature
+
+```
+Symptom: Test calls a method that doesn't exist or isn't fully implemented
+Root Cause: Feature was designed but not implemented
+Fix: Implement the missing feature or ask user about priority
+```
+
+### Examples of Small vs. Large Fixes
+
+#### Small Fixes (Fix Autonomously)
+- Off-by-one errors in loops
+- Missing null checks
+- Incorrect operator (e.g., `>` vs `>=`)
+- Missing import statement
+- Typo in variable name
+- Wrong exception type raised
+- Missing attribute initialization
+- Incorrect default value
+
+#### Large Fixes (Stop and Ask)
+- Requires new class or major refactoring
+- Changes public API
+- Affects multiple modules (3+ files)
+- Requires architectural decision
+- May break backward compatibility
+- Needs new external dependency
+- Unclear what correct behavior should be
+- Requires significant new logic (100+ lines)
+
+### Communication with User
+
+When stopping to ask the user about a large fix:
+
+1. **Clearly explain the problem**
+   - What test is failing
+   - What the root cause is
+   - Why it's not a simple fix
+
+2. **Describe the required fix**
+   - What needs to change
+   - How many files affected
+   - What architectural decisions are needed
+
+3. **Provide options**
+   - Option A: Full proper fix (describe scope)
+   - Option B: Temporary workaround (if reasonable)
+   - Option C: Skip for now and file as known issue
+
+4. **Wait for user decision**
+   - Don't proceed without explicit approval for large changes
+
+---
+
 ## Summary Checklist
 
 When writing tests for Concurry:
@@ -694,6 +1005,10 @@ When writing tests for Concurry:
 - ✅ Test across ALL execution modes (sync, thread, process, asyncio, ray)
 - ✅ NEVER skip tests due to failures - handle edge cases explicitly
 - ✅ Only skip when feature is fundamentally not supported
+- ✅ **Fix failing tests by fixing the implementation, not by skipping**
+- ✅ **For small fixes (< 50 lines, single file): fix autonomously**
+- ✅ **For large fixes (multiple files, architectural): stop and ask user**
+- ✅ **If test might be wrong: ask user before changing test**
 - ✅ Use descriptive test names
 - ✅ Always clean up resources (call `.stop()`)
 - ✅ Test edge cases (empty, single, mixed types)

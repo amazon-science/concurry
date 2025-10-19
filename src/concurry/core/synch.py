@@ -341,10 +341,52 @@ def wait(
     if len(futures_list) == 0:
         return done, not_done
 
-    # Create polling strategy
+    # Create polling strategy with config values
+    # Import here to avoid circular imports
+    from ..config import global_config
+
     if isinstance(polling, str):
         polling = PollingAlgorithm(polling)
-    strategy = Poller(polling)
+
+    # If polling is already a strategy instance, use it as-is
+    from .algorithms.polling import BasePollingStrategy
+
+    if isinstance(polling, BasePollingStrategy):
+        strategy = polling
+    else:
+        # Create strategy with global config defaults
+        from .algorithms.polling import (
+            AdaptivePollingStrategy,
+            ExponentialPollingStrategy,
+            FixedPollingStrategy,
+            ProgressivePollingStrategy,
+        )
+
+        defaults = global_config.defaults
+
+        if polling == PollingAlgorithm.Fixed:
+            strategy = FixedPollingStrategy(interval=defaults.polling_fixed_interval)
+        elif polling == PollingAlgorithm.Adaptive:
+            strategy = AdaptivePollingStrategy(
+                min_interval=defaults.polling_adaptive_min_interval,
+                max_interval=defaults.polling_adaptive_max_interval,
+                current_interval=defaults.polling_adaptive_initial_interval,
+            )
+        elif polling == PollingAlgorithm.Exponential:
+            strategy = ExponentialPollingStrategy(
+                initial_interval=defaults.polling_exponential_initial_interval,
+                max_interval=defaults.polling_exponential_max_interval,
+                current_interval=defaults.polling_exponential_initial_interval,
+            )
+        elif polling == PollingAlgorithm.Progressive:
+            # Generate intervals tuple from min/max
+            min_int = defaults.polling_progressive_min_interval
+            max_int = defaults.polling_progressive_max_interval
+            intervals = (min_int, min_int * 5, min_int * 10, min_int * 50, max_int)
+            strategy = ProgressivePollingStrategy(intervals=intervals)
+        else:
+            # Fallback: use Poller factory for unknown types
+            strategy = Poller(polling)
 
     # Create progress tracker
     total = len(futures_list)
@@ -811,10 +853,52 @@ def _gather_iter_backend(
     if total == 0:
         return
 
-    # Create polling strategy
+    # Create polling strategy with config values
+    # Import here to avoid circular imports
+    from ..config import global_config
+
     if isinstance(polling, str):
         polling = PollingAlgorithm(polling)
-    strategy = Poller(polling)
+
+    # If polling is already a strategy instance, use it as-is
+    from .algorithms.polling import BasePollingStrategy
+
+    if isinstance(polling, BasePollingStrategy):
+        strategy = polling
+    else:
+        # Create strategy with global config defaults
+        from .algorithms.polling import (
+            AdaptivePollingStrategy,
+            ExponentialPollingStrategy,
+            FixedPollingStrategy,
+            ProgressivePollingStrategy,
+        )
+
+        defaults = global_config.defaults
+
+        if polling == PollingAlgorithm.Fixed:
+            strategy = FixedPollingStrategy(interval=defaults.polling_fixed_interval)
+        elif polling == PollingAlgorithm.Adaptive:
+            strategy = AdaptivePollingStrategy(
+                min_interval=defaults.polling_adaptive_min_interval,
+                max_interval=defaults.polling_adaptive_max_interval,
+                current_interval=defaults.polling_adaptive_initial_interval,
+            )
+        elif polling == PollingAlgorithm.Exponential:
+            strategy = ExponentialPollingStrategy(
+                initial_interval=defaults.polling_exponential_initial_interval,
+                max_interval=defaults.polling_exponential_max_interval,
+                current_interval=defaults.polling_exponential_initial_interval,
+            )
+        elif polling == PollingAlgorithm.Progressive:
+            # Generate intervals tuple from min/max
+            min_int = defaults.polling_progressive_min_interval
+            max_int = defaults.polling_progressive_max_interval
+            intervals = (min_int, min_int * 5, min_int * 10, min_int * 50, max_int)
+            strategy = ProgressivePollingStrategy(intervals=intervals)
+        else:
+            # Fallback: use Poller factory for unknown types
+            strategy = Poller(polling)
 
     # Create progress tracker
     tracker = _create_progress_tracker(progress, total, "Gathering")

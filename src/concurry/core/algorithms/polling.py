@@ -51,7 +51,8 @@ class FixedPollingStrategy(BasePollingStrategy):
         - When you want complete control over polling frequency
 
     Attributes:
-        interval: Polling interval in seconds (default: 0.01 = 10ms)
+        interval: Polling interval in seconds. When used via wait() or gather(),
+            the value is taken from global_config.defaults.polling_fixed_interval
 
     Example:
         ```python
@@ -62,7 +63,7 @@ class FixedPollingStrategy(BasePollingStrategy):
 
     aliases = ["fixed", PollingAlgorithm.Fixed]
 
-    interval: float = 0.01  # 10ms default
+    interval: float
 
     def get_next_interval(self) -> float:
         """Get the next polling interval."""
@@ -99,11 +100,14 @@ class AdaptivePollingStrategy(BasePollingStrategy):
         - Minimizing both latency and CPU usage
 
     Attributes:
-        min_interval: Minimum polling interval (default: 0.001 = 1ms)
-        max_interval: Maximum polling interval (default: 0.1 = 100ms)
-        current_interval: Current polling interval (default: 0.01 = 10ms)
-        speedup_factor: Multiplier when futures complete (default: 0.7 = 30% faster)
-        slowdown_factor: Multiplier when idle (default: 1.3 = 30% slower)
+        min_interval: Minimum polling interval. When used via wait() or gather(),
+            the value is taken from global_config.defaults.polling_adaptive_min_interval
+        max_interval: Maximum polling interval. When used via wait() or gather(),
+            the value is taken from global_config.defaults.polling_adaptive_max_interval
+        current_interval: Current polling interval. When used via wait() or gather(),
+            the initial value is taken from global_config.defaults.polling_adaptive_initial_interval
+        speedup_factor: Multiplier when futures complete (0.7 = 30% faster)
+        slowdown_factor: Multiplier when idle (1.3 = 30% slower)
         consecutive_empty: Number of consecutive empty checks
 
     Example:
@@ -120,9 +124,9 @@ class AdaptivePollingStrategy(BasePollingStrategy):
 
     aliases = ["adaptive", PollingAlgorithm.Adaptive]
 
-    min_interval: float = 0.001  # 1ms minimum
-    max_interval: float = 0.1  # 100ms maximum
-    current_interval: float = 0.01  # Start at 10ms
+    min_interval: float
+    max_interval: float
+    current_interval: float
     speedup_factor: float = 0.7  # Speed up by 30% on completions
     slowdown_factor: float = 1.3  # Slow down by 30% on no completions
     consecutive_empty: int = 0  # Track empty checks
@@ -144,7 +148,8 @@ class AdaptivePollingStrategy(BasePollingStrategy):
 
     def reset(self) -> None:
         """Reset to initial state."""
-        self.current_interval = 0.01
+        # Reset to min_interval since we don't store the original initial_interval
+        self.current_interval = self.min_interval
         self.consecutive_empty = 0
 
 
@@ -165,9 +170,11 @@ class ExponentialPollingStrategy(BasePollingStrategy):
         - Operations where latency on the first completion is critical
 
     Attributes:
-        initial_interval: Starting interval (default: 0.001 = 1ms)
-        max_interval: Maximum interval cap (default: 0.5 = 500ms)
-        multiplier: Growth factor per empty check (default: 2.0 = double)
+        initial_interval: Starting interval. When used via wait() or gather(),
+            the value is taken from global_config.defaults.polling_exponential_initial_interval
+        max_interval: Maximum interval cap. When used via wait() or gather(),
+            the value is taken from global_config.defaults.polling_exponential_max_interval
+        multiplier: Growth factor per empty check (2.0 = double)
         current_interval: Current interval
 
     Example:
@@ -183,10 +190,10 @@ class ExponentialPollingStrategy(BasePollingStrategy):
 
     aliases = ["exponential", PollingAlgorithm.Exponential]
 
-    initial_interval: float = 0.001  # Start at 1ms
-    max_interval: float = 0.5  # Cap at 500ms
+    initial_interval: float
+    max_interval: float
     multiplier: float = 2.0  # Double each time
-    current_interval: float = 0.001
+    current_interval: float
 
     def get_next_interval(self) -> float:
         """Get the current polling interval."""
@@ -222,10 +229,13 @@ class ProgressivePollingStrategy(BasePollingStrategy):
         - Balancing between adaptive and fixed strategies
 
     Attributes:
-        intervals: Tuple of interval levels (default: 1ms, 5ms, 10ms, 50ms, 100ms)
+        intervals: Tuple of interval levels (e.g., 1ms, 5ms, 10ms, 50ms, 100ms).
+            When used via wait() or gather(), this is generated from
+            global_config.defaults.polling_progressive_min_interval and
+            global_config.defaults.polling_progressive_max_interval
         current_index: Current level index
         checks_at_level: Number of checks performed at current level
-        checks_before_increase: Checks before progressing to next level (default: 5)
+        checks_before_increase: Checks before progressing to next level (5)
 
     Example:
         ```python
@@ -239,7 +249,7 @@ class ProgressivePollingStrategy(BasePollingStrategy):
 
     aliases = ["progressive", PollingAlgorithm.Progressive]
 
-    intervals: tuple = (0.001, 0.005, 0.01, 0.05, 0.1)  # Progressive steps
+    intervals: tuple
     current_index: int = 0
     checks_at_level: int = 0
     checks_before_increase: int = 5  # Stay at each level for N checks
@@ -295,4 +305,33 @@ def Poller(algorithm: PollingAlgorithm, **kwargs) -> BasePollingStrategy:
         )
         ```
     """
+    from ...config import global_config
+
+    # Fill in defaults from config if not provided
+    local_config = global_config.clone()
+    defaults = local_config.defaults
+
+    if algorithm in (PollingAlgorithm.Fixed, "fixed", "fixed_polling"):
+        if "interval" not in kwargs:
+            kwargs["interval"] = defaults.polling_fixed_interval
+    elif algorithm in (PollingAlgorithm.Adaptive, "adaptive", "adaptive_polling"):
+        if "min_interval" not in kwargs:
+            kwargs["min_interval"] = defaults.polling_adaptive_min_interval
+        if "max_interval" not in kwargs:
+            kwargs["max_interval"] = defaults.polling_adaptive_max_interval
+        if "current_interval" not in kwargs:
+            kwargs["current_interval"] = defaults.polling_adaptive_initial_interval
+    elif algorithm in (PollingAlgorithm.Exponential, "exponential", "exponential_polling"):
+        if "initial_interval" not in kwargs:
+            kwargs["initial_interval"] = defaults.polling_exponential_initial_interval
+        if "max_interval" not in kwargs:
+            kwargs["max_interval"] = defaults.polling_exponential_max_interval
+        if "current_interval" not in kwargs:
+            kwargs["current_interval"] = defaults.polling_exponential_initial_interval
+    elif algorithm in (PollingAlgorithm.Progressive, "progressive", "progressive_polling"):
+        if "intervals" not in kwargs:
+            min_int = defaults.polling_progressive_min_interval
+            max_int = defaults.polling_progressive_max_interval
+            kwargs["intervals"] = (min_int, min_int * 5, min_int * 10, min_int * 50, max_int)
+
     return BasePollingStrategy.of(algorithm, **kwargs)

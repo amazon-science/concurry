@@ -11,7 +11,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from morphic import Typed
-from pydantic import Field, field_validator
+from pydantic import Field, confloat, conint, field_validator
 
 from .constants import RetryAlgorithm
 
@@ -75,18 +75,22 @@ class RetryConfig(Typed):
     This class encapsulates all retry-related settings for worker method calls.
 
     Attributes:
-        num_retries: Maximum number of retry attempts after initial failure (default: 0).
+        num_retries: Maximum number of retry attempts after initial failure.
             Total attempts = num_retries + 1 (initial attempt).
+            Default value is determined by global_config.defaults.num_retries
         retry_on: Exception types or callables that trigger retries.
             Can be a single exception class, a callable, or a list of either.
             Callables receive context as kwargs and should return bool.
             Default: [Exception] (retry on all exceptions).
-        retry_algorithm: Backoff strategy for wait times (default: exponential).
-        retry_wait: Minimum wait time between retries in seconds (default: 1.0).
+        retry_algorithm: Backoff strategy for wait times.
+            Default value is determined by global_config.defaults.retry_algorithm
+        retry_wait: Minimum wait time between retries in seconds.
             This is the base wait time before applying strategy and jitter.
-        retry_jitter: Jitter factor between 0 and 1 (default: 0.3).
+            Default value is determined by global_config.defaults.retry_wait
+        retry_jitter: Jitter factor between 0 and 1.
             Uses Full Jitter algorithm from AWS: sleep = random(0, calculated_wait).
             Set to 0 to disable jitter.
+            Default value is determined by global_config.defaults.retry_jitter
         retry_until: Validation functions for output (default: None).
             Can be a single callable or list of callables. All must return True.
             Callables receive result and context as kwargs.
@@ -129,12 +133,30 @@ class RetryConfig(Typed):
         ```
     """
 
-    num_retries: int = Field(default=0, ge=0)
+    num_retries: Optional[conint(ge=0)] = None
     retry_on: Union[type, Callable, List[Union[type, Callable]]] = Field(default_factory=lambda: [Exception])
-    retry_algorithm: RetryAlgorithm = RetryAlgorithm.Exponential
-    retry_wait: float = Field(default=1.0, gt=0)
-    retry_jitter: float = Field(default=0.3, ge=0, le=1)
+    retry_algorithm: Optional[RetryAlgorithm] = None
+    retry_wait: Optional[confloat(gt=0)] = None
+    retry_jitter: Optional[confloat(ge=0, le=1)] = None
     retry_until: Optional[Union[Callable, List[Callable]]] = None
+
+    def post_initialize(self) -> None:
+        """Set defaults from global config for None values."""
+        from ..config import global_config
+
+        # Clone config
+        local_config = global_config.clone()
+        defaults = local_config.defaults
+
+        # Set defaults if not provided (use object.__setattr__ for frozen instances)
+        if self.num_retries is None:
+            object.__setattr__(self, "num_retries", defaults.num_retries)
+        if self.retry_algorithm is None:
+            object.__setattr__(self, "retry_algorithm", defaults.retry_algorithm)
+        if self.retry_wait is None:
+            object.__setattr__(self, "retry_wait", defaults.retry_wait)
+        if self.retry_jitter is None:
+            object.__setattr__(self, "retry_jitter", defaults.retry_jitter)
 
     @field_validator("retry_on")
     @classmethod

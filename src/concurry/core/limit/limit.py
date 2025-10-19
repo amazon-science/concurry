@@ -37,7 +37,7 @@ Example:
 """
 
 from abc import ABC
-from typing import ClassVar, Dict, NoReturn
+from typing import ClassVar, Dict, NoReturn, Optional
 
 from morphic import Typed
 from pydantic import confloat, conint
@@ -150,7 +150,8 @@ class RateLimit(Limit):
         key: Unique identifier for this limit (e.g., "input_tokens", "api_calls")
         window_seconds: Time window in seconds over which the limit applies
         algorithm: Rate limiting algorithm (TokenBucket, LeakyBucket, SlidingWindow,
-            FixedWindow, or GCRA)
+            FixedWindow, or GCRA). If None, uses value from
+            global_config.defaults.rate_limit_algorithm
         capacity: Maximum capacity (burst size for bucket algorithms, max count for
             window algorithms)
 
@@ -199,11 +200,18 @@ class RateLimit(Limit):
     """
 
     window_seconds: confloat(gt=0)
-    algorithm: RateLimitAlgorithm = RateLimitAlgorithm.SlidingWindow
+    algorithm: Optional[RateLimitAlgorithm] = None
     capacity: conint(gt=0)
 
     def post_initialize(self) -> NoReturn:
         """Initialize the rate limiter implementation."""
+        # Apply default algorithm from global config if not specified
+        if self.algorithm is None:
+            from ...config import global_config
+
+            local_config = global_config.clone()
+            object.__setattr__(self, "algorithm", local_config.defaults.rate_limit_algorithm)
+
         # Convert max_rate from capacity per window to per second
         max_rate = self.capacity / self.window_seconds if self.window_seconds > 0 else 0
 

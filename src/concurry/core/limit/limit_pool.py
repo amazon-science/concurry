@@ -98,8 +98,10 @@ class LimitPool(Typed):
 
     Attributes:
         limit_sets: List of LimitSet instances to select from
-        load_balancing: Algorithm (LoadBalancingAlgorithm enum)
-        worker_index: Starting offset for round-robin (0 for single workers)
+        load_balancing: Algorithm (LoadBalancingAlgorithm enum). If None, uses value from
+            global_config.defaults.limit_pool_load_balancing
+        worker_index: Starting offset for round-robin. If None, uses value from
+            global_config.defaults.limit_pool_worker_index
 
     Example:
         Basic usage with two regions::
@@ -144,8 +146,8 @@ class LimitPool(Typed):
 
     # Public immutable attributes
     limit_sets: List[BaseLimitSet]
-    load_balancing: LoadBalancingAlgorithm = LoadBalancingAlgorithm.RoundRobin
-    worker_index: int = 0
+    load_balancing: Optional[LoadBalancingAlgorithm] = None
+    worker_index: Optional[int] = None
 
     # Private mutable attributes
     _balancer: Any = PrivateAttr()
@@ -161,6 +163,17 @@ class LimitPool(Typed):
         """
         if len(self.limit_sets) == 0:
             raise ValueError("LimitPool requires at least one LimitSet")
+
+        # Apply defaults from global config if not specified
+        if self.load_balancing is None or self.worker_index is None:
+            from ...config import global_config
+
+            local_config = global_config.clone()
+
+            if self.load_balancing is None:
+                object.__setattr__(self, "load_balancing", local_config.defaults.limit_pool_load_balancing)
+            if self.worker_index is None:
+                object.__setattr__(self, "worker_index", local_config.defaults.limit_pool_worker_index)
 
         # Create appropriate load balancer
         if self.load_balancing == LoadBalancingAlgorithm.Random:

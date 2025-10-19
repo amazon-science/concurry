@@ -69,11 +69,11 @@ class ProgressBar:
         style: Literal["auto", "notebook", "std", "ray"] = "auto",
         unit: str = "row",
         color: str = "#0288d1",  # Bluish
-        ncols: int = 100,
-        smoothing: float = 0.15,
+        ncols: Optional[int] = None,
+        smoothing: Optional[float] = None,
         total: Optional[int] = None,
         disable: bool = False,
-        miniters: int = 1,
+        miniters: Optional[int] = None,
         progress_bar: Union[bool, dict, "ProgressBar"] = True,
         prefer_kwargs: bool = True,
         **kwargs,
@@ -89,11 +89,11 @@ class ProgressBar:
                 - "ray": Ray distributed progress (requires Ray)
             unit: Unit name for items being processed (default: "row")
             color: Hex color code for the progress bar (default: "#0288d1" - blue)
-            ncols: Width of the progress bar in characters (default: 100)
-            smoothing: Smoothing factor for progress updates (default: 0.15)
+            ncols: Width of the progress bar in characters (default: global_config.defaults.progress_bar_ncols)
+            smoothing: Smoothing factor for progress updates (default: global_config.defaults.progress_bar_smoothing)
             total: Total number of items to process
             disable: Whether to disable the progress bar (default: False)
-            miniters: Minimum iterations between display updates (default: 1)
+            miniters: Minimum iterations between display updates (default: global_config.defaults.progress_bar_miniters)
                 Higher values improve performance for large iteration counts
             progress_bar: Progress bar configuration:
                 - True: Use default configuration
@@ -124,6 +124,17 @@ class ProgressBar:
         """
         # Initialize _extra_fields first using object.__setattr__
         object.__setattr__(self, "_extra_fields", {})
+
+        # Load defaults from global config if not provided
+        from ..config import global_config
+
+        local_config = global_config.clone()
+        if ncols is None:
+            ncols = local_config.defaults.progress_bar_ncols
+        if smoothing is None:
+            smoothing = local_config.defaults.progress_bar_smoothing
+        if miniters is None:
+            miniters = local_config.defaults.progress_bar_miniters
 
         # Handle progress_bar parameter
         if isinstance(progress_bar, ProgressBar):

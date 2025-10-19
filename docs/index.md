@@ -136,6 +136,7 @@ Concurry follows best practices:
 
 - [Installation Guide](installation.md) - Get started with Concurry
 - [Getting Started](user-guide/getting-started.md) - Learn the basics
+- [Configuration Guide](user-guide/configuration.md) - Customize global defaults and tune performance
 - [Workers Guide](user-guide/workers.md) - Learn the actor pattern with Workers
 - [Worker Pools Guide](user-guide/pools.md) - Scale with worker pools
 - [Synchronization Guide](user-guide/synchronization.md) - Coordinate multiple futures with wait() and gather()

@@ -346,7 +346,8 @@ class RayWorkerProxy(WorkerProxy):
         """Stop the Ray actor.
 
         Args:
-            timeout: Maximum time to wait for actor to stop (currently ignored for Ray)
+            timeout: Maximum time to wait for actor to stop (currently ignored for Ray).
+                Default value is determined by global_config.<mode>.stop_timeout
         """
         super().stop(timeout)
 

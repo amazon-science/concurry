@@ -204,6 +204,7 @@ class SyncWorkerProxy(WorkerProxy):
         For sync workers, this just marks the worker as stopped.
 
         Args:
-            timeout: Ignored for sync workers
+            timeout: Maximum time to wait for cleanup in seconds (ignored for sync workers).
+                Default value is determined by global_config.<mode>.stop_timeout
         """
         super().stop(timeout)

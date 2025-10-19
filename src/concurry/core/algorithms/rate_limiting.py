@@ -130,7 +130,11 @@ class TokenBucketLimiter(BaseRateLimiter):
 
     def acquire(self, tokens: int = 1, timeout: Optional[float] = None) -> bool:
         """Acquire tokens, waiting if necessary."""
+        from ...config import global_config
+
         start_time = time.time()
+        local_config = global_config.clone()
+        min_wait = local_config.defaults.rate_limiter_min_wait_time
 
         while True:
             if self.try_acquire(tokens):
@@ -145,7 +149,7 @@ class TokenBucketLimiter(BaseRateLimiter):
             # Calculate wait time until we'll have enough tokens
             self._refill()
             tokens_needed = tokens - self._tokens
-            wait_time = tokens_needed / self.max_rate if tokens_needed > 0 else 0.01
+            wait_time = tokens_needed / self.max_rate if tokens_needed > 0 else min_wait
 
             if timeout is not None:
                 wait_time = min(wait_time, timeout - (time.time() - start_time))
@@ -227,7 +231,11 @@ class LeakyBucketLimiter(BaseRateLimiter):
 
     def acquire(self, tokens: int = 1, timeout: Optional[float] = None) -> bool:
         """Add to queue, waiting if necessary."""
+        from ...config import global_config
+
         start_time = time.time()
+        local_config = global_config.clone()
+        min_wait = local_config.defaults.rate_limiter_min_wait_time
 
         while True:
             if self.try_acquire(tokens):
@@ -241,7 +249,7 @@ class LeakyBucketLimiter(BaseRateLimiter):
 
             # Wait for queue to drain
             self._leak()
-            wait_time = 1.0 / self.max_rate if self.max_rate > 0 else 0.01
+            wait_time = 1.0 / self.max_rate if self.max_rate > 0 else min_wait
 
             if timeout is not None:
                 remaining = timeout - (time.time() - start_time)
@@ -317,7 +325,11 @@ class SlidingWindowLimiter(BaseRateLimiter):
 
     def acquire(self, tokens: int = 1, timeout: Optional[float] = None) -> bool:
         """Acquire, waiting if necessary."""
+        from ...config import global_config
+
         start_time = time.time()
+        local_config = global_config.clone()
+        min_wait = local_config.defaults.rate_limiter_min_wait_time
 
         while True:
             if self.try_acquire(tokens):
@@ -335,9 +347,9 @@ class SlidingWindowLimiter(BaseRateLimiter):
             if len(self._requests) > 0:
                 oldest = self._requests[0]
                 wait_time = (oldest + self.window_seconds) - time.time()
-                wait_time = max(0.01, wait_time)
+                wait_time = max(min_wait, wait_time)
             else:
-                wait_time = 0.01
+                wait_time = min_wait
 
             if timeout is not None:
                 remaining = timeout - (time.time() - start_time)
@@ -416,7 +428,11 @@ class FixedWindowLimiter(BaseRateLimiter):
 
     def acquire(self, tokens: int = 1, timeout: Optional[float] = None) -> bool:
         """Acquire, waiting if necessary."""
+        from ...config import global_config
+
         start_time = time.time()
+        local_config = global_config.clone()
+        min_wait = local_config.defaults.rate_limiter_min_wait_time
 
         while True:
             if self.try_acquire(tokens):
@@ -431,7 +447,7 @@ class FixedWindowLimiter(BaseRateLimiter):
             # Wait for window to reset
             self._check_window_reset()
             wait_time = (self._window_start + self.window_seconds) - time.time()
-            wait_time = max(0.01, wait_time)
+            wait_time = max(min_wait, wait_time)
 
             if timeout is not None:
                 remaining = timeout - (time.time() - start_time)
@@ -518,7 +534,11 @@ class GCRALimiter(BaseRateLimiter):
 
     def acquire(self, tokens: int = 1, timeout: Optional[float] = None) -> bool:
         """Acquire tokens, waiting if necessary."""
+        from ...config import global_config
+
         start_time = time.time()
+        local_config = global_config.clone()
+        min_wait = local_config.defaults.rate_limiter_min_wait_time
 
         while True:
             if self.try_acquire(tokens):
@@ -543,7 +563,7 @@ class GCRALimiter(BaseRateLimiter):
                 if wait_time > 0:
                     time.sleep(wait_time)
             else:
-                time.sleep(0.01)
+                time.sleep(min_wait)
 
     def get_stats(self) -> dict:
         """Get current statistics."""

@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Callable, Optional, Type
 
 from morphic import Typed
-from pydantic import PrivateAttr, conint
+from pydantic import PrivateAttr, confloat, conint
 
 from ..algorithms.load_balancing import LoadBalancer
 from ..constants import ExecutionMode, LoadBalancingAlgorithm
@@ -143,6 +143,10 @@ class WorkerProxyPool(Typed, ABC):
     init_args: tuple
     init_kwargs: dict
 
+    # Configuration (NO defaults - values passed from WorkerBuilder via global config)
+    on_demand_cleanup_timeout: confloat(ge=0)
+    on_demand_slot_max_wait: confloat(ge=0)
+
     # Private attributes (mutable, type-checked)
     _load_balancer: Any = PrivateAttr()
     _workers: list[Any] = PrivateAttr()
@@ -150,7 +154,7 @@ class WorkerProxyPool(Typed, ABC):
     _method_cache: dict[str, Callable] = PrivateAttr()
     _on_demand_workers: list[Any] = PrivateAttr()
     _on_demand_lock: Any = PrivateAttr()
-    _on_demand_counter: int = PrivateAttr()  # Counter for on-demand worker indices
+    _on_demand_counter: conint(ge=0) = PrivateAttr()  # Counter for on-demand worker indices
     _worker_semaphores: list[Any] = PrivateAttr()  # Per-worker submission semaphores
 
     def post_initialize(self) -> None:
@@ -270,7 +274,7 @@ class WorkerProxyPool(Typed, ABC):
                 # because stop() may try to cancel futures that are invoking this callback
                 def deferred_cleanup():
                     try:
-                        worker.stop(timeout=5)
+                        worker.stop(timeout=self.on_demand_cleanup_timeout)
                     except Exception:
                         pass  # Ignore cleanup errors
 
@@ -289,12 +293,16 @@ class WorkerProxyPool(Typed, ABC):
 
         Blocks until a slot is available or raises error if limit exceeded.
         """
+        from ...config import global_config
+
         limit = self._get_on_demand_limit()
         if limit is None:
             return  # No limit
 
         # Wait for a slot to become available
-        max_wait = 60  # 60 seconds max wait
+        local_config = global_config.clone()
+        sleep_time = local_config.defaults.worker_pool_cleanup_sleep
+        max_wait = self.on_demand_slot_max_wait
         wait_time = 0.0
         while True:
             with self._on_demand_lock:
@@ -304,8 +312,8 @@ class WorkerProxyPool(Typed, ABC):
             # Wait a bit and retry
             import time
 
-            time.sleep(0.1)
-            wait_time += 0.1
+            time.sleep(sleep_time)
+            wait_time += sleep_time
 
             if wait_time >= max_wait:
                 raise RuntimeError(
@@ -500,7 +508,8 @@ class WorkerProxyPool(Typed, ABC):
         """Stop all workers in the pool.
 
         Args:
-            timeout: Maximum time to wait for each worker to stop in seconds
+            timeout: Maximum time to wait for each worker to stop in seconds.
+                Default value is determined by global_config.<mode>.stop_timeout
         """
         if self._stopped:
             return
@@ -608,18 +617,34 @@ class InMemoryWorkerProxyPool(WorkerProxyPool):
         # and the pool already limits concurrent on-demand workers
         worker_queue_length = 999999 if self.on_demand else self.max_queued_tasks
 
+        # Get worker timeout configs from global config
+        from ...config import global_config
+
+        mode_defaults = global_config.get_defaults(self.mode)
+
+        # Prepare worker options with timeout configs based on mode
+        worker_options = {
+            "worker_cls": self.worker_cls,
+            "blocking": self.blocking,
+            "unwrap_futures": self.unwrap_futures,
+            "init_args": self.init_args,
+            "init_kwargs": self.init_kwargs,
+            "limits": worker_limits,
+            "retry_config": self.retry_config,
+            "max_queued_tasks": worker_queue_length,
+        }
+
+        # Add mode-specific timeout configs
+        if self.mode == ExecutionMode.Threads:
+            worker_options["command_queue_timeout"] = mode_defaults.worker_command_queue_timeout
+        elif self.mode == ExecutionMode.Asyncio:
+            worker_options["loop_ready_timeout"] = mode_defaults.worker_loop_ready_timeout
+            worker_options["thread_ready_timeout"] = mode_defaults.worker_thread_ready_timeout
+            worker_options["sync_queue_timeout"] = mode_defaults.worker_sync_queue_timeout
+
         # Create worker instance
         # Note: mode is NOT passed - it's a class variable set by each proxy subclass
-        return proxy_cls(
-            worker_cls=self.worker_cls,
-            blocking=self.blocking,
-            unwrap_futures=self.unwrap_futures,
-            init_args=self.init_args,
-            init_kwargs=self.init_kwargs,
-            limits=worker_limits,
-            retry_config=self.retry_config,
-            max_queued_tasks=worker_queue_length,
-        )
+        return proxy_cls(**worker_options)
 
     def _get_on_demand_limit(self) -> Optional[int]:
         """Get the maximum number of concurrent on-demand workers."""
@@ -683,18 +708,28 @@ class MultiprocessWorkerProxyPool(WorkerProxyPool):
         # and the pool already limits concurrent on-demand workers
         worker_queue_length = 999999 if self.on_demand else self.max_queued_tasks
 
+        # Get worker timeout configs from global config
+        from ...config import global_config
+
+        mode_defaults = global_config.get_defaults(self.mode)
+
+        # Prepare worker options with timeout configs for process mode
+        worker_options = {
+            "worker_cls": self.worker_cls,
+            "blocking": self.blocking,
+            "unwrap_futures": self.unwrap_futures,
+            "init_args": self.init_args,
+            "init_kwargs": self.init_kwargs,
+            "limits": worker_limits,
+            "retry_config": self.retry_config,
+            "max_queued_tasks": worker_queue_length,
+            "result_queue_timeout": mode_defaults.worker_result_queue_timeout,
+            "result_queue_cleanup_timeout": mode_defaults.worker_result_queue_cleanup_timeout,
+        }
+
         # Create worker instance
         # Note: mode is NOT passed - it's a class variable set by each proxy subclass
-        return proxy_cls(
-            worker_cls=self.worker_cls,
-            blocking=self.blocking,
-            unwrap_futures=self.unwrap_futures,
-            init_args=self.init_args,
-            init_kwargs=self.init_kwargs,
-            limits=worker_limits,
-            retry_config=self.retry_config,
-            max_queued_tasks=worker_queue_length,
-        )
+        return proxy_cls(**worker_options)
 
     def _get_on_demand_limit(self) -> Optional[int]:
         """Get the maximum number of concurrent on-demand workers."""

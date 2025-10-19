@@ -7,7 +7,7 @@ import threading
 from concurrent.futures import Future as PyFuture
 from typing import Any, ClassVar, Dict
 
-from pydantic import PrivateAttr
+from pydantic import PrivateAttr, confloat
 
 from ..constants import ExecutionMode
 from ..future import ConcurrentFuture
@@ -78,6 +78,9 @@ class ThreadWorkerProxy(WorkerProxy):
     # Class-level mode attribute (not passed as parameter)
     mode: ClassVar[ExecutionMode] = ExecutionMode.Threads
 
+    # Configuration (NO defaults - values passed from WorkerBuilder via global config)
+    command_queue_timeout: confloat(ge=0)
+
     # Private attributes (use Any for non-serializable types)
     _command_queue: Any = PrivateAttr()
     _futures: Dict[str, Any] = PrivateAttr()  # Maps future.uuid -> ConcurrentFuture
@@ -125,7 +128,7 @@ class ThreadWorkerProxy(WorkerProxy):
             try:
                 # Get command with timeout to allow checking stopped flag
                 try:
-                    command = self._command_queue.get(timeout=0.1)
+                    command = self._command_queue.get(timeout=self.command_queue_timeout)
                 except queue.Empty:
                     continue
 
@@ -283,7 +286,8 @@ class ThreadWorkerProxy(WorkerProxy):
         """Stop the worker thread.
 
         Args:
-            timeout: Maximum time to wait for thread to stop in seconds
+            timeout: Maximum time to wait for thread to stop in seconds.
+                Default value is determined by the global config's stop_timeout setting.
         """
         if self._stopped:
             return

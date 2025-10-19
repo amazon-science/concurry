@@ -10,7 +10,7 @@ from concurrent.futures import Future as PyFuture
 from typing import Any, ClassVar, Literal
 
 import cloudpickle
-from pydantic import PrivateAttr
+from pydantic import PrivateAttr, confloat
 
 from ..constants import ExecutionMode
 from ..future import ConcurrentFuture
@@ -170,7 +170,10 @@ class ProcessWorkerProxy(WorkerProxy):
     # Class-level mode attribute (not passed as parameter)
     mode: ClassVar[ExecutionMode] = ExecutionMode.Processes
 
+    # Configuration (NO defaults - values passed from WorkerBuilder via global config)
     mp_context: Literal["fork", "spawn", "forkserver"] = "fork"
+    result_queue_timeout: confloat(ge=0)
+    result_queue_cleanup_timeout: confloat(ge=0)
 
     # Private attributes (use Any for non-serializable types)
     _command_queue: Any = PrivateAttr()
@@ -236,7 +239,7 @@ class ProcessWorkerProxy(WorkerProxy):
         self._command_queue.put((future.uuid, "__initialize__", (), {}))
 
         try:
-            request_id, status, payload = self._result_queue.get(timeout=30)
+            request_id, status, payload = self._result_queue.get(timeout=self.result_queue_timeout)
             if status == "error":
                 e, tb_str = payload
                 raise RuntimeError(f"Worker initialization failed:\n{tb_str}")
@@ -251,7 +254,7 @@ class ProcessWorkerProxy(WorkerProxy):
                     break
 
                 try:
-                    item = self._result_queue.get(timeout=1)
+                    item = self._result_queue.get(timeout=self.result_queue_cleanup_timeout)
                 except queue.Empty:
                     continue
                 except (ValueError, OSError):
@@ -334,7 +337,8 @@ class ProcessWorkerProxy(WorkerProxy):
         """Stop the worker process.
 
         Args:
-            timeout: Maximum time to wait for process to stop in seconds
+            timeout: Maximum time to wait for process to stop in seconds.
+                Default value is determined by global_config.<mode>.stop_timeout
         """
         if self._stopped:
             return

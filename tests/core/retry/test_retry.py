@@ -2,6 +2,7 @@
 
 import pytest
 
+from concurry import global_config
 from concurry.core.retry import (
     RetryAlgorithm,
     RetryConfig,
@@ -15,13 +16,15 @@ class TestRetryConfig:
     """Test RetryConfig validation and creation."""
 
     def test_default_config(self):
-        """Test default RetryConfig."""
+        """Test default RetryConfig uses global config defaults."""
         config = RetryConfig()
-        assert config.num_retries == 0
+        # Compare against global config defaults
+        defaults = global_config.defaults
+        assert config.num_retries == defaults.num_retries
         assert config.retry_on == [Exception]
-        assert config.retry_algorithm == RetryAlgorithm.Exponential
-        assert config.retry_wait == 1.0
-        assert config.retry_jitter == 0.3
+        assert config.retry_algorithm == defaults.retry_algorithm
+        assert config.retry_wait == defaults.retry_wait
+        assert config.retry_jitter == defaults.retry_jitter
         assert config.retry_until is None
 
     def test_custom_config(self):

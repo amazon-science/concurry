@@ -617,13 +617,12 @@ class AsyncioFuture(BaseFuture):
         ```
     """
 
-    ASYNCIO_POLL_INTERVAL: ClassVar[float] = 1e-6
-
     __slots__ = (
         "uuid",
         "_future",
         "_callbacks",
         "_lock",
+        "_poll_interval",
     )
 
     FUTURE_UUID_PREFIX: ClassVar[str] = "asyncio-future-"
@@ -651,6 +650,11 @@ class AsyncioFuture(BaseFuture):
         self._callbacks = []
         self._lock = threading.Lock()
 
+        # Get poll interval from config
+        from ..config import global_config
+
+        self._poll_interval = global_config.defaults.asyncio_future_poll_interval
+
     def result(self, timeout: Optional[float] = None) -> Any:
         """Get the result of the future.
 
@@ -673,12 +677,12 @@ class AsyncioFuture(BaseFuture):
             if timeout is not None:
                 start_time = time.time()
                 while not self.done() and (time.time() - start_time) < timeout:
-                    time.sleep(self.ASYNCIO_POLL_INTERVAL)
+                    time.sleep(self._poll_interval)
                 if not self.done():
                     raise TimeoutError("Future did not complete within timeout")
             else:
                 while not self.done():
-                    time.sleep(self.ASYNCIO_POLL_INTERVAL)
+                    time.sleep(self._poll_interval)
 
         if self._future.cancelled():
             # Raise concurrent.futures.CancelledError, not asyncio.CancelledError
@@ -728,12 +732,12 @@ class AsyncioFuture(BaseFuture):
             if timeout is not None:
                 start_time = time.time()
                 while not self.done() and (time.time() - start_time) < timeout:
-                    time.sleep(self.ASYNCIO_POLL_INTERVAL)
+                    time.sleep(self._poll_interval)
                 if not self.done():
                     raise TimeoutError("Future did not complete within timeout")
             else:
                 while not self.done():
-                    time.sleep(self.ASYNCIO_POLL_INTERVAL)
+                    time.sleep(self._poll_interval)
 
         if self._future.cancelled():
             # Raise concurrent.futures.CancelledError, not asyncio.CancelledError
@@ -781,6 +785,15 @@ if _IS_RAY_INSTALLED:
         The thread processes a queue of (object_ref, future) pairs and uses ray.wait()
         to check which ones have completed, then invokes their callbacks.
         """
+        # Get config values at thread start
+        from ..config import global_config
+
+        local_config = global_config.clone()
+        queue_get_timeout = local_config.defaults.ray_monitor_queue_get_timeout
+        no_futures_sleep = local_config.defaults.ray_monitor_no_futures_sleep
+        monitor_sleep = local_config.defaults.ray_monitor_sleep
+        error_sleep = local_config.defaults.ray_monitor_error_sleep
+
         # Map from ObjectRef to RayFuture for tracking
         pending_futures: dict = {}
 
@@ -789,7 +802,7 @@ if _IS_RAY_INSTALLED:
                 # Collect new futures from queue (non-blocking with short timeout)
                 try:
                     while True:
-                        object_ref, future = _ray_monitor_queue.get(timeout=0.01)
+                        object_ref, future = _ray_monitor_queue.get(timeout=queue_get_timeout)
                         if object_ref is None:  # Shutdown signal
                             return
                         pending_futures[object_ref] = future
@@ -798,7 +811,7 @@ if _IS_RAY_INSTALLED:
 
                 if len(pending_futures) == 0:
                     # No futures to monitor, sleep briefly
-                    time.sleep(0.01)
+                    time.sleep(no_futures_sleep)
                     continue
 
                 # Check which ObjectRefs are ready (non-blocking)
@@ -842,12 +855,12 @@ if _IS_RAY_INSTALLED:
 
                 # Small sleep to avoid busy-waiting
                 if len(pending_futures) > 0:
-                    time.sleep(0.001)  # 1ms sleep when monitoring futures
+                    time.sleep(monitor_sleep)  # 1ms sleep when monitoring futures
 
             except Exception:
                 # If monitoring fails (e.g., Ray shutdown), continue
                 # Callbacks will be invoked when .result() is called instead
-                time.sleep(0.1)
+                time.sleep(error_sleep)
 
     def _ensure_ray_monitor_started() -> None:
         """Ensure the global Ray monitor thread is running."""

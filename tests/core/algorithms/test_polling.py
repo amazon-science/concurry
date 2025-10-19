@@ -2,6 +2,7 @@
 
 import pytest
 
+from concurry import global_config
 from concurry.core.algorithms.polling import (
     AdaptivePollingStrategy,
     ExponentialPollingStrategy,
@@ -17,8 +18,9 @@ class TestFixedPollingStrategy:
 
     def test_initialization_defaults(self):
         """Test default initialization."""
-        strategy = FixedPollingStrategy()
-        assert strategy.interval == 0.01
+        defaults = global_config.defaults
+        strategy = FixedPollingStrategy(interval=defaults.polling_fixed_interval)
+        assert strategy.interval == defaults.polling_fixed_interval
 
     def test_initialization_custom(self):
         """Test custom initialization."""
@@ -58,17 +60,22 @@ class TestAdaptivePollingStrategy:
 
     def test_initialization_defaults(self):
         """Test default initialization."""
-        strategy = AdaptivePollingStrategy()
-        assert strategy.min_interval == 0.001
-        assert strategy.max_interval == 0.1
-        assert strategy.current_interval == 0.01
+        defaults = global_config.defaults
+        strategy = AdaptivePollingStrategy(
+            min_interval=defaults.polling_adaptive_min_interval,
+            max_interval=defaults.polling_adaptive_max_interval,
+            current_interval=defaults.polling_adaptive_initial_interval,
+        )
+        assert strategy.min_interval == defaults.polling_adaptive_min_interval
+        assert strategy.max_interval == defaults.polling_adaptive_max_interval
+        assert strategy.current_interval == defaults.polling_adaptive_initial_interval
         assert strategy.speedup_factor == 0.7
         assert strategy.slowdown_factor == 1.3
         assert strategy.consecutive_empty == 0
 
     def test_record_completion_speeds_up(self):
         """Test that completion speeds up polling."""
-        strategy = AdaptivePollingStrategy(current_interval=0.01)
+        strategy = AdaptivePollingStrategy(min_interval=0.001, max_interval=0.1, current_interval=0.01)
         initial = strategy.get_next_interval()
         strategy.record_completion()
         new = strategy.get_next_interval()
@@ -77,14 +84,14 @@ class TestAdaptivePollingStrategy:
 
     def test_record_completion_respects_min(self):
         """Test that speedup respects minimum interval."""
-        strategy = AdaptivePollingStrategy(min_interval=0.005, current_interval=0.006)
+        strategy = AdaptivePollingStrategy(min_interval=0.005, max_interval=0.1, current_interval=0.006)
         for _ in range(10):
             strategy.record_completion()
         assert strategy.get_next_interval() >= strategy.min_interval
 
     def test_record_no_completion_slows_down(self):
         """Test that no completion slows down polling after 3 empty checks."""
-        strategy = AdaptivePollingStrategy(current_interval=0.01)
+        strategy = AdaptivePollingStrategy(min_interval=0.001, max_interval=0.1, current_interval=0.01)
         initial = strategy.get_next_interval()
 
         # First two empty checks - no change
@@ -100,14 +107,19 @@ class TestAdaptivePollingStrategy:
 
     def test_record_no_completion_respects_max(self):
         """Test that slowdown respects maximum interval."""
-        strategy = AdaptivePollingStrategy(max_interval=0.05, current_interval=0.04)
+        strategy = AdaptivePollingStrategy(min_interval=0.001, max_interval=0.05, current_interval=0.04)
         for _ in range(20):  # Many empty checks
             strategy.record_no_completion()
         assert strategy.get_next_interval() <= strategy.max_interval
 
     def test_completion_resets_consecutive_empty(self):
         """Test that completion resets consecutive empty counter."""
-        strategy = AdaptivePollingStrategy()
+        defaults = global_config.defaults
+        strategy = AdaptivePollingStrategy(
+            min_interval=defaults.polling_adaptive_min_interval,
+            max_interval=defaults.polling_adaptive_max_interval,
+            current_interval=defaults.polling_adaptive_initial_interval,
+        )
         strategy.record_no_completion()
         strategy.record_no_completion()
         assert strategy.consecutive_empty == 2
@@ -117,7 +129,12 @@ class TestAdaptivePollingStrategy:
 
     def test_reset(self):
         """Test reset returns to initial state."""
-        strategy = AdaptivePollingStrategy()
+        defaults = global_config.defaults
+        strategy = AdaptivePollingStrategy(
+            min_interval=defaults.polling_adaptive_min_interval,
+            max_interval=defaults.polling_adaptive_max_interval,
+            current_interval=defaults.polling_adaptive_initial_interval,
+        )
         # Modify state
         for _ in range(5):
             strategy.record_completion()
@@ -126,7 +143,7 @@ class TestAdaptivePollingStrategy:
 
         # Reset
         strategy.reset()
-        assert strategy.current_interval == 0.01
+        assert strategy.current_interval == defaults.polling_adaptive_min_interval
         assert strategy.consecutive_empty == 0
 
 
@@ -135,15 +152,22 @@ class TestExponentialPollingStrategy:
 
     def test_initialization_defaults(self):
         """Test default initialization."""
-        strategy = ExponentialPollingStrategy()
-        assert strategy.initial_interval == 0.001
-        assert strategy.max_interval == 0.5
+        defaults = global_config.defaults
+        strategy = ExponentialPollingStrategy(
+            initial_interval=defaults.polling_exponential_initial_interval,
+            max_interval=defaults.polling_exponential_max_interval,
+            current_interval=defaults.polling_exponential_initial_interval,
+        )
+        assert strategy.initial_interval == defaults.polling_exponential_initial_interval
+        assert strategy.max_interval == defaults.polling_exponential_max_interval
         assert strategy.multiplier == 2.0
-        assert strategy.current_interval == 0.001
+        assert strategy.current_interval == defaults.polling_exponential_initial_interval
 
     def test_record_completion_resets(self):
         """Test that completion resets to initial interval."""
-        strategy = ExponentialPollingStrategy(initial_interval=0.001)
+        strategy = ExponentialPollingStrategy(
+            initial_interval=0.001, max_interval=0.5, current_interval=0.001
+        )
         # Increase interval first
         strategy.record_no_completion()
         strategy.record_no_completion()
@@ -155,7 +179,9 @@ class TestExponentialPollingStrategy:
 
     def test_record_no_completion_exponential_growth(self):
         """Test exponential growth of interval."""
-        strategy = ExponentialPollingStrategy(initial_interval=0.001, multiplier=2.0)
+        strategy = ExponentialPollingStrategy(
+            initial_interval=0.001, max_interval=0.5, current_interval=0.001, multiplier=2.0
+        )
         intervals = [strategy.get_next_interval()]
 
         for _ in range(5):
@@ -169,14 +195,21 @@ class TestExponentialPollingStrategy:
 
     def test_record_no_completion_respects_max(self):
         """Test that growth respects maximum interval."""
-        strategy = ExponentialPollingStrategy(max_interval=0.1)
+        strategy = ExponentialPollingStrategy(
+            initial_interval=0.001, max_interval=0.1, current_interval=0.001
+        )
         for _ in range(20):  # Many increases
             strategy.record_no_completion()
         assert strategy.get_next_interval() <= strategy.max_interval
 
     def test_reset(self):
         """Test reset returns to initial interval."""
-        strategy = ExponentialPollingStrategy()
+        defaults = global_config.defaults
+        strategy = ExponentialPollingStrategy(
+            initial_interval=defaults.polling_exponential_initial_interval,
+            max_interval=defaults.polling_exponential_max_interval,
+            current_interval=defaults.polling_exponential_initial_interval,
+        )
         for _ in range(5):
             strategy.record_no_completion()
 
@@ -189,15 +222,23 @@ class TestProgressivePollingStrategy:
 
     def test_initialization_defaults(self):
         """Test default initialization."""
-        strategy = ProgressivePollingStrategy()
-        assert strategy.intervals == (0.001, 0.005, 0.01, 0.05, 0.1)
+        defaults = global_config.defaults
+        min_int = defaults.polling_progressive_min_interval
+        max_int = defaults.polling_progressive_max_interval
+        intervals = (min_int, min_int * 5, min_int * 10, min_int * 50, max_int)
+        strategy = ProgressivePollingStrategy(intervals=intervals)
+        assert strategy.intervals == intervals
         assert strategy.current_index == 0
         assert strategy.checks_at_level == 0
         assert strategy.checks_before_increase == 5
 
     def test_record_completion_resets_to_fastest(self):
         """Test that completion resets to fastest level."""
-        strategy = ProgressivePollingStrategy()
+        defaults = global_config.defaults
+        min_int = defaults.polling_progressive_min_interval
+        max_int = defaults.polling_progressive_max_interval
+        intervals = (min_int, min_int * 5, min_int * 10, min_int * 50, max_int)
+        strategy = ProgressivePollingStrategy(intervals=intervals)
         # Progress to higher level
         for _ in range(10):
             strategy.record_no_completion()
@@ -210,7 +251,11 @@ class TestProgressivePollingStrategy:
 
     def test_record_no_completion_progresses_levels(self):
         """Test progression through levels."""
-        strategy = ProgressivePollingStrategy(checks_before_increase=3)
+        defaults = global_config.defaults
+        min_int = defaults.polling_progressive_min_interval
+        max_int = defaults.polling_progressive_max_interval
+        intervals = (min_int, min_int * 5, min_int * 10, min_int * 50, max_int)
+        strategy = ProgressivePollingStrategy(intervals=intervals, checks_before_increase=3)
         levels_visited = [strategy.current_index]
 
         for _ in range(15):  # Enough to progress through several levels
@@ -224,7 +269,11 @@ class TestProgressivePollingStrategy:
 
     def test_record_no_completion_stays_at_max(self):
         """Test that we stay at max level after reaching it."""
-        strategy = ProgressivePollingStrategy()
+        defaults = global_config.defaults
+        min_int = defaults.polling_progressive_min_interval
+        max_int = defaults.polling_progressive_max_interval
+        intervals = (min_int, min_int * 5, min_int * 10, min_int * 50, max_int)
+        strategy = ProgressivePollingStrategy(intervals=intervals)
         max_level = len(strategy.intervals) - 1
 
         # Progress to max level
@@ -235,14 +284,22 @@ class TestProgressivePollingStrategy:
 
     def test_get_next_interval_returns_correct_level(self):
         """Test that interval matches current level."""
-        strategy = ProgressivePollingStrategy()
+        defaults = global_config.defaults
+        min_int = defaults.polling_progressive_min_interval
+        max_int = defaults.polling_progressive_max_interval
+        intervals = (min_int, min_int * 5, min_int * 10, min_int * 50, max_int)
+        strategy = ProgressivePollingStrategy(intervals=intervals)
         for i in range(len(strategy.intervals)):
             strategy.current_index = i
             assert strategy.get_next_interval() == strategy.intervals[i]
 
     def test_reset(self):
         """Test reset returns to fastest level."""
-        strategy = ProgressivePollingStrategy()
+        defaults = global_config.defaults
+        min_int = defaults.polling_progressive_min_interval
+        max_int = defaults.polling_progressive_max_interval
+        intervals = (min_int, min_int * 5, min_int * 10, min_int * 50, max_int)
+        strategy = ProgressivePollingStrategy(intervals=intervals)
         for _ in range(10):
             strategy.record_no_completion()
 
@@ -322,7 +379,12 @@ class TestPollingBehavior:
 
     def test_adaptive_converges(self):
         """Test that adaptive polling converges to optimal behavior."""
-        strategy = AdaptivePollingStrategy()
+        defaults = global_config.defaults
+        strategy = AdaptivePollingStrategy(
+            min_interval=defaults.polling_adaptive_min_interval,
+            max_interval=defaults.polling_adaptive_max_interval,
+            current_interval=defaults.polling_adaptive_initial_interval,
+        )
         initial = strategy.get_next_interval()
 
         # Simulate rapid completions - should speed up
@@ -341,7 +403,9 @@ class TestPollingBehavior:
 
     def test_exponential_backoff_pattern(self):
         """Test exponential backoff follows expected pattern."""
-        strategy = ExponentialPollingStrategy(initial_interval=0.001, max_interval=1.0, multiplier=2.0)
+        strategy = ExponentialPollingStrategy(
+            initial_interval=0.001, max_interval=1.0, current_interval=0.001, multiplier=2.0
+        )
 
         intervals = []
         for _ in range(10):
@@ -354,7 +418,11 @@ class TestPollingBehavior:
 
     def test_progressive_level_progression(self):
         """Test progressive strategy progresses through levels correctly."""
-        strategy = ProgressivePollingStrategy(checks_before_increase=2)
+        defaults = global_config.defaults
+        min_int = defaults.polling_progressive_min_interval
+        max_int = defaults.polling_progressive_max_interval
+        intervals = (min_int, min_int * 5, min_int * 10, min_int * 50, max_int)
+        strategy = ProgressivePollingStrategy(intervals=intervals, checks_before_increase=2)
 
         levels = []
         for _ in range(12):  # 6 levels of 2 checks each

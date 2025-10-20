@@ -38,6 +38,7 @@ class GlobalDefaults(MutableTyped):
         rate_limit_algorithm: Default rate limiting algorithm
         limit_pool_load_balancing: Default load balancing for LimitPool
         limit_pool_worker_index: Default worker index for LimitPool
+        task_decorator_on_demand: Default on-demand worker creation for @task (True = create workers per request)
     """
 
     model_config = ConfigDict(
@@ -51,6 +52,9 @@ class GlobalDefaults(MutableTyped):
     max_queued_tasks: Optional[conint(ge=0)] = None
     load_balancing: LoadBalancingAlgorithm = LoadBalancingAlgorithm.RoundRobin
     load_balancing_on_demand: LoadBalancingAlgorithm = LoadBalancingAlgorithm.Random
+
+    # @task decorator configuration
+    task_decorator_on_demand: bool = True  # Default for @task decorator
 
     # Execution configuration
     blocking: bool = False
@@ -136,6 +140,7 @@ class ExecutionModeDefaults(MutableTyped):
         retry_wait: Override for retry wait time
         retry_jitter: Override for retry jitter factor
         stop_timeout: Override for stop timeout
+        task_decorator_on_demand: Override for on-demand worker creation for @task
     """
 
     # Worker/Pool configuration
@@ -143,6 +148,9 @@ class ExecutionModeDefaults(MutableTyped):
     max_queued_tasks: Optional[conint(ge=0)] = None
     load_balancing: Optional[LoadBalancingAlgorithm] = None
     load_balancing_on_demand: Optional[LoadBalancingAlgorithm] = None
+
+    # @task decorator configuration
+    task_decorator_on_demand: Optional[bool] = None
 
     # Execution configuration
     blocking: Optional[bool] = None
@@ -296,6 +304,14 @@ class ResolvedDefaults:
             self._mode.load_balancing_on_demand
             if self._mode.load_balancing_on_demand is not None
             else self._global.load_balancing_on_demand
+        )
+
+    @property
+    def task_decorator_on_demand(self) -> bool:
+        return (
+            self._mode.task_decorator_on_demand
+            if self._mode.task_decorator_on_demand is not None
+            else self._global.task_decorator_on_demand
         )
 
     @property

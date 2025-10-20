@@ -1,8 +1,108 @@
 """TaskWorker implementation for concurry."""
 
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional, Union
 
+from ...utils import _NO_ARG
+from ...utils.progress import ProgressBar
 from .base_worker import Worker
+
+
+class TaskWorkerPoolMixin:
+    """Mixin that adds submit(), map(), and __call__() to worker pools for TaskWorker.
+
+    This mixin extends WorkerProxyPool classes with TaskWorker-specific methods.
+    Worker pools dispatch method calls to individual workers via __getattr__, but
+    for TaskWorker we need to add these methods directly to the pool.
+    """
+
+    def __call__(self, *args: Any, **kwargs: Any):
+        """Call the bound function via submit().
+
+        Returns:
+            BaseFuture for the task execution (or result directly if blocking=True)
+        """
+        return self.submit(*args, **kwargs)
+
+    def submit(self, fn: Any = _NO_ARG, *args: Any, **kwargs: Any):
+        """Dispatch submit to a worker in the pool.
+
+        This method handles bound functions and dispatches to individual workers.
+
+        Behavior:
+        - If bound function exists (from .init(fn=...)): First argument is treated as data
+        - If no bound function: First argument must be a callable function
+        """
+        # Check if we have a bound function
+        has_bound_fn = hasattr(self, "init_kwargs") and "fn" in self.init_kwargs
+
+        if has_bound_fn:
+            # Bound function exists - treat fn as first data argument
+            bound_fn = self.init_kwargs["fn"]
+            if fn is not _NO_ARG:
+                # fn was explicitly passed (even if None) - add to args
+                args = (fn,) + args
+            fn = bound_fn
+        else:
+            # No bound function - fn must be callable
+            if fn is _NO_ARG:
+                raise TypeError(
+                    "submit() requires a function argument when no bound function is set via .init(fn=...)"
+                )
+            if not callable(fn):
+                raise TypeError(f"submit() requires a callable function, got {type(fn).__name__}")
+
+        # Dispatch to a worker via __getattr__
+        submit_method = object.__getattribute__(self, "__getattr__")("submit")
+        return submit_method(fn, *args, **kwargs)
+
+    def map(
+        self,
+        fn: Any = _NO_ARG,
+        *iterables: Any,
+        timeout: Optional[float] = None,
+        chunksize: int = 1,
+        buffersize: Optional[int] = None,
+        progress: Union[bool, dict, "ProgressBar"] = False,
+    ) -> Iterator:
+        """Dispatch map to a worker in the pool.
+
+        This method handles bound functions and dispatches to individual workers.
+
+        Behavior:
+        - If bound function exists (from .init(fn=...)): First argument is treated as data (iterable)
+        - If no bound function: First argument must be a callable function
+        """
+        # Check if we have a bound function
+        has_bound_fn = hasattr(self, "init_kwargs") and "fn" in self.init_kwargs
+
+        if has_bound_fn:
+            # Bound function exists
+            bound_fn = self.init_kwargs["fn"]
+            if fn is not _NO_ARG and callable(fn):
+                # fn is a callable - use it as explicit function (allows overriding bound function)
+                pass  # Use fn as-is
+            elif fn is not _NO_ARG:
+                # fn is not callable - treat as first iterable argument
+                iterables = (fn,) + iterables
+                fn = bound_fn
+            else:
+                # fn not provided - use bound function
+                fn = bound_fn
+        else:
+            # No bound function - fn must be callable
+            if fn is _NO_ARG:
+                raise TypeError(
+                    "map() requires a function argument when no bound function is set via .init(fn=...)"
+                )
+            if not callable(fn):
+                raise TypeError(f"map() requires a callable function, got {type(fn).__name__}")
+
+        # For pools, we need to handle map differently since it returns an iterator
+        # We'll call the regular map method which will use submit internally
+        map_method = object.__getattribute__(self, "__getattr__")("map")
+        return map_method(
+            fn, *iterables, timeout=timeout, chunksize=chunksize, buffersize=buffersize, progress=progress
+        )
 
 
 class TaskWorkerMixin:
@@ -17,22 +117,48 @@ class TaskWorkerMixin:
     - self._stopped: Boolean flag indicating if worker is stopped
     - self.blocking: Boolean flag for blocking mode
     - self._execute_task(fn, *args, **kwargs): Method to execute arbitrary functions
+    - self._worker: The actual TaskWorker instance (which may have _bound_fn)
     """
 
-    def submit(self, fn: Callable, /, *args: Any, **kwargs: Any):
+    def __call__(self, *args: Any, **kwargs: Any):
+        """Call the bound function via submit().
+
+        This allows decorated functions to be called directly:
+            @task(mode="thread")
+            def process(x):
+                return x * 2
+
+            result = process(5).result()  # Calls worker.submit() internally
+
+        Returns:
+            BaseFuture for the task execution (or result directly if blocking=True)
+
+        Raises:
+            TypeError: If no bound function was provided during initialization
+        """
+        return self.submit(*args, **kwargs)
+
+    def submit(self, fn: Any = _NO_ARG, *args: Any, **kwargs: Any):
         """Schedule the callable to be executed as fn(*args, **kwargs).
 
         This method is identical to concurrent.futures.Executor.submit().
         It submits a function for execution in the worker's context and returns
         a Future representing the execution of the callable.
 
+        Behavior:
+        - If bound function exists (from .init(fn=...)): First argument is treated as data
+        - If no bound function: First argument must be a callable function
+
         Args:
-            fn: Callable function to execute
+            fn: Callable function to execute, OR first data argument if bound function exists.
             *args: Positional arguments for the function
             **kwargs: Keyword arguments for the function
 
         Returns:
             BaseFuture for the task execution (or result directly if blocking=True)
+
+        Raises:
+            TypeError: If no function is provided and no bound function exists
 
         Examples:
             Basic Function Submission:
@@ -86,6 +212,36 @@ class TaskWorkerMixin:
                 worker.stop()
                 ```
         """
+        # Check if we have a bound function
+        # For Sync proxies: self._worker._bound_fn
+        # For Thread/Process/Asyncio proxies: self.init_kwargs['fn']
+        bound_fn = None
+        if hasattr(self, "_worker") and hasattr(self._worker, "_bound_fn"):
+            bound_fn = self._worker._bound_fn
+        elif hasattr(self, "init_kwargs") and "fn" in self.init_kwargs:
+            bound_fn = self.init_kwargs["fn"]
+
+        if bound_fn is not None:
+            # Bound function exists
+            if fn is not _NO_ARG and callable(fn):
+                # fn is a callable - use it as explicit function (allows overriding bound function)
+                pass  # Use fn as-is
+            elif fn is not _NO_ARG:
+                # fn is not callable - treat as first data argument
+                args = (fn,) + args
+                fn = bound_fn
+            else:
+                # fn not provided - use bound function
+                fn = bound_fn
+        else:
+            # No bound function - fn must be callable
+            if fn is _NO_ARG:
+                raise TypeError(
+                    "submit() requires a function argument when no bound function is set via .init(fn=...)"
+                )
+            if not callable(fn):
+                raise TypeError(f"submit() requires a callable function, got {type(fn).__name__}")
+
         # Check if worker is stopped
         if self._stopped:
             raise RuntimeError("Worker is stopped")
@@ -102,31 +258,43 @@ class TaskWorkerMixin:
 
     def map(
         self,
-        fn: Callable,
+        fn: Any = _NO_ARG,
         *iterables: Any,
         timeout: Optional[float] = None,
         chunksize: int = 1,
         buffersize: Optional[int] = None,
+        progress: Union[bool, dict, ProgressBar] = False,
     ) -> Iterator:
         """Map a function over iterables, executing in parallel.
 
-        This method is identical to concurrent.futures.Executor.map().
+        This method is identical to concurrent.futures.Executor.map() with
+        additional ProgressBar support.
         Similar to map(fn, *iterables) but executes asynchronously with support
         for timeouts, chunking, and buffering.
 
+        Behavior:
+        - If bound function exists (from .init(fn=...)): First argument is treated as data (iterable)
+        - If no bound function: First argument must be a callable function
+
         Args:
-            fn: Callable function to execute for each item
+            fn: Callable function to execute for each item, OR first iterable if bound function exists.
             *iterables: One or more iterables to map over
             timeout: Maximum time in seconds to wait for each result
             chunksize: Size of chunks for batch processing (currently ignored)
             buffersize: Maximum number of submitted tasks whose results haven't been yielded
                        (currently ignored)
+            progress: Progress bar configuration:
+                - False: No progress bar (default)
+                - True: Use default progress bar
+                - dict: Pass as kwargs to ProgressBar()
+                - ProgressBar: Use existing ProgressBar instance
 
         Returns:
             Iterator that yields results in the same order as the input iterables
 
         Raises:
             TimeoutError: If any result isn't available within the timeout
+            TypeError: If no function is provided and no bound function exists
             Exception: Any exception raised by fn is re-raised when its value is retrieved
 
         Examples:
@@ -191,6 +359,36 @@ class TaskWorkerMixin:
                 worker.stop()
                 ```
         """
+        # Check if we have a bound function
+        # For Sync proxies: self._worker._bound_fn
+        # For Thread/Process/Asyncio proxies: self.init_kwargs['fn']
+        bound_fn = None
+        if hasattr(self, "_worker") and hasattr(self._worker, "_bound_fn"):
+            bound_fn = self._worker._bound_fn
+        elif hasattr(self, "init_kwargs") and "fn" in self.init_kwargs:
+            bound_fn = self.init_kwargs["fn"]
+
+        if bound_fn is not None:
+            # Bound function exists
+            if fn is not _NO_ARG and callable(fn):
+                # fn is a callable - use it as explicit function (allows overriding bound function)
+                pass  # Use fn as-is
+            elif fn is not _NO_ARG:
+                # fn is not callable - treat as first iterable argument
+                iterables = (fn,) + iterables
+                fn = bound_fn
+            else:
+                # fn not provided - use bound function
+                fn = bound_fn
+        else:
+            # No bound function - fn must be callable
+            if fn is _NO_ARG:
+                raise TypeError(
+                    "map() requires a function argument when no bound function is set via .init(fn=...)"
+                )
+            if not callable(fn):
+                raise TypeError(f"map() requires a callable function, got {type(fn).__name__}")
+
         # Check if worker is stopped
         if self._stopped:
             raise RuntimeError("Worker is stopped")
@@ -202,16 +400,37 @@ class TaskWorkerMixin:
         if len(iterables_list) == 0:
             return iter([])
 
+        # Initialize ProgressBar if requested
+        pbar = None
+        if progress:
+            from ...utils.progress import ProgressBar
+
+            total = len(iterables_list[0]) if len(iterables_list) > 0 else None
+
+            if isinstance(progress, ProgressBar):
+                pbar = progress
+            elif isinstance(progress, dict):
+                pbar = ProgressBar(total=total, **progress)
+            else:
+                pbar = ProgressBar(total=total)
+
         # Use regular zip (stops at shortest iterable, matching Python behavior)
+        # Note: We call _execute_task directly to avoid double-wrapping when bound function exists
         futures = []
         for args in zip(*iterables_list):
-            future = self.submit(fn, *args)
+            future = self._execute_task(fn, *args)
             futures.append(future)
 
         # Return an iterator that yields results in order
         def result_iterator():
             for future in futures:
-                yield future.result(timeout=timeout)
+                result = future.result(timeout=timeout)
+                if pbar is not None:
+                    pbar.update(1)
+                yield result
+
+            if pbar is not None:
+                pbar.success("Complete!")
 
         return result_iterator()
 
@@ -329,11 +548,58 @@ class TaskWorker(Worker):
 
             worker.stop()
             ```
+
+        With Bound Function:
+            ```python
+            from concurry import TaskWorker
+
+            def compute(x, y):
+                return x ** 2 + y ** 2
+
+            # Bind function during initialization
+            worker = TaskWorker.options(mode="thread").init(fn=compute)
+
+            # Submit without passing function
+            future = worker.submit(3, 4)
+            result = future.result()  # 25
+
+            # Map without passing function
+            results = list(worker.map([(1, 2), (3, 4), (5, 6)]))
+
+            # Call directly
+            result = worker(3, 4).result()  # 25
+
+            worker.stop()
+            ```
+
+        With Progress Bar:
+            ```python
+            from concurry import TaskWorker
+
+            def square(x):
+                return x ** 2
+
+            worker = TaskWorker.options(mode="process").init(fn=square)
+
+            # Show progress bar during map
+            results = list(worker.map(range(100), progress=True))
+
+            # Custom progress bar configuration
+            results = list(worker.map(
+                range(100),
+                progress={"desc": "Processing", "ncols": 80}
+            ))
+
+            worker.stop()
+            ```
     """
 
-    def __init__(self):
+    def __init__(self, fn: Optional[Callable] = None):
         """Initialize the TaskWorker.
 
-        TaskWorker requires no initialization arguments.
+        Args:
+            fn: Optional callable to bind to this worker. When provided,
+                submit() and map() can be called without passing a function.
         """
         super().__init__()
+        self._bound_fn = fn

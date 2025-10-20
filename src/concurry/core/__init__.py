@@ -45,7 +45,7 @@ from .synch import (
 __all_imports = [
     "ReturnWhen",
 ]
-from .worker import TaskWorker, Worker, worker
+from .worker import TaskWorker, Worker, task, worker
 
 __all__ = [
     # Future types
@@ -72,6 +72,7 @@ __all__ = [
     "TaskWorker",
     "Worker",
     "worker",
+    "task",
     # Synchronization
     "wait",
     "gather",

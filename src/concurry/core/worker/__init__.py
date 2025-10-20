@@ -4,7 +4,8 @@ from .asyncio_worker import AsyncioWorkerProxy
 from .base_worker import Worker, WorkerProxy, worker
 from .process_worker import ProcessWorkerProxy
 from .sync_worker import SyncWorkerProxy
-from .task_worker import TaskWorker
+from .task_decorator import task
+from .task_worker import TaskWorker, TaskWorkerMixin, TaskWorkerPoolMixin
 from .thread_worker import ThreadWorkerProxy
 
 __all__ = [
@@ -12,6 +13,7 @@ __all__ = [
     "Worker",
     "WorkerProxy",
     "worker",
+    "task",
     "SyncWorkerProxy",
     "ThreadWorkerProxy",
     "ProcessWorkerProxy",

@@ -854,6 +854,20 @@ class WorkerBuilder(Typed):
         else:
             raise ValueError(f"Unsupported execution mode for pool: {execution_mode}")
 
+        # If this is TaskWorker, create a combined pool class with TaskWorkerPoolMixin
+        from .task_worker import TaskWorker, TaskWorkerPoolMixin
+
+        if self.worker_cls is TaskWorker or (
+            isinstance(self.worker_cls, type) and issubclass(self.worker_cls, TaskWorker)
+        ):
+            # Create a dynamic class that combines the base pool with TaskWorkerPoolMixin
+            # Use TaskWorkerPoolMixin as the first base class so its methods take precedence
+            pool_cls = type(
+                f"Task{pool_cls.__name__}",
+                (TaskWorkerPoolMixin, pool_cls),
+                {},
+            )
+
         # Apply default max_workers for pool if not specified
         max_workers = self.max_workers
         if max_workers is None:

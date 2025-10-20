@@ -35,6 +35,7 @@ from .core import (
     TaskWorker,
     Worker,
     gather,
+    task,
     wait,
     worker,
     wrap_future,
@@ -44,6 +45,7 @@ from .core import (
 from .executor import Executor
 
 # Utilities
+from .utils import _NO_ARG
 from .utils.progress import ProgressBar
 
 # Public API
@@ -63,6 +65,7 @@ __all__ = [
     "TaskWorker",
     "Worker",
     "worker",
+    "task",
     "Executor",
     # Synchronization
     "wait",
@@ -87,6 +90,7 @@ __all__ = [
     "RetryValidationError",
     # Utilities
     "ProgressBar",
+    "_NO_ARG",
     # Global configuration
     "global_config",
     "temp_config",

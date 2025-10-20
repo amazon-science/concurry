@@ -67,10 +67,9 @@ class TestWorkerPoolCreation:
 
         pool.stop()
 
-    @pytest.mark.parametrize("mode", ["thread", "process"])
-    def test_pool_with_on_demand(self, mode):
+    def test_pool_with_on_demand(self, pool_mode):
         """Test creating on-demand pool."""
-        pool = SimpleWorker.options(mode=mode, on_demand=True).init(multiplier=2)
+        pool = SimpleWorker.options(mode=pool_mode, on_demand=True).init(multiplier=2)
 
         # Should be a pool
         assert hasattr(pool, "get_pool_stats")
@@ -327,10 +326,9 @@ class TestSharedLimitState:
 class TestOnDemandWorkerPool:
     """Tests for on-demand worker pools."""
 
-    @pytest.mark.parametrize("mode", ["thread", "process"])
-    def test_on_demand_creates_and_destroys_workers(self, mode):
+    def test_on_demand_creates_and_destroys_workers(self, pool_mode):
         """Test that on-demand mode creates and destroys workers."""
-        pool = SimpleWorker.options(mode=mode, on_demand=True).init(multiplier=2)
+        pool = SimpleWorker.options(mode=pool_mode, on_demand=True).init(multiplier=2)
 
         stats_before = pool.get_pool_stats()
         assert stats_before["on_demand_active"] == 0
@@ -351,10 +349,9 @@ class TestOnDemandWorkerPool:
 
         pool.stop()
 
-    @pytest.mark.parametrize("mode", ["thread", "process"])
-    def test_on_demand_uses_random_load_balancing_by_default(self, mode):
+    def test_on_demand_uses_random_load_balancing_by_default(self, pool_mode):
         """Test that on-demand mode defaults to random load balancing."""
-        pool = SimpleWorker.options(mode=mode, on_demand=True).init(multiplier=2)
+        pool = SimpleWorker.options(mode=pool_mode, on_demand=True).init(multiplier=2)
 
         stats = pool.get_pool_stats()
         assert stats["load_balancer"]["algorithm"] == "Random"

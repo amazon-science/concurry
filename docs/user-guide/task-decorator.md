@@ -2,6 +2,19 @@
 
 The `@task` decorator provides a convenient way to parallelize functions without manual worker management. It automatically creates and initializes a `TaskWorker` bound to your function, enabling easy parallelization with minimal code.
 
+## Signature
+
+```python
+@task(*, mode: ExecutionMode = ExecutionMode.Sync, on_demand: bool = <config>, **kwargs)
+```
+
+**Parameters:**
+- `mode`: Execution mode (sync, thread, process, asyncio, ray). Defaults to `ExecutionMode.Sync`.
+- `on_demand`: Create workers on-demand. If not specified, uses `global_config.defaults.task_decorator_on_demand` (defaults to `True`). Automatically set to `False` for Sync and Asyncio modes.
+- `**kwargs`: All other `Worker.options()` parameters (blocking, max_workers, limits, retry configuration, etc.)
+
+**Note**: All parameters must be passed as keyword arguments (enforced by `*` in signature).
+
 ## Basic Usage
 
 ### Simple Function Decoration

@@ -1,8 +1,6 @@
 ---
-globs: tests/**/*.py
-description: Comprehensive testing practices for Concurry, including pytest fixtures and execution mode testing
+alwaysApply: true
 ---
-
 # Concurry Testing Practices
 
 ## Test Timeout Configuration

@@ -1,5 +1,5 @@
 ---
-description: Thrse architecture details are useful when designing or integrating new components into concurry, when debugging challenging errors and race conditions, and when testing cross-feature functionality. Also refer to the respective files in docs/architecture/ for comprehensive details.
+description: Thrse architecture details are useful when designing, integrating or refactoring major components of concurry, when debugging challenging errors and race conditions, and when testing cross-feature functionality. Also refer to the respective files in docs/architecture/ for comprehensive details.
 alwaysApply: false
 ---
 # Cursor Rules: Concurry Architecture

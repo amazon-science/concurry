@@ -11,8 +11,10 @@ from pydantic import ConfigDict, PrivateAttr
 from ..constants import RateLimitAlgorithm
 
 
-class BaseRateLimiter(Registry, MutableTyped, ABC):
+class _BaseRateLimiter(Registry, MutableTyped, ABC):
     """Abstract base class for rate limiting implementations.
+
+    **PRIVATE CLASS**: Do not use directly. Use the RateLimiter() factory function instead.
 
     Provides a unified interface for different rate limiting algorithms.
     All algorithm implementations should inherit from this class.
@@ -82,8 +84,10 @@ class BaseRateLimiter(Registry, MutableTyped, ABC):
         pass
 
 
-class TokenBucketLimiter(BaseRateLimiter):
+class _TokenBucketLimiter(_BaseRateLimiter):
     """Token Bucket rate limiting algorithm.
+
+    **PRIVATE CLASS**: Do not use directly. Use the RateLimiter() factory function instead.
 
     Tokens are added to a bucket at a fixed rate. Requests consume tokens.
     Allows bursts up to bucket capacity while maintaining average rate.
@@ -179,8 +183,10 @@ class TokenBucketLimiter(BaseRateLimiter):
         self._tokens = min(self.capacity, self._tokens + tokens)
 
 
-class LeakyBucketLimiter(BaseRateLimiter):
+class _LeakyBucketLimiter(_BaseRateLimiter):
     """Leaky Bucket rate limiting algorithm.
+
+    **PRIVATE CLASS**: Do not use directly. Use the RateLimiter() factory function instead.
 
     Requests are added to a queue and processed at a fixed rate.
     Smooths out traffic but may reject requests during bursts.
@@ -282,8 +288,10 @@ class LeakyBucketLimiter(BaseRateLimiter):
         pass
 
 
-class SlidingWindowLimiter(BaseRateLimiter):
+class _SlidingWindowLimiter(_BaseRateLimiter):
     """Sliding Window rate limiting algorithm.
+
+    **PRIVATE CLASS**: Do not use directly. Use the RateLimiter() factory function instead.
 
     Maintains a rolling window of request timestamps.
     More accurate than fixed window but higher memory usage.
@@ -383,8 +391,10 @@ class SlidingWindowLimiter(BaseRateLimiter):
         pass
 
 
-class FixedWindowLimiter(BaseRateLimiter):
+class _FixedWindowLimiter(_BaseRateLimiter):
     """Fixed Window rate limiting algorithm.
+
+    **PRIVATE CLASS**: Do not use directly. Use the RateLimiter() factory function instead.
 
     Counts requests in fixed time windows. Simple but can have edge case issues
     where 2x max_rate requests occur around window boundary.
@@ -481,8 +491,10 @@ class FixedWindowLimiter(BaseRateLimiter):
         pass
 
 
-class GCRALimiter(BaseRateLimiter):
+class _GCRALimiter(_BaseRateLimiter):
     """Generic Cell Rate Algorithm (GCRA) rate limiter.
+
+    **PRIVATE CLASS**: Do not use directly. Use the RateLimiter() factory function instead.
 
     Also known as Virtual Scheduling algorithm. Tracks a theoretical arrival
     time (TAT) to determine if requests arrive too early. More precise than
@@ -602,8 +614,11 @@ def RateLimiter(
     max_rate: float,
     capacity: int,
     window_seconds: Optional[float] = None,
-) -> BaseRateLimiter:
+) -> _BaseRateLimiter:
     """Factory function to create the appropriate rate limiter using Registry pattern.
+
+    This is the only public API for creating rate limiters. Implementation
+    classes are private and should not be used directly.
 
     Args:
         algorithm: The rate limiting algorithm to use
@@ -612,7 +627,7 @@ def RateLimiter(
         window_seconds: Window duration in seconds (for window-based algorithms)
 
     Returns:
-        BaseRateLimiter instance of the appropriate type
+        Rate limiter instance (private implementation class)
 
     Raises:
         ValueError: If algorithm is not recognized
@@ -630,11 +645,11 @@ def RateLimiter(
     # For token/leaky bucket, max_rate is requests per second
     if algorithm in (RateLimitAlgorithm.SlidingWindow, RateLimitAlgorithm.FixedWindow):
         # Use capacity as max_rate for window algorithms
-        return BaseRateLimiter.of(
+        return _BaseRateLimiter.of(
             algorithm, max_rate=capacity, capacity=capacity, window_seconds=window_seconds
         )
     else:
         # Use max_rate as-is for token/leaky bucket
-        return BaseRateLimiter.of(
+        return _BaseRateLimiter.of(
             algorithm, max_rate=max_rate, capacity=capacity, window_seconds=window_seconds
         )

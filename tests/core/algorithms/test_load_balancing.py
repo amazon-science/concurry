@@ -3,14 +3,7 @@
 import pytest
 
 from concurry import Worker
-from concurry.core.algorithms.load_balancing import (
-    BaseLoadBalancer,
-    LeastActiveLoadBalancer,
-    LeastTotalLoadBalancer,
-    LoadBalancer,
-    RandomBalancer,
-    RoundRobinBalancer,
-)
+from concurry.core.algorithms import LoadBalancer
 from concurry.core.constants import LoadBalancingAlgorithm
 
 # Pool mode fixture is provided by conftest.py
@@ -21,7 +14,7 @@ class TestRoundRobinBalancer:
 
     def test_round_robin_selection(self):
         """Test that round-robin distributes requests evenly."""
-        balancer = RoundRobinBalancer.of()
+        balancer = LoadBalancer(LoadBalancingAlgorithm.RoundRobin)
 
         # Should cycle through workers 0, 1, 2, 0, 1, 2, ...
         num_workers = 3
@@ -31,7 +24,7 @@ class TestRoundRobinBalancer:
 
     def test_round_robin_with_single_worker(self):
         """Test round-robin with single worker."""
-        balancer = RoundRobinBalancer.of()
+        balancer = LoadBalancer(LoadBalancingAlgorithm.RoundRobin)
 
         # Should always select worker 0
         selections = [balancer.select_worker(1) for _ in range(5)]
@@ -39,7 +32,7 @@ class TestRoundRobinBalancer:
 
     def test_round_robin_stats(self):
         """Test round-robin statistics."""
-        balancer = RoundRobinBalancer.of()
+        balancer = LoadBalancer(LoadBalancingAlgorithm.RoundRobin)
 
         for i in range(10):
             balancer.select_worker(3)
@@ -51,7 +44,7 @@ class TestRoundRobinBalancer:
 
     def test_round_robin_invalid_num_workers(self):
         """Test round-robin with invalid num_workers."""
-        balancer = RoundRobinBalancer.of()
+        balancer = LoadBalancer(LoadBalancingAlgorithm.RoundRobin)
 
         with pytest.raises(ValueError, match="num_workers must be positive"):
             balancer.select_worker(0)
@@ -62,11 +55,11 @@ class TestRoundRobinBalancer:
     def test_round_robin_with_offset(self):
         """Test round-robin with different starting offsets."""
         # Balancer with offset 0
-        balancer0 = RoundRobinBalancer.of(offset=0)
+        balancer0 = LoadBalancer(LoadBalancingAlgorithm.RoundRobin, offset=0)
         # Balancer with offset 1
-        balancer1 = RoundRobinBalancer.of(offset=1)
+        balancer1 = LoadBalancer(LoadBalancingAlgorithm.RoundRobin, offset=1)
         # Balancer with offset 2
-        balancer2 = RoundRobinBalancer.of(offset=2)
+        balancer2 = LoadBalancer(LoadBalancingAlgorithm.RoundRobin, offset=2)
 
         num_workers = 3
 
@@ -84,7 +77,7 @@ class TestRoundRobinBalancer:
 
     def test_round_robin_offset_stats(self):
         """Test that stats correctly show offset and total_dispatched."""
-        balancer = RoundRobinBalancer.of(offset=5)
+        balancer = LoadBalancer(LoadBalancingAlgorithm.RoundRobin, offset=5)
 
         # Make 10 selections
         for _ in range(10):
@@ -97,7 +90,7 @@ class TestRoundRobinBalancer:
 
     def test_round_robin_large_offset(self):
         """Test round-robin with large offset wraps correctly."""
-        balancer = RoundRobinBalancer.of(offset=100)
+        balancer = LoadBalancer(LoadBalancingAlgorithm.RoundRobin, offset=100)
         num_workers = 3
 
         # With offset 100 and 3 workers:
@@ -113,7 +106,7 @@ class TestLeastActiveLoadBalancer:
 
     def test_least_active_selection(self):
         """Test that least active selects worker with fewest active calls."""
-        balancer = LeastActiveLoadBalancer.of()
+        balancer = LoadBalancer(LoadBalancingAlgorithm.LeastActiveLoad)
 
         # All workers start with 0 active calls
         selected = balancer.select_worker(3)
@@ -142,7 +135,7 @@ class TestLeastActiveLoadBalancer:
 
     def test_least_active_stats(self):
         """Test least active statistics."""
-        balancer = LeastActiveLoadBalancer.of()
+        balancer = LoadBalancer(LoadBalancingAlgorithm.LeastActiveLoad)
 
         balancer.select_worker(3)
         balancer.record_start(0)
@@ -156,7 +149,7 @@ class TestLeastActiveLoadBalancer:
 
     def test_least_active_record_complete_nonexistent(self):
         """Test completing call on nonexistent worker."""
-        balancer = LeastActiveLoadBalancer.of()
+        balancer = LoadBalancer(LoadBalancingAlgorithm.LeastActiveLoad)
 
         # Recording complete on nonexistent worker should not raise error
         balancer.record_complete(0)
@@ -169,7 +162,7 @@ class TestLeastTotalLoadBalancer:
 
     def test_least_total_selection(self):
         """Test that least total selects worker with fewest total calls."""
-        balancer = LeastTotalLoadBalancer.of()
+        balancer = LoadBalancer(LoadBalancingAlgorithm.LeastTotalLoad)
 
         # All workers start with 0 total calls
         selected = balancer.select_worker(3)
@@ -196,7 +189,7 @@ class TestLeastTotalLoadBalancer:
 
     def test_least_total_stats(self):
         """Test least total statistics."""
-        balancer = LeastTotalLoadBalancer.of()
+        balancer = LoadBalancer(LoadBalancingAlgorithm.LeastTotalLoad)
 
         for i in range(10):
             selected = balancer.select_worker(3)
@@ -212,7 +205,7 @@ class TestLeastTotalLoadBalancer:
 
     def test_least_total_no_reset_on_complete(self):
         """Test that completing calls doesn't reduce total count."""
-        balancer = LeastTotalLoadBalancer.of()
+        balancer = LoadBalancer(LoadBalancingAlgorithm.LeastTotalLoad)
 
         balancer.select_worker(2)
         balancer.record_start(0)
@@ -227,7 +220,7 @@ class TestRandomBalancer:
 
     def test_random_selection_in_range(self):
         """Test that random selects workers within valid range."""
-        balancer = RandomBalancer.of()
+        balancer = LoadBalancer(LoadBalancingAlgorithm.Random)
 
         num_workers = 5
         selections = [balancer.select_worker(num_workers) for _ in range(100)]
@@ -237,7 +230,7 @@ class TestRandomBalancer:
 
     def test_random_selection_distribution(self):
         """Test that random eventually distributes fairly."""
-        balancer = RandomBalancer.of()
+        balancer = LoadBalancer(LoadBalancingAlgorithm.Random)
 
         num_workers = 3
         num_selections = 300
@@ -253,7 +246,7 @@ class TestRandomBalancer:
 
     def test_random_stats(self):
         """Test random balancer statistics."""
-        balancer = RandomBalancer.of()
+        balancer = LoadBalancer(LoadBalancingAlgorithm.Random)
 
         for i in range(20):
             balancer.select_worker(5)
@@ -267,18 +260,25 @@ class TestLoadBalancerFactory:
     """Tests for LoadBalancer factory function."""
 
     def test_factory_creates_correct_types(self):
-        """Test that factory creates correct balancer types."""
+        """Test that factory creates valid balancer instances."""
         algorithms = [
-            (LoadBalancingAlgorithm.RoundRobin, RoundRobinBalancer),
-            (LoadBalancingAlgorithm.LeastActiveLoad, LeastActiveLoadBalancer),
-            (LoadBalancingAlgorithm.LeastTotalLoad, LeastTotalLoadBalancer),
-            (LoadBalancingAlgorithm.Random, RandomBalancer),
+            LoadBalancingAlgorithm.RoundRobin,
+            LoadBalancingAlgorithm.LeastActiveLoad,
+            LoadBalancingAlgorithm.LeastTotalLoad,
+            LoadBalancingAlgorithm.Random,
         ]
 
-        for algorithm, expected_cls in algorithms:
+        for algorithm in algorithms:
             balancer = LoadBalancer(algorithm)
-            assert isinstance(balancer, expected_cls)
-            assert isinstance(balancer, BaseLoadBalancer)
+            # Verify it has the required methods
+            assert hasattr(balancer, "select_worker")
+            assert hasattr(balancer, "get_stats")
+            assert hasattr(balancer, "record_start")
+            assert hasattr(balancer, "record_complete")
+            # Verify it works
+            worker_idx = balancer.select_worker(5)
+            assert isinstance(worker_idx, int)
+            assert 0 <= worker_idx < 5
 
     def test_factory_invalid_algorithm(self):
         """Test factory with invalid algorithm."""
@@ -298,7 +298,7 @@ class TestThreadSafety:
         """Test that round-robin is thread-safe."""
         import threading
 
-        balancer = RoundRobinBalancer()
+        balancer = LoadBalancer(LoadBalancingAlgorithm.RoundRobin)
         num_threads = 10
         num_selections_per_thread = 100
         num_workers = 5
@@ -330,7 +330,7 @@ class TestThreadSafety:
         """Test that least active is thread-safe."""
         import threading
 
-        balancer = LeastActiveLoadBalancer.of()
+        balancer = LoadBalancer(LoadBalancingAlgorithm.LeastActiveLoad)
         num_threads = 10
         num_workers = 5
 

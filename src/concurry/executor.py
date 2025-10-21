@@ -4,17 +4,18 @@ This module provides a simple Executor() function that mimics the
 concurrent.futures.Executor interface but returns TaskWorker instances.
 """
 
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from .core.constants import ExecutionMode, LoadBalancingAlgorithm
 from .core.worker.task_worker import TaskWorker
+from .utils import _NO_ARG, _NO_ARG_TYPE
 
 
 def Executor(
     mode: ExecutionMode,
     max_workers: Optional[int] = None,
-    load_balancing: Optional[LoadBalancingAlgorithm] = None,
-    on_demand: bool = False,
+    load_balancing: Union[LoadBalancingAlgorithm, _NO_ARG_TYPE] = _NO_ARG,
+    on_demand: Union[bool, _NO_ARG_TYPE] = _NO_ARG,
     limits: Optional[Any] = None,
     **kwargs: Any,
 ) -> Any:
@@ -40,10 +41,11 @@ def Executor(
             - "random": Random selection
             - Default value determined by global_config.<mode>.load_balancing (for pools)
               or global_config.<mode>.load_balancing_on_demand (for on-demand pools)
-        on_demand: If True, create workers on-demand per task (default: False)
+        on_demand: If True, create workers on-demand per task
             - Workers are created for each task and destroyed after completion
             - Useful for bursty workloads or resource-constrained environments
             - Cannot be used with Sync/Asyncio modes
+            - Default value determined by global_config.<mode>.on_demand
         limits: LimitSet or List[Limit] for resource protection (optional)
             - Pass LimitSet: Workers share the same limit pool
             - Pass List[Limit]: Each worker gets private limits (creates shared LimitSet for pools)

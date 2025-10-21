@@ -63,12 +63,13 @@ See Also:
     - User Guide: docs/user-guide/limits.md
 """
 
-from typing import Any, Dict, List, NoReturn, Optional
+from typing import Any, Dict, List, NoReturn, Optional, Union
 
 from morphic import Typed
 from pydantic import PrivateAttr
 
-from ..algorithms.load_balancing import RandomBalancer, RoundRobinBalancer
+from ...utils import _NO_ARG, _NO_ARG_TYPE
+from ..algorithms.load_balancing import LoadBalancer
 from ..constants import LoadBalancingAlgorithm
 from .acquisition import LimitSetAcquisition
 from .limit_set import BaseLimitSet
@@ -146,8 +147,8 @@ class LimitPool(Typed):
 
     # Public immutable attributes
     limit_sets: List[BaseLimitSet]
-    load_balancing: Optional[LoadBalancingAlgorithm] = None
-    worker_index: Optional[int] = None
+    load_balancing: Union[LoadBalancingAlgorithm, _NO_ARG_TYPE] = _NO_ARG
+    worker_index: Union[int, _NO_ARG_TYPE] = _NO_ARG
 
     # Private mutable attributes
     _balancer: Any = PrivateAttr()
@@ -161,26 +162,26 @@ class LimitPool(Typed):
         Raises:
             ValueError: If limit_sets is empty
         """
+        from ...config import global_config
+
+        local_config = global_config.clone()
+
         if len(self.limit_sets) == 0:
             raise ValueError("LimitPool requires at least one LimitSet")
 
         # Apply defaults from global config if not specified
-        if self.load_balancing is None or self.worker_index is None:
-            from ...config import global_config
-
-            local_config = global_config.clone()
-
-            if self.load_balancing is None:
+        if self.load_balancing is _NO_ARG or self.worker_index is _NO_ARG:
+            if self.load_balancing is _NO_ARG:
                 object.__setattr__(self, "load_balancing", local_config.defaults.limit_pool_load_balancing)
-            if self.worker_index is None:
+            if self.worker_index is _NO_ARG:
                 object.__setattr__(self, "worker_index", local_config.defaults.limit_pool_worker_index)
 
-        # Create appropriate load balancer
+        # Create appropriate load balancer using factory
         if self.load_balancing == LoadBalancingAlgorithm.Random:
-            balancer = RandomBalancer()
+            balancer = LoadBalancer(LoadBalancingAlgorithm.Random)
         elif self.load_balancing == LoadBalancingAlgorithm.RoundRobin:
-            # Use RoundRobinBalancer with offset support
-            balancer = RoundRobinBalancer(offset=self.worker_index)
+            # Use RoundRobin with offset support for distributed starting points
+            balancer = LoadBalancer(LoadBalancingAlgorithm.RoundRobin, offset=self.worker_index)
         else:
             raise ValueError(
                 f"Unsupported load balancing algorithm for LimitPool: {self.load_balancing}. "
@@ -366,11 +367,11 @@ class LimitPool(Typed):
         """
         self.__dict__.update(state)
 
-        # Recreate balancer
+        # Recreate balancer using factory
         if self.load_balancing == LoadBalancingAlgorithm.Random:
-            balancer = RandomBalancer()
+            balancer = LoadBalancer(LoadBalancingAlgorithm.Random)
         elif self.load_balancing == LoadBalancingAlgorithm.RoundRobin:
-            balancer = RoundRobinBalancer(offset=self.worker_index)
+            balancer = LoadBalancer(LoadBalancingAlgorithm.RoundRobin, offset=self.worker_index)
         else:
             raise ValueError(f"Unknown load balancing algorithm: {self.load_balancing}")
 

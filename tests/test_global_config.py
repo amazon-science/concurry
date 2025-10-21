@@ -451,7 +451,7 @@ class TestWorkerTimeoutConfigs:
     def test_thread_worker_uses_config_timeout(self):
         """Test thread worker uses configured command queue timeout."""
         with temp_config(thread_worker_command_queue_timeout=0.5):
-            worker = SimpleWorker.options(mode="thread").init(value=1)
+            worker = SimpleWorker.options(mode="thread", max_workers=1).init(value=1)
             assert worker.command_queue_timeout == 0.5
             worker.stop()
 
@@ -461,7 +461,7 @@ class TestWorkerTimeoutConfigs:
             process_worker_result_queue_timeout=60.0,
             process_worker_result_queue_cleanup_timeout=2.0,
         ):
-            worker = SimpleWorker.options(mode="process").init(value=1)
+            worker = SimpleWorker.options(mode="process", max_workers=1).init(value=1)
             assert worker.result_queue_timeout == 60.0
             assert worker.result_queue_cleanup_timeout == 2.0
             worker.stop()
@@ -473,7 +473,7 @@ class TestWorkerTimeoutConfigs:
             asyncio_worker_thread_ready_timeout=45.0,
             asyncio_worker_sync_queue_timeout=0.5,
         ):
-            worker = SimpleWorker.options(mode="asyncio").init(value=1)
+            worker = SimpleWorker.options(mode="asyncio", max_workers=1).init(value=1)
             assert worker.loop_ready_timeout == 60.0
             assert worker.thread_ready_timeout == 45.0
             assert worker.sync_queue_timeout == 0.5
@@ -482,7 +482,7 @@ class TestWorkerTimeoutConfigs:
     def test_config_values_fixed_at_creation(self):
         """Test that config values are fixed at worker creation, not dynamic."""
         # Create worker with initial config
-        worker = SimpleWorker.options(mode="thread").init(value=1)
+        worker = SimpleWorker.options(mode="thread", max_workers=1).init(value=1)
         initial_timeout = worker.command_queue_timeout
 
         # Change global config AFTER worker creation

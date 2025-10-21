@@ -118,7 +118,14 @@ class TestSubmissionQueueBasics:
     """Test basic submission queue functionality across all execution modes."""
 
     def test_submission_queue_default_value(self, worker_mode):
-        """Test that default max_queued_tasks varies by mode."""
+        """Test that default max_queued_tasks varies by mode.
+
+        This test:
+        1. Creates a CounterWorker with default settings for each mode
+        2. Verifies max_queued_tasks matches mode-specific defaults
+        3. Expected: sync/asyncio=None (bypass), thread=1000, process=100, ray=3
+        4. Stops the worker
+        """
         worker = CounterWorker.options(mode=worker_mode).init()
         # Default values: sync/asyncio=None (bypass), thread=100, process=5, ray=2
         expected = {
@@ -132,18 +139,35 @@ class TestSubmissionQueueBasics:
         worker.stop()
 
     def test_submission_queue_custom_values(self, worker_mode):
-        """Test custom max_queued_tasks values across modes."""
+        """Test custom max_queued_tasks values across modes.
+
+        This test:
+        1. Iterates through custom queue lengths [1, 5, 10, 50]
+        2. For each length, creates a CounterWorker with max_queued_tasks=length
+        3. Verifies worker.max_queued_tasks matches the specified value
+        4. Stops the worker
+        """
         for queue_len in [1, 5, 10, 50]:
             worker = CounterWorker.options(mode=worker_mode, max_queued_tasks=queue_len).init()
             assert worker.max_queued_tasks == queue_len
             worker.stop()
 
     def test_submission_queue_blocks_at_limit(self, worker_mode):
-        """Test that submission queue blocks when limit is reached."""
+        """Test that submission queue blocks when limit is reached.
+
+        This test:
+        1. Creates a SlowWorker with max_workers=1, max_queued_tasks=2
+        2. Submits 2 slow tasks (0.5s each) - these fill the queue without blocking
+        3. Attempts to submit 3rd task in separate thread - should block
+        4. Verifies 3rd submission is blocked (thread still alive after 0.1s)
+        5. Waits for first task to complete - this unblocks 3rd submission
+        6. Verifies 3rd submission unblocks (thread completes)
+        7. Waits for all tasks to complete and stops worker
+        """
         if worker_mode in ("sync", "asyncio"):
             pytest.skip("Sync and AsyncIO modes bypass submission queue")
 
-        worker = SlowWorker.options(mode=worker_mode, max_queued_tasks=2).init()
+        worker = SlowWorker.options(mode=worker_mode, max_workers=1, max_queued_tasks=2).init()
 
         # Submit 2 tasks (should not block)
         start = time.time()
@@ -181,7 +205,16 @@ class TestSubmissionQueueBasics:
         worker.stop()
 
     def test_submission_queue_releases_on_completion(self, worker_mode):
-        """Test that semaphore is released when tasks complete."""
+        """Test that semaphore is released when tasks complete.
+
+        This test:
+        1. Creates a CounterWorker with max_queued_tasks=2
+        2. Submits and completes 2 tasks (f1, f2)
+        3. Measures time to submit 2 more tasks (f3, f4) immediately
+        4. Verifies submission is fast (<0.2s), proving semaphore was released
+        5. Waits for all tasks to complete
+        6. Stops the worker
+        """
         if worker_mode in ("sync", "asyncio"):
             pytest.skip("Sync and AsyncIO modes bypass submission queue")
 
@@ -215,7 +248,14 @@ class TestSubmissionQueueBypassModes:
     """Test that blocking and sync modes bypass submission queue."""
 
     def test_blocking_mode_bypasses_queue(self, worker_mode):
-        """Test that blocking mode doesn't use submission queue."""
+        """Test that blocking mode doesn't use submission queue.
+
+        This test:
+        1. Creates a CounterWorker with blocking=True and max_queued_tasks=1
+        2. Makes 10 increment calls (returns results directly, not futures)
+        3. Verifies all 10 calls complete without queue blocking
+        4. Stops the worker
+        """
         worker = CounterWorker.options(mode=worker_mode, blocking=True, max_queued_tasks=1).init()
 
         # Should be able to make many calls without blocking on submission
@@ -228,7 +268,15 @@ class TestSubmissionQueueBypassModes:
         worker.stop()
 
     def test_sync_mode_bypasses_queue(self):
-        """Test that sync mode doesn't use submission queue."""
+        """Test that sync mode doesn't use submission queue.
+
+        This test:
+        1. Creates a sync CounterWorker with max_queued_tasks=1
+        2. Submits 10 increment tasks (sync mode executes immediately)
+        3. Collects all results
+        4. Verifies all 10 tasks completed without queue blocking
+        5. Stops the worker
+        """
         worker = CounterWorker.options(mode="sync", max_queued_tasks=1).init()
 
         # Sync mode should execute immediately without queuing
@@ -239,7 +287,15 @@ class TestSubmissionQueueBypassModes:
         worker.stop()
 
     def test_asyncio_mode_bypasses_queue(self):
-        """Test that asyncio mode doesn't use submission queue for concurrency."""
+        """Test that asyncio mode doesn't use submission queue for concurrency.
+
+        This test:
+        1. Creates an asyncio CounterWorker with max_queued_tasks=1
+        2. Submits 50 increment tasks (asyncio allows unlimited concurrent submissions)
+        3. Collects all results (event loop handles concurrency, not queue)
+        4. Verifies all 50 tasks completed
+        5. Stops the worker
+        """
         worker = CounterWorker.options(mode="asyncio", max_queued_tasks=1).init()
 
         # AsyncIO mode should allow unlimited concurrent submissions
@@ -260,7 +316,14 @@ class TestSubmissionQueuePools:
     """Test submission queue with worker pools."""
 
     def test_pool_per_worker_semaphores(self, pool_mode):
-        """Test that each worker in pool has independent queue."""
+        """Test that each worker in pool has independent queue.
+
+        1. Creates a SlowWorker pool with 3 workers, max_queued_tasks=2, round_robin load balancing
+        2. Submits 6 tasks (2 per worker due to round-robin distribution)
+        3. Verifies submission is fast (<0.5s) since each worker has capacity=2
+        4. Waits for all 6 tasks to complete
+        5. Stops the pool
+        """
         pool = SlowWorker.options(
             mode=pool_mode, max_workers=3, max_queued_tasks=2, load_balancing="round_robin"
         ).init()
@@ -279,7 +342,15 @@ class TestSubmissionQueuePools:
         pool.stop()
 
     def test_pool_stats_include_queue_info(self, pool_mode):
-        """Test that pool stats include submission queue information."""
+        """Test that pool stats include submission queue information.
+
+        1. Creates a CounterWorker pool with 4 workers, max_queued_tasks=10
+        2. Gets pool stats via get_pool_stats()
+        3. Verifies stats contain max_queued_tasks=10
+        4. Verifies stats contain submission_queues array with 4 entries
+        5. Verifies each queue_info has worker_idx and capacity=10
+        6. Stops the pool
+        """
         pool = CounterWorker.options(mode=pool_mode, max_workers=4, max_queued_tasks=10).init()
 
         stats = pool.get_pool_stats()
@@ -296,7 +367,15 @@ class TestSubmissionQueuePools:
         pool.stop()
 
     def test_pool_queue_with_load_balancing(self, pool_mode):
-        """Test submission queue works with different load balancing strategies."""
+        """Test submission queue works with different load balancing strategies.
+
+        1. Iterates through 4 load balancing algorithms: round_robin, active, total, random
+        2. For each algorithm, creates a CounterWorker pool with 3 workers, max_queued_tasks=15
+        3. Submits 15 increment tasks
+        4. Waits for all 15 results
+        5. Verifies all tasks completed successfully
+        6. Stops the pool and repeats for next algorithm
+        """
         for algorithm in ["round_robin", "active", "total", "random"]:
             pool = CounterWorker.options(
                 mode=pool_mode,
@@ -324,7 +403,14 @@ class TestSubmissionQueueWithSynchronization:
     """Test submission queue with wait() and gather() - the main use case!"""
 
     def test_queue_with_gather_list(self, worker_mode):
-        """Test submission queue with gather() on list of futures."""
+        """Test submission queue with gather() on list of futures (MAIN USE CASE).
+
+        1. Creates CounterWorker with max_queued_tasks=3 (limits in-flight)
+        2. Submits 20 increment tasks (queue blocks when >3 in-flight)
+        3. Calls gather(futures) to collect all results
+        4. Verifies all 20 results returned correctly
+        5. Stops worker
+        """
         if worker_mode in ("sync", "asyncio"):
             pytest.skip("Sync and AsyncIO modes bypass submission queue")
 
@@ -340,7 +426,14 @@ class TestSubmissionQueueWithSynchronization:
         worker.stop()
 
     def test_queue_with_gather_dict(self, worker_mode):
-        """Test submission queue with gather() on dict of futures."""
+        """Test submission queue with gather() on dict of futures (MAIN USE CASE).
+
+        1. Creates SlowWorker with max_queued_tasks=2
+        2. Submits 10 tasks as dict {task_0: future, ...}
+        3. Calls gather(tasks) to collect results
+        4. Verifies results is dict with all 10 task keys
+        5. Stops worker
+        """
         if worker_mode in ("sync", "asyncio"):
             pytest.skip("Sync and AsyncIO modes bypass submission queue")
 
@@ -358,7 +451,14 @@ class TestSubmissionQueueWithSynchronization:
         worker.stop()
 
     def test_queue_with_wait_all_completed(self, worker_mode):
-        """Test submission queue with wait(ALL_COMPLETED)."""
+        """Test submission queue with wait(ALL_COMPLETED) (MAIN USE CASE).
+
+        1. Creates CounterWorker with max_queued_tasks=3
+        2. Submits 15 increment tasks
+        3. Calls wait(futures, ALL_COMPLETED)
+        4. Verifies all 15 in done set, 0 in not_done
+        5. Stops worker
+        """
         if worker_mode in ("sync", "asyncio"):
             pytest.skip("Sync and AsyncIO modes bypass submission queue")
 
@@ -376,7 +476,14 @@ class TestSubmissionQueueWithSynchronization:
         worker.stop()
 
     def test_queue_with_wait_first_completed(self, worker_mode):
-        """Test submission queue with wait(FIRST_COMPLETED)."""
+        """Test submission queue with wait(FIRST_COMPLETED) (MAIN USE CASE).
+
+        1. Creates SlowWorker with max_queued_tasks=2
+        2. Submits 3 tasks with varying durations (0.1s, 0.2s, 0.3s)
+        3. Calls wait(futures, FIRST_COMPLETED)
+        4. Verifies at least 1 in done set
+        5. Waits for all remaining, stops worker
+        """
         if worker_mode in ("sync", "asyncio"):
             pytest.skip("Sync and AsyncIO modes bypass submission queue")
 
@@ -770,7 +877,7 @@ class TestSubmissionQueueEdgeCases:
         if worker_mode in ("sync", "asyncio"):
             pytest.skip("Sync and AsyncIO modes bypass submission queue")
 
-        worker = SlowWorker.options(mode=worker_mode, max_queued_tasks=2).init()
+        worker = SlowWorker.options(mode=worker_mode, max_workers=1, max_queued_tasks=2).init()
 
         # Submit tasks
         f1 = worker.slow_task(0.5, 1)
@@ -827,7 +934,7 @@ class TestSubmissionQueueEdgeCases:
         if worker_mode in ("sync", "asyncio"):
             pytest.skip("Sync and AsyncIO modes bypass submission queue")
 
-        worker = SlowWorker.options(mode=worker_mode, max_queued_tasks=1).init()
+        worker = SlowWorker.options(mode=worker_mode, max_workers=1, max_queued_tasks=1).init()
 
         # Only 1 task can be submitted at a time
         f1 = worker.slow_task(0.2, 1)

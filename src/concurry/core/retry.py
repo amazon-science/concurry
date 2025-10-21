@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from morphic import Typed
 from pydantic import Field, confloat, conint, field_validator
 
+from ..utils import _NO_ARG, _NO_ARG_TYPE
 from .constants import RetryAlgorithm
 
 
@@ -133,15 +134,15 @@ class RetryConfig(Typed):
         ```
     """
 
-    num_retries: Optional[conint(ge=0)] = None
+    num_retries: Union[conint(ge=0), _NO_ARG_TYPE] = _NO_ARG
     retry_on: Union[type, Callable, List[Union[type, Callable]]] = Field(default_factory=lambda: [Exception])
-    retry_algorithm: Optional[RetryAlgorithm] = None
-    retry_wait: Optional[confloat(gt=0)] = None
-    retry_jitter: Optional[confloat(ge=0, le=1)] = None
+    retry_algorithm: Union[RetryAlgorithm, _NO_ARG_TYPE] = _NO_ARG
+    retry_wait: Union[confloat(gt=0), _NO_ARG_TYPE] = _NO_ARG
+    retry_jitter: Union[confloat(ge=0, le=1), _NO_ARG_TYPE] = _NO_ARG
     retry_until: Optional[Union[Callable, List[Callable]]] = None
 
     def post_initialize(self) -> None:
-        """Set defaults from global config for None values."""
+        """Set defaults from global config for _NO_ARG values."""
         from ..config import global_config
 
         # Clone config
@@ -149,14 +150,44 @@ class RetryConfig(Typed):
         defaults = local_config.defaults
 
         # Set defaults if not provided (use object.__setattr__ for frozen instances)
-        if self.num_retries is None:
+        if self.num_retries is _NO_ARG:
             object.__setattr__(self, "num_retries", defaults.num_retries)
-        if self.retry_algorithm is None:
+        if self.retry_algorithm is _NO_ARG:
             object.__setattr__(self, "retry_algorithm", defaults.retry_algorithm)
-        if self.retry_wait is None:
+        if self.retry_wait is _NO_ARG:
             object.__setattr__(self, "retry_wait", defaults.retry_wait)
-        if self.retry_jitter is None:
+        if self.retry_jitter is _NO_ARG:
             object.__setattr__(self, "retry_jitter", defaults.retry_jitter)
+
+    @field_validator("num_retries")
+    @classmethod
+    def validate_num_retries(cls, v):
+        """Validate num_retries is non-negative or _NO_ARG."""
+        if v is _NO_ARG:
+            return v
+        if not isinstance(v, int) or v < 0:
+            raise ValueError(f"num_retries must be >= 0, got {v}")
+        return v
+
+    @field_validator("retry_wait")
+    @classmethod
+    def validate_retry_wait(cls, v):
+        """Validate retry_wait is positive or _NO_ARG."""
+        if v is _NO_ARG:
+            return v
+        if not isinstance(v, (int, float)) or v <= 0:
+            raise ValueError(f"retry_wait must be > 0, got {v}")
+        return v
+
+    @field_validator("retry_jitter")
+    @classmethod
+    def validate_retry_jitter(cls, v):
+        """Validate retry_jitter is in [0, 1] or _NO_ARG."""
+        if v is _NO_ARG:
+            return v
+        if not isinstance(v, (int, float)) or not (0 <= v <= 1):
+            raise ValueError(f"retry_jitter must be in [0, 1], got {v}")
+        return v
 
     @field_validator("retry_on")
     @classmethod

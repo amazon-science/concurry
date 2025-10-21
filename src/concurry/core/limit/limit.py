@@ -37,11 +37,12 @@ Example:
 """
 
 from abc import ABC
-from typing import ClassVar, Dict, NoReturn, Optional
+from typing import ClassVar, Dict, NoReturn, Union
 
 from morphic import Typed
 from pydantic import confloat, conint
 
+from ...utils import _NO_ARG, _NO_ARG_TYPE
 from ..algorithms.rate_limiting import RateLimiter
 from ..constants import RateLimitAlgorithm
 
@@ -200,13 +201,13 @@ class RateLimit(Limit):
     """
 
     window_seconds: confloat(gt=0)
-    algorithm: Optional[RateLimitAlgorithm] = None
+    algorithm: Union[RateLimitAlgorithm, _NO_ARG_TYPE] = _NO_ARG
     capacity: conint(gt=0)
 
     def post_initialize(self) -> NoReturn:
         """Initialize the rate limiter implementation."""
         # Apply default algorithm from global config if not specified
-        if self.algorithm is None:
+        if self.algorithm is _NO_ARG:
             from ...config import global_config
 
             local_config = global_config.clone()

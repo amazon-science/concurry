@@ -84,7 +84,13 @@ class TestWorkerBasics:
     """Test basic worker functionality."""
 
     def test_simple_method_call(self, worker_mode):
-        """Test basic method call on worker."""
+        """Test basic method call on worker.
+
+        1. Creates SimpleWorker with value=10
+        2. Calls add(5) method
+        3. Verifies result is 15 (10+5)
+        4. Stops worker
+        """
         w = SimpleWorker.options(mode=worker_mode).init(10)
         future = w.add(5)
         result = future.result(timeout=5)
@@ -94,8 +100,15 @@ class TestWorkerBasics:
     def test_nonexistent_method_fails(self, worker_mode):
         """Test that calling a non-existent method fails appropriately.
 
-        For sync/ray modes: should fail immediately with AttributeError
-        For thread/asyncio/process: should return a future that raises AttributeError when result() is called
+        1. Creates SimpleWorker with value=10
+        2. Calls nonexistent_method()
+        3. For sync/ray: Verifies AttributeError raised immediately
+        4. For thread/asyncio/process: Verifies future.result() raises AttributeError
+        5. Stops worker
+
+        Mode-specific behavior:
+        - Sync/Ray: Fail immediately with AttributeError
+        - Thread/Asyncio/Process: Return future that raises AttributeError
         """
         w = SimpleWorker.options(mode=worker_mode).init(10)
 
@@ -112,7 +125,15 @@ class TestWorkerBasics:
         w.stop()
 
     def test_multiple_method_calls(self, worker_mode):
-        """Test multiple method calls on same worker."""
+        """Test multiple method calls on same worker.
+
+        1. Creates SimpleWorker with value=10
+        2. Calls add(5), multiply(2), get_value() in sequence
+        3. Verifies add(5) returns 15 (10+5)
+        4. Verifies multiply(2) returns 20 (10*2)
+        5. Verifies get_value() returns 10 (original value)
+        6. Stops worker
+        """
         w = SimpleWorker.options(mode=worker_mode).init(10)
 
         future1 = w.add(5)
@@ -126,7 +147,14 @@ class TestWorkerBasics:
         w.stop()
 
     def test_blocking_mode(self, worker_mode):
-        """Test blocking mode returns results directly."""
+        """Test blocking mode returns results directly.
+
+        1. Creates SimpleWorker with blocking=True, value=10
+        2. Calls add(5) which returns result directly (not future)
+        3. Verifies result is int (not future)
+        4. Verifies result is 15
+        5. Stops worker
+        """
         w = SimpleWorker.options(mode=worker_mode, blocking=True).init(10)
 
         result = w.add(5)
@@ -137,7 +165,13 @@ class TestWorkerBasics:
         w.stop()
 
     def test_decorated_worker(self, worker_mode):
-        """Test worker created with @worker decorator."""
+        """Test worker created with @worker decorator.
+
+        1. Creates DecoratedWorker (using @worker decorator) with name="TestBot"
+        2. Calls greet() method
+        3. Verifies result is "Hello from TestBot"
+        4. Stops worker
+        """
         w = DecoratedWorker.options(mode=worker_mode).init("TestBot")
         future = w.greet()
         result = future.result(timeout=5)
@@ -149,7 +183,13 @@ class TestWorkerExceptions:
     """Test exception handling in workers."""
 
     def test_method_raises_exception(self, worker_mode):
-        """Test that exceptions in worker methods are propagated."""
+        """Test that exceptions in worker methods are propagated.
+
+        1. Creates SimpleWorker
+        2. Calls raise_error("test error")
+        3. Verifies ValueError is raised with "test error" message
+        4. Stops worker
+        """
         w = SimpleWorker.options(mode=worker_mode).init(10)
         future = w.raise_error("test error")
 
@@ -163,9 +203,13 @@ class TestWorkerExceptions:
     def test_invalid_method_name(self, worker_mode):
         """Test calling non-existent method.
 
-        This test verifies that errors for non-existent methods are properly raised.
-        For sync/ray modes: fails immediately
-        For other modes: original error is raised when calling result()
+        1. Creates SimpleWorker
+        2. Calls nonexistent_method(123)
+        3. For sync/ray: Verifies AttributeError raised immediately
+        4. For thread/asyncio/process: Verifies future.result() raises AttributeError
+        5. Stops worker
+
+        Mode-specific: Sync/Ray fail immediately; others via future
         """
         w = SimpleWorker.options(mode=worker_mode).init(10)
 
@@ -186,7 +230,13 @@ class TestWorkerConcurrency:
     """Test concurrent execution in workers."""
 
     def test_concurrent_calls(self, worker_mode):
-        """Test multiple concurrent calls to worker."""
+        """Test multiple concurrent calls to worker.
+
+        1. Creates SimpleWorker with value=10
+        2. Submits 5 add() calls with values 0-4
+        3. Verifies all results: 10+0, 10+1, 10+2, 10+3, 10+4
+        4. Stops worker
+        """
         w = SimpleWorker.options(mode=worker_mode).init(10)
 
         # Submit multiple tasks
@@ -203,7 +253,15 @@ class TestWorkerConcurrency:
         w.stop()
 
     def test_long_running_task(self, worker_mode):
-        """Test worker with a long-running task."""
+        """Test worker with a long-running task.
+
+        1. Creates SimpleWorker
+        2. Calls sleep_and_return(1.0, 42) which sleeps 1 second
+        3. Measures elapsed time
+        4. Verifies result is 42
+        5. Verifies elapsed >= 1.0s (all modes execute the sleep)
+        6. Stops worker
+        """
         w = SimpleWorker.options(mode=worker_mode).init(10)
 
         # Start a task that takes 1 second
@@ -230,8 +288,15 @@ class TestWorkerState:
     """Test stateful workers."""
 
     def test_state_persistence(self, worker_mode):
-        """Test that worker maintains state across calls."""
-        w = StatefulWorker.options(mode=worker_mode).init()
+        """Test that worker maintains state across calls.
+
+        1. Creates StatefulWorker with max_workers=1
+        2. Calls increment(1), increment(2), increment(3) in sequence
+        3. Verifies results: 1, 3, 6 (cumulative counter)
+        4. Calls get_counter(), verifies final value is 6
+        5. Stops worker
+        """
+        w = StatefulWorker.options(mode=worker_mode, max_workers=1).init()
 
         # Make multiple calls that modify state
         result1 = w.increment(1).result(timeout=10)
@@ -249,9 +314,16 @@ class TestWorkerState:
         w.stop()
 
     def test_state_isolation(self, worker_mode):
-        """Test that different worker instances have isolated state."""
-        w1 = StatefulWorker.options(mode=worker_mode).init()
-        w2 = StatefulWorker.options(mode=worker_mode).init()
+        """Test that different worker instances have isolated state.
+
+        1. Creates two StatefulWorker instances (w1, w2) each with max_workers=1
+        2. Calls w1.increment(5) and w2.increment(10)
+        3. Verifies w1 counter is 5, w2 counter is 10
+        4. Verifies states are completely independent
+        5. Stops both workers
+        """
+        w1 = StatefulWorker.options(mode=worker_mode, max_workers=1).init()
+        w2 = StatefulWorker.options(mode=worker_mode, max_workers=1).init()
 
         # Modify state in both workers
         result1 = w1.increment(5).result(timeout=5)
@@ -275,7 +347,13 @@ class TestWorkerLifecycle:
     """Test worker lifecycle management."""
 
     def test_stop_worker(self, worker_mode):
-        """Test stopping a worker."""
+        """Test stopping a worker.
+
+        1. Creates SimpleWorker
+        2. Calls add(5), verifies result is 15
+        3. Calls stop() on worker
+        4. Attempts to call add(5) after stop, verifies RuntimeError raised
+        """
         w = SimpleWorker.options(mode=worker_mode).init(10)
 
         # Use the worker
@@ -290,7 +368,12 @@ class TestWorkerLifecycle:
             w.add(5)
 
     def test_cleanup_multiple_workers(self, worker_mode):
-        """Test cleaning up multiple workers."""
+        """Test cleaning up multiple workers.
+
+        1. Creates 3 SimpleWorker instances with values 0, 1, 2
+        2. Calls get_value() on each, verifies correct values
+        3. Stops all workers
+        """
         workers = []
         for i in range(3):
             w = SimpleWorker.options(mode=worker_mode).init(i)
@@ -310,21 +393,36 @@ class TestWorkerInitialization:
     """Test worker initialization with different arguments."""
 
     def test_init_with_args(self, worker_mode):
-        """Test worker initialization with positional arguments."""
+        """Test worker initialization with positional arguments.
+
+        1. Creates SimpleWorker with init(42)
+        2. Calls get_value(), verifies 42
+        3. Stops worker
+        """
         w = SimpleWorker.options(mode=worker_mode).init(42)
         result = w.get_value().result(timeout=5)
         assert result == 42
         w.stop()
 
     def test_init_with_kwargs(self, worker_mode):
-        """Test worker initialization with keyword arguments."""
+        """Test worker initialization with keyword arguments.
+
+        1. Creates SimpleWorker with init(value=99)
+        2. Calls get_value(), verifies 99
+        3. Stops worker
+        """
         w = SimpleWorker.options(mode=worker_mode).init(value=99)
         result = w.get_value().result(timeout=5)
         assert result == 99
         w.stop()
 
     def test_init_with_both(self, worker_mode):
-        """Test worker initialization with both args and kwargs."""
+        """Test worker initialization with both args and kwargs.
+
+        1. Creates DecoratedWorker with init("Alice")
+        2. Calls greet(), verifies "Hello from Alice"
+        3. Stops worker
+        """
         w = DecoratedWorker.options(mode=worker_mode).init("Alice")
         result = w.greet().result(timeout=5)
         assert result == "Hello from Alice"
@@ -335,7 +433,14 @@ class TestFutureInterface:
     """Test the Future interface returned by worker methods."""
 
     def test_future_done(self, worker_mode):
-        """Test Future.done() method."""
+        """Test Future.done() method.
+
+        1. Creates SimpleWorker
+        2. Calls add(5), gets future
+        3. Waits for result
+        4. Verifies future.done() is True, result is 15
+        5. Stops worker
+        """
         w = SimpleWorker.options(mode=worker_mode).init(10)
         future = w.add(5)
 
@@ -351,9 +456,14 @@ class TestFutureInterface:
     def test_future_result_timeout(self, worker_mode):
         """Test Future.result() with timeout.
 
-        Note: Asyncio mode with blocking sleep (time.sleep) has race conditions
-        because the blocking call completes in the event loop thread. For real
-        async work, use asyncio.sleep() or other async operations.
+        1. Creates SimpleWorker
+        2. Calls sleep_and_return(2.0, 42)
+        3. Sync: Completes immediately
+        4. Asyncio: Skip (time.sleep has race conditions)
+        5. Others: Timeout with 0.5s, succeed with 3.0s
+        6. Stops worker
+
+        Note: Asyncio with time.sleep() has race conditions. Use asyncio.sleep() for real async work.
         """
         w = SimpleWorker.options(mode=worker_mode).init(10)
         future = w.sleep_and_return(2.0, 42)
@@ -380,7 +490,13 @@ class TestFutureInterface:
         w.stop()
 
     def test_future_exception(self, worker_mode):
-        """Test Future.exception() method."""
+        """Test Future.exception() method.
+
+        1. Creates SimpleWorker
+        2. Calls raise_error("test exception")
+        3. Verifies result() raises exception
+        4. Stops worker
+        """
         w = SimpleWorker.options(mode=worker_mode).init(10)
         future = w.raise_error("test exception")
 
@@ -395,7 +511,14 @@ class TestTaskWorkerSubmit:
     """Test TaskWorker.submit() functionality."""
 
     def test_submit_simple_function(self, worker_mode):
-        """Test submitting a simple function."""
+        """Test submitting a simple function.
+
+        1. Defines add(x, y) function
+        2. Creates TaskWorker
+        3. Submits add(5, 10)
+        4. Verifies result is 15
+        5. Stops worker
+        """
 
         def add(x, y):
             return x + y
@@ -407,7 +530,14 @@ class TestTaskWorkerSubmit:
         w.stop()
 
     def test_submit_with_kwargs(self, worker_mode):
-        """Test submitting a function with keyword arguments."""
+        """Test submitting a function with keyword arguments.
+
+        1. Defines multiply(x, y, factor=1) function
+        2. Creates TaskWorker
+        3. Submits multiply(3, 4, factor=2)
+        4. Verifies result is 24 ((3*4)*2)
+        5. Stops worker
+        """
 
         def multiply(x, y, factor=1):
             return (x * y) * factor
@@ -834,7 +964,7 @@ class TestAsyncIOPerformance:
         print(f"Running {num_operations} operations, each with {wait_time}s wait time")
 
         # Test 1: ThreadWorker with sync operations (sequential)
-        w_thread = IOBoundWorker.options(mode="thread").init()
+        w_thread = IOBoundWorker.options(mode="thread", max_workers=1).init()
         start = time.time()
         futures = [w_thread.sync_io_operation(wait_time, i) for i in range(num_operations)]
         results_thread = [f.result(timeout=30) for f in futures]
@@ -976,7 +1106,7 @@ class TestAsyncIOPerformance:
             base_url = f"http://127.0.0.1:{port}"
 
             # Test 1: SyncWorker with sync requests (baseline - truly sequential)
-            w_sync = HTTPWorker.options(mode="sync").init(base_url)
+            w_sync = HTTPWorker.options(mode="sync", max_workers=1).init(base_url)
             start_time = time.time()
             futures = [w_sync.fetch_sync(i) for i in range(num_requests)]
             results_sync = [f.result(timeout=30) for f in futures]
@@ -984,7 +1114,7 @@ class TestAsyncIOPerformance:
             w_sync.stop()
 
             # Test 2: ThreadWorker with sync requests (sequential in dedicated thread)
-            w_thread = HTTPWorker.options(mode="thread").init(base_url)
+            w_thread = HTTPWorker.options(mode="thread", max_workers=1).init(base_url)
             start_time = time.time()
             futures = [w_thread.fetch_sync(i) for i in range(num_requests)]
             results_thread = [f.result(timeout=30) for f in futures]
@@ -992,7 +1122,7 @@ class TestAsyncIOPerformance:
             w_thread.stop()
 
             # Test 3: ProcessWorker with sync requests (sequential in dedicated process)
-            w_process = HTTPWorker.options(mode="process").init(base_url)
+            w_process = HTTPWorker.options(mode="process", max_workers=1).init(base_url)
             start_time = time.time()
             futures = [w_process.fetch_sync(i) for i in range(num_requests)]
             results_process = [f.result(timeout=30) for f in futures]

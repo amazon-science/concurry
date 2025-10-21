@@ -1,16 +1,19 @@
 """Task decorator for function-level worker creation."""
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Union
 
-from morphic import get_fn_args
+from morphic import get_fn_args, validate
 
+from ...utils import _NO_ARG, _NO_ARG_TYPE
 from ..constants import ExecutionMode
 from .task_worker import TaskWorker
 
 
+@validate
 def task(
-    mode: ExecutionMode = ExecutionMode.Sync,
-    on_demand: Optional[bool] = None,
+    *,
+    mode: ExecutionMode,
+    on_demand: Union[bool, _NO_ARG_TYPE] = _NO_ARG,
     **kwargs: Any,
 ) -> Callable:
     """Decorator to create a TaskWorker bound to a function.
@@ -20,8 +23,8 @@ def task(
 
     Args:
         mode: Execution mode (sync, thread, process, asyncio, ray).
-            Defaults to ExecutionMode.Sync.
-        on_demand: Create workers on-demand. If None, uses
+            Defaults to ExecutionMode.Sync
+        on_demand: Create workers on-demand. If not specified, uses
             global_config.defaults.task_decorator_on_demand (defaults to True).
             Note: on_demand is automatically set to False for Sync and Asyncio modes.
         **kwargs: All other Worker.options() parameters are supported.
@@ -70,25 +73,20 @@ def task(
             results = list(compute.map(range(1000), progress=True))
             ```
     """
+    # Import here to avoid circular imports
+    from ...config import global_config
+
+    local_config = global_config.clone()
+    # Apply default for on_demand if not specified
+    if on_demand is _NO_ARG:
+        # on_demand is not supported for Sync and Asyncio modes
+        if mode in (ExecutionMode.Sync, ExecutionMode.Asyncio):
+            on_demand = False
+        else:
+            on_demand = local_config.defaults.task_decorator_on_demand
+    on_demand: bool = bool(on_demand)
 
     def decorator(fn: Callable) -> TaskWorker:
-        # Import here to avoid circular imports
-        from ...config import global_config
-
-        local_config = global_config.clone()
-
-        # Apply default for on_demand if not specified
-        if on_demand is None:
-            # on_demand is not supported for Sync and Asyncio modes
-            # mode can be either ExecutionMode enum or string
-            mode_str = str(mode).lower() if isinstance(mode, ExecutionMode) else str(mode).lower()
-            if mode_str in ("sync", "asyncio"):
-                on_demand_value = False
-            else:
-                on_demand_value = local_config.defaults.task_decorator_on_demand
-        else:
-            on_demand_value = on_demand
-
         # Check if function accepts 'limits' parameter
         fn_args = get_fn_args(fn)
         has_limits_param = "limits" in fn_args
@@ -118,7 +116,7 @@ def task(
         # Note: limits was already popped from kwargs earlier
         builder = TaskWorker.options(
             mode=mode,
-            on_demand=on_demand_value,
+            on_demand=on_demand,
             limits=limits,
             **kwargs,
         )

@@ -248,9 +248,17 @@ class TestBasicRetries:
     """Test basic retry functionality across all worker modes."""
 
     def test_retry_success_after_failures(self, worker_mode):
-        """Test that method succeeds after retries."""
+        """Test that method succeeds after retries.
+
+        1. Creates CounterWorker with num_retries=5, succeed_after=3
+        2. Calls flaky_method(10) which fails twice then succeeds
+        3. Verifies result is 20 (10*2)
+        4. Verifies attempt_count is 3 (2 failures + 1 success)
+        5. Stops worker
+        """
         worker = CounterWorker.options(
             mode=worker_mode,
+            max_workers=1,
             num_retries=5,
             retry_wait=0.01,
             retry_algorithm=RetryAlgorithm.Linear,
@@ -265,10 +273,18 @@ class TestBasicRetries:
         worker.stop()
 
     def test_retry_exhaustion(self, worker_mode):
-        """Test that retries are exhausted and exception is raised."""
+        """Test that retries are exhausted and exception is raised.
+
+        1. Creates CounterWorker with num_retries=2 (3 total attempts), succeed_after=5
+        2. Calls flaky_method(10) which needs 5 attempts but only gets 3
+        3. Verifies ValueError is raised after 3 attempts exhausted
+        4. Verifies attempt_count is 3 (initial + 2 retries)
+        5. Stops worker
+        """
         worker = (
             CounterWorker.options(
                 mode=worker_mode,
+                max_workers=1,
                 num_retries=2,  # Only 2 retries = 3 total attempts
                 retry_wait=0.01,
             ).init(succeed_after=5)  # Need 5 attempts to succeed
@@ -284,8 +300,15 @@ class TestBasicRetries:
         worker.stop()
 
     def test_no_retry_default(self, worker_mode):
-        """Test that default behavior is no retries."""
-        worker = CounterWorker.options(mode=worker_mode).init(succeed_after=2)
+        """Test that default behavior is no retries.
+
+        1. Creates CounterWorker with default settings (num_retries=0), succeed_after=2
+        2. Calls flaky_method(10) which fails on first attempt
+        3. Verifies ValueError is raised immediately (no retries)
+        4. Verifies attempt_count is 1 (only initial attempt, no retries)
+        5. Stops worker
+        """
+        worker = CounterWorker.options(mode=worker_mode, max_workers=1).init(succeed_after=2)
 
         future = worker.flaky_method(10)
         with pytest.raises(ValueError, match="Attempt 1 failed"):
@@ -297,7 +320,16 @@ class TestBasicRetries:
         worker.stop()
 
     def test_retry_with_specific_exception(self, worker_mode):
-        """Test retry only on specific exception types."""
+        """Test retry only on specific exception types.
+
+        1. Creates ExceptionTypeWorker with retry_on=[ValueError] (only retries ValueError)
+        2. Calls value_error_method() which raises ValueError
+        3. Verifies ValueError is raised after retries exhausted
+        4. Creates second worker with same retry_on=[ValueError]
+        5. Calls type_error_method() which raises TypeError
+        6. Verifies TypeError fails immediately (no retries) on attempt 1
+        7. Stops both workers
+        """
         # Test ValueError retries
         worker1 = ExceptionTypeWorker.options(
             mode=worker_mode,
@@ -327,7 +359,15 @@ class TestBasicRetries:
         worker2.stop()
 
     def test_retry_with_callable_filter(self, worker_mode):
-        """Test retry with custom exception filter."""
+        """Test retry with custom exception filter.
+
+        1. Defines should_retry() filter that returns True if exception message contains 'retry'
+        2. Defines CustomWorker that raises ValueError with "Please RETRY this operation"
+        3. Creates worker with retry_on=[should_retry] filter
+        4. Calls conditional_method(should_fail=True) which fails twice with "RETRY" message
+        5. Verifies method succeeds after retries (message contains "retry")
+        6. Stops worker
+        """
 
         def should_retry(exception: Exception, **context) -> bool:
             """Only retry if message contains 'retry'."""
@@ -474,6 +514,7 @@ class TestRetryWithLimits:
 
         worker = LimitedWorker.options(
             mode=worker_mode,
+            max_workers=1,
             limits=limits,
             num_retries=5,
             retry_wait=0.05,
@@ -791,7 +832,7 @@ class TestRetryWithWorkerPools:
         """Test retry behavior in worker pools."""
         # Skip for sync/asyncio modes which don't support max_workers > 1
         if worker_mode in ["sync", "asyncio"]:
-            pytest.skip("Sync and asyncio modes don't support max_workers > 1")
+            pytest.skip(f"{worker_mode} mode does not support max_workers > 1")
 
         worker_pool = CounterWorker.options(
             mode=worker_mode,
@@ -813,7 +854,7 @@ class TestRetryWithWorkerPools:
         """Test that retries work correctly with pool load balancing."""
         # Skip for sync/asyncio modes which don't support max_workers > 1
         if worker_mode in ["sync", "asyncio"]:
-            pytest.skip("Sync and asyncio modes don't support max_workers > 1")
+            pytest.skip(f"{worker_mode} mode does not support max_workers > 1")
 
         class PoolWorker(Worker):
             def __init__(self, worker_id: int):
@@ -857,7 +898,7 @@ class TestRetryWithWorkerPools:
         """Test retry in pools with limits."""
         # Skip for sync/asyncio modes which don't support max_workers > 1
         if worker_mode in ["sync", "asyncio"]:
-            pytest.skip("Sync and asyncio modes don't support max_workers > 1")
+            pytest.skip(f"{worker_mode} mode does not support max_workers > 1")
 
         limits = [ResourceLimit(key="connections", capacity=2)]
 
@@ -894,7 +935,7 @@ class TestRetryWithWorkerPools:
         """Test that retries maintain individual worker state in pools."""
         # Skip for sync/asyncio modes which don't support max_workers > 1
         if worker_mode in ["sync", "asyncio"]:
-            pytest.skip("Sync and asyncio modes don't support max_workers > 1")
+            pytest.skip(f"{worker_mode} mode does not support max_workers > 1")
 
         class StatefulPoolWorker(Worker):
             def __init__(self, worker_id: int):
@@ -1394,7 +1435,7 @@ class TestRetryWithTaskWorker:
     def test_taskworker_pool_with_retry(self, worker_mode):
         """Test TaskWorker pool with retry."""
         if worker_mode in ["sync", "asyncio"]:
-            pytest.skip("Sync and asyncio modes don't support max_workers > 1")
+            pytest.skip(f"{worker_mode} mode does not support max_workers > 1")
 
         import random
 
@@ -1423,7 +1464,7 @@ class TestRetryWithTaskWorker:
     def test_taskworker_pool_map_with_retry(self, worker_mode):
         """Test TaskWorker pool map() with retry."""
         if worker_mode in ["sync", "asyncio"]:
-            pytest.skip("Sync and asyncio modes don't support max_workers > 1")
+            pytest.skip(f"{worker_mode} mode does not support max_workers > 1")
 
         import random
 
@@ -1450,7 +1491,7 @@ class TestRetryWithTaskWorker:
     def test_taskworker_pool_retry_with_validation(self, worker_mode):
         """Test TaskWorker pool with retry_until validation."""
         if worker_mode in ["sync", "asyncio"]:
-            pytest.skip("Sync and asyncio modes don't support max_workers > 1")
+            pytest.skip(f"{worker_mode} mode does not support max_workers > 1")
 
         import time
 
@@ -1505,7 +1546,7 @@ class TestRetryWithTaskWorker:
     def test_taskworker_pool_mixed_success_failure(self, worker_mode):
         """Test TaskWorker pool where some tasks succeed and some fail."""
         if worker_mode in ["sync", "asyncio"]:
-            pytest.skip("Sync and asyncio modes don't support max_workers > 1")
+            pytest.skip(f"{worker_mode} mode does not support max_workers > 1")
 
         def conditional_function(x: int) -> int:
             if x % 2 == 0:

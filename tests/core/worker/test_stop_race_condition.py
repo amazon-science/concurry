@@ -57,8 +57,8 @@ class TestStopRaceCondition:
         if worker_mode == "sync":
             pytest.skip("Sync mode doesn't use submission queue")
 
-        # Create worker with small queue
-        w = SlowWorker.options(mode=worker_mode, max_queued_tasks=2).init()
+        # Create worker with small queue (single worker to test queue blocking)
+        w = SlowWorker.options(mode=worker_mode, max_workers=1, max_queued_tasks=2).init()
 
         try:
             # Submit 2 tasks to fill the queue
@@ -206,15 +206,20 @@ class TestStopRaceCondition:
     def test_concurrent_stop_and_submissions(self, worker_mode):
         """Test concurrent stop() calls and task submissions.
 
-        This is a stress test that hammers the worker with:
-        - Multiple threads submitting tasks
-        - stop() called concurrently
-        - Verifies no tasks execute after stop() is called
+        This is a stress test that hammers the worker with concurrent operations.
+
+        This test:
+        1. Creates a worker with max_queued_tasks=3 (single worker to test queue)
+        2. Starts 3 threads that continuously submit tasks
+        3. Lets submissions run for 0.2 seconds
+        4. Sets stop_called flag and calls stop()
+        5. Tracks any tasks submitted after stop was called
+        6. Verifies tasks submitted after stop either failed or raised errors
         """
         if worker_mode == "sync":
             pytest.skip("Sync mode doesn't use submission queue")
 
-        w = SlowWorker.options(mode=worker_mode, max_queued_tasks=3).init()
+        w = SlowWorker.options(mode=worker_mode, max_workers=1, max_queued_tasks=3).init()
 
         stop_called = threading.Event()
         submitted_after_stop = []
@@ -266,12 +271,16 @@ class TestStopRaceCondition:
         """Test process worker specific race condition in _handle_results.
 
         Process workers have a result handler thread that can race with stop().
-        This test verifies:
-        1. Results are handled correctly when stop() is called
-        2. No results are processed after stop()
-        3. Futures are properly cancelled/cleaned up
+
+        This test:
+        1. Creates a process worker with max_queued_tasks=2 (single worker)
+        2. Submits 5 tasks that will fill and overflow the queue
+        3. Waits briefly for tasks to start executing
+        4. Calls stop() while tasks are still in flight
+        5. Verifies all futures are resolved to a terminal state (done/cancelled/errored)
+        6. Attempts to get results - should either succeed or raise (both OK)
         """
-        w = SlowWorker.options(mode="process", max_queued_tasks=2).init()
+        w = SlowWorker.options(mode="process", max_workers=1, max_queued_tasks=2).init()
 
         try:
             # Submit tasks to fill queue
@@ -310,10 +319,16 @@ class TestStopRaceCondition:
         """Test thread worker specific race in worker thread main loop.
 
         Thread workers have a main loop that checks _stopped.
-        This test verifies the loop exits cleanly without processing
-        additional commands after stop().
+
+        This test:
+        1. Creates a thread worker with max_queued_tasks=2 (single worker)
+        2. Submits 5 tasks that will fill and overflow the queue
+        3. Waits briefly for tasks to start executing
+        4. Calls stop() while tasks are still in flight
+        5. Verifies all futures are resolved to a terminal state
+        6. Attempts to get results - should either succeed or raise (both OK)
         """
-        w = SlowWorker.options(mode="thread", max_queued_tasks=2).init()
+        w = SlowWorker.options(mode="thread", max_workers=1, max_queued_tasks=2).init()
 
         try:
             # Submit tasks to fill queue
@@ -347,10 +362,16 @@ class TestStopRaceCondition:
         """Test asyncio worker specific race in event loop thread.
 
         Asyncio workers run an event loop in a separate thread.
-        This test verifies clean shutdown without processing additional
-        tasks after stop().
+
+        This test:
+        1. Creates an asyncio worker with max_queued_tasks=2 (single worker)
+        2. Submits 5 tasks that will fill and overflow the queue
+        3. Waits briefly for tasks to start executing
+        4. Calls stop() while tasks are still in flight
+        5. Verifies all futures are resolved to a terminal state
+        6. Attempts to get results - should either succeed or raise (both OK)
         """
-        w = SlowWorker.options(mode="asyncio", max_queued_tasks=2).init()
+        w = SlowWorker.options(mode="asyncio", max_workers=1, max_queued_tasks=2).init()
 
         try:
             # Submit tasks to fill queue
@@ -381,8 +402,16 @@ class TestStopRaceCondition:
                 pass
 
     def test_multiple_stop_calls_are_safe(self, worker_mode):
-        """Test that calling stop() multiple times is safe and idempotent."""
-        w = SlowWorker.options(mode=worker_mode, max_queued_tasks=2).init()
+        """Test that calling stop() multiple times is safe and idempotent.
+
+        This test:
+        1. Creates a worker with max_queued_tasks=2 (single worker)
+        2. Submits a task (if not sync mode)
+        3. Calls stop() three times in succession
+        4. Verifies no errors are raised (idempotent)
+        5. Verifies new task submissions are blocked with RuntimeError
+        """
+        w = SlowWorker.options(mode=worker_mode, max_workers=1, max_queued_tasks=2).init()
 
         # Submit a task
         if worker_mode != "sync":
@@ -400,8 +429,16 @@ class TestStopRaceCondition:
             w.slow_task(2, duration=0.1)
 
     def test_stop_prevents_new_submissions(self, worker_mode):
-        """Test that stop() immediately prevents new task submissions."""
-        w = SlowWorker.options(mode=worker_mode, max_queued_tasks=5).init()
+        """Test that stop() immediately prevents new task submissions.
+
+        This test:
+        1. Creates a worker with max_queued_tasks=5 (single worker)
+        2. Submits an initial task (if not sync mode)
+        3. Calls stop() on the worker
+        4. Attempts to submit a new task and verifies RuntimeError is raised
+        5. Attempts to submit 5 more tasks to verify it's consistently blocked
+        """
+        w = SlowWorker.options(mode=worker_mode, max_workers=1, max_queued_tasks=5).init()
 
         # Submit initial task
         if worker_mode != "sync":
@@ -426,10 +463,16 @@ class TestStopRaceConditionInPool:
     def test_pool_stop_with_all_workers_busy(self, pool_mode):
         """Test stopping a pool when all workers are busy.
 
-        This can trigger race conditions in:
-        - Load balancer state
-        - Worker semaphore handling
-        - Future cleanup across multiple workers
+        This can trigger race conditions in load balancer state, worker semaphores, and future cleanup.
+
+        This test:
+        1. Creates a pool with 3 workers, max_queued_tasks=2, round-robin balancing
+        2. Submits 6 tasks to fill all worker queues (3 workers × 2 queue = 6 tasks)
+        3. Waits briefly for tasks to start
+        4. Starts a background thread to submit 3 more tasks (will block on full queues)
+        5. Waits for submissions to block
+        6. Calls stop() on the pool while submissions are blocked
+        7. Verifies blocked submissions either failed with RuntimeError or futures error on result()
         """
         pool = SlowWorker.options(
             mode=pool_mode, max_workers=3, max_queued_tasks=2, load_balancing="round_robin"
@@ -480,7 +523,16 @@ class TestStopRaceConditionInPool:
                 pass
 
     def test_pool_stop_with_round_robin_load_balancing(self, pool_mode):
-        """Test that round-robin load balancing doesn't cause issues during stop."""
+        """Test that round-robin load balancing doesn't cause issues during stop.
+
+        This test:
+        1. Creates a pool with 4 workers, max_queued_tasks=1, round-robin balancing
+        2. Starts submitting 20 tasks in a loop (breaks on RuntimeError)
+        3. After 10 tasks, starts a background thread to call stop()
+        4. Continues submitting with small delays between submissions
+        5. Waits for stop to complete
+        6. Verifies pool is stopped by attempting to submit another task (should raise RuntimeError)
+        """
         pool = SlowWorker.options(
             mode=pool_mode, max_workers=4, max_queued_tasks=1, load_balancing="round_robin"
         ).init()

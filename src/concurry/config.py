@@ -52,6 +52,7 @@ class GlobalDefaults(MutableTyped):
     max_queued_tasks: Optional[conint(ge=0)] = None
     load_balancing: LoadBalancingAlgorithm = LoadBalancingAlgorithm.RoundRobin
     load_balancing_on_demand: LoadBalancingAlgorithm = LoadBalancingAlgorithm.Random
+    on_demand: bool = False  # Default for Worker.options() on_demand parameter
 
     # @task decorator configuration
     task_decorator_on_demand: bool = True  # Default for @task decorator
@@ -82,12 +83,17 @@ class GlobalDefaults(MutableTyped):
     polling_adaptive_min_interval: confloat(ge=0) = 0.0001  # 0.1ms
     polling_adaptive_max_interval: confloat(ge=0) = 0.2  # 200ms
     polling_adaptive_initial_interval: confloat(ge=0) = 0.01  # 10ms
+    polling_adaptive_speedup_factor: confloat(gt=0, le=1) = 0.7  # Speed up by 30% on completions
+    polling_adaptive_slowdown_factor: confloat(ge=1) = 1.3  # Slow down by 30% on no completions
+    polling_adaptive_consecutive_empty_threshold: conint(ge=1) = 3  # Checks before slowing down
 
     polling_exponential_initial_interval: confloat(ge=0) = 0.01  # 10ms
     polling_exponential_max_interval: confloat(ge=0) = 2.0  # 2s
+    polling_exponential_multiplier: confloat(gt=1) = 2.0  # Double each time
 
     polling_progressive_min_interval: confloat(ge=0) = 0.0001  # 0.1ms
     polling_progressive_max_interval: confloat(ge=0) = 0.5  # 500ms
+    polling_progressive_checks_before_increase: conint(ge=1) = 5  # Checks at each level
 
     # === Asyncio Future Polling Defaults ===
     asyncio_future_poll_interval: confloat(ge=0) = 1e-6  # 1 microsecond
@@ -148,6 +154,7 @@ class ExecutionModeDefaults(MutableTyped):
     max_queued_tasks: Optional[conint(ge=0)] = None
     load_balancing: Optional[LoadBalancingAlgorithm] = None
     load_balancing_on_demand: Optional[LoadBalancingAlgorithm] = None
+    on_demand: Optional[bool] = None
 
     # @task decorator configuration
     task_decorator_on_demand: Optional[bool] = None
@@ -188,12 +195,17 @@ class ExecutionModeDefaults(MutableTyped):
     polling_adaptive_min_interval: Optional[confloat(ge=0)] = None
     polling_adaptive_max_interval: Optional[confloat(ge=0)] = None
     polling_adaptive_initial_interval: Optional[confloat(ge=0)] = None
+    polling_adaptive_speedup_factor: Optional[confloat(gt=0, le=1)] = None
+    polling_adaptive_slowdown_factor: Optional[confloat(ge=1)] = None
+    polling_adaptive_consecutive_empty_threshold: Optional[conint(ge=1)] = None
 
     polling_exponential_initial_interval: Optional[confloat(ge=0)] = None
     polling_exponential_max_interval: Optional[confloat(ge=0)] = None
+    polling_exponential_multiplier: Optional[confloat(gt=1)] = None
 
     polling_progressive_min_interval: Optional[confloat(ge=0)] = None
     polling_progressive_max_interval: Optional[confloat(ge=0)] = None
+    polling_progressive_checks_before_increase: Optional[conint(ge=1)] = None
 
     # === Asyncio Future Polling Overrides ===
     asyncio_future_poll_interval: Optional[confloat(ge=0)] = None
@@ -305,6 +317,10 @@ class ResolvedDefaults:
             if self._mode.load_balancing_on_demand is not None
             else self._global.load_balancing_on_demand
         )
+
+    @property
+    def on_demand(self) -> bool:
+        return self._mode.on_demand if self._mode.on_demand is not None else self._global.on_demand
 
     @property
     def task_decorator_on_demand(self) -> bool:
@@ -461,6 +477,38 @@ class ResolvedDefaults:
         )
 
     @property
+    def polling_exponential_multiplier(self) -> confloat(gt=1):
+        return (
+            self._mode.polling_exponential_multiplier
+            if self._mode.polling_exponential_multiplier is not None
+            else self._global.polling_exponential_multiplier
+        )
+
+    @property
+    def polling_adaptive_speedup_factor(self) -> confloat(gt=0, le=1):
+        return (
+            self._mode.polling_adaptive_speedup_factor
+            if self._mode.polling_adaptive_speedup_factor is not None
+            else self._global.polling_adaptive_speedup_factor
+        )
+
+    @property
+    def polling_adaptive_slowdown_factor(self) -> confloat(ge=1):
+        return (
+            self._mode.polling_adaptive_slowdown_factor
+            if self._mode.polling_adaptive_slowdown_factor is not None
+            else self._global.polling_adaptive_slowdown_factor
+        )
+
+    @property
+    def polling_adaptive_consecutive_empty_threshold(self) -> int:
+        return (
+            self._mode.polling_adaptive_consecutive_empty_threshold
+            if self._mode.polling_adaptive_consecutive_empty_threshold is not None
+            else self._global.polling_adaptive_consecutive_empty_threshold
+        )
+
+    @property
     def polling_progressive_min_interval(self) -> confloat(ge=0):
         return (
             self._mode.polling_progressive_min_interval
@@ -474,6 +522,14 @@ class ResolvedDefaults:
             self._mode.polling_progressive_max_interval
             if self._mode.polling_progressive_max_interval is not None
             else self._global.polling_progressive_max_interval
+        )
+
+    @property
+    def polling_progressive_checks_before_increase(self) -> int:
+        return (
+            self._mode.polling_progressive_checks_before_increase
+            if self._mode.polling_progressive_checks_before_increase is not None
+            else self._global.polling_progressive_checks_before_increase
         )
 
     # === Asyncio Future Polling Properties ===
@@ -782,18 +838,19 @@ def temp_config(**overrides):
             mode_name, attr_name = parts
 
             # Get the target defaults object
+            local_config = global_config.clone()
             if mode_name == "global":
-                target_defaults = global_config.defaults
+                target_defaults = local_config.defaults
             elif mode_name == "sync":
-                target_defaults = global_config.sync
+                target_defaults = local_config.sync
             elif mode_name == "asyncio":
-                target_defaults = global_config.asyncio
+                target_defaults = local_config.asyncio
             elif mode_name == "thread":
-                target_defaults = global_config.thread
+                target_defaults = local_config.thread
             elif mode_name == "process":
-                target_defaults = global_config.process
+                target_defaults = local_config.process
             elif mode_name == "ray":
-                target_defaults = global_config.ray
+                target_defaults = local_config.ray
             else:
                 raise ValueError(
                     f"Invalid mode in override key: '{mode_name}'. "
@@ -805,9 +862,10 @@ def temp_config(**overrides):
                 raise ValueError(
                     f"Invalid attribute in override key: '{attr_name}'. "
                     f"Valid attributes: max_workers, max_queued_tasks, load_balancing, "
-                    f"load_balancing_on_demand, blocking, unwrap_futures, num_retries, "
+                    f"load_balancing_on_demand, on_demand, blocking, unwrap_futures, num_retries, "
                     f"retry_algorithm, retry_wait, retry_jitter, stop_timeout, "
                     f"rate_limit_algorithm, limit_pool_load_balancing, limit_pool_worker_index, "
+                    f"task_decorator_on_demand, "
                     f"worker_command_queue_timeout, worker_result_queue_timeout, "
                     f"worker_result_queue_cleanup_timeout, worker_loop_ready_timeout, "
                     f"worker_thread_ready_timeout, worker_sync_queue_timeout, "

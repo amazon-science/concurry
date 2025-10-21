@@ -3,12 +3,13 @@
 import threading
 import warnings
 from abc import ABC
-from typing import Any, Callable, ClassVar, Optional, Type, TypeVar
+from typing import Any, Callable, ClassVar, Optional, Type, TypeVar, Union
 
 from morphic import Typed, validate
 from morphic.structs import map_collection
 from pydantic import ConfigDict, PrivateAttr, confloat, conint
 
+from ...utils import _NO_ARG, _NO_ARG_TYPE
 from ..constants import ExecutionMode, LoadBalancingAlgorithm
 from ..future import BaseFuture
 from ..limit.limit_pool import LimitPool
@@ -287,9 +288,12 @@ def _create_worker_wrapper(
                 if isinstance(limits, list):
                     # Create private LimitSet with mode=sync (uses threading.Lock, works everywhere)
                     limit_set = LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync)
-                    # Wrap in LimitPool with worker_index=0 (single worker)
+                    # Wrap in LimitPool with explicit defaults (don't rely on worker's global_config)
+                    # Note: load_balancing doesn't matter with single LimitSet, but use Random for consistency
                     limit_pool = LimitPool(
                         limit_sets=[limit_set],
+                        load_balancing=LoadBalancingAlgorithm.Random,
+                        worker_index=0,
                     )
                 else:
                     # Already a LimitPool, use it directly
@@ -313,8 +317,13 @@ def _create_worker_wrapper(
             if isinstance(limits, list):
                 # Create private LimitSet with mode=sync (uses threading.Lock, works everywhere)
                 limit_set = LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync)
-                # Wrap in LimitPool with worker_index=0 (single worker)
-                limit_pool = LimitPool(limit_sets=[limit_set])
+                # Wrap in LimitPool with explicit defaults (don't rely on worker's global_config)
+                # Note: load_balancing doesn't matter with single LimitSet, but use Random for consistency
+                limit_pool = LimitPool(
+                    limit_sets=[limit_set],
+                    load_balancing=LoadBalancingAlgorithm.Random,
+                    worker_index=0,
+                )
             else:
                 # Already a LimitPool, use it directly
                 limit_pool = limits
@@ -526,16 +535,16 @@ class WorkerBuilder(Typed):
     mode: ExecutionMode
     blocking: bool
     max_workers: Optional[conint(ge=0)]
-    load_balancing: Optional[LoadBalancingAlgorithm]
+    load_balancing: LoadBalancingAlgorithm
     on_demand: bool
     max_queued_tasks: Optional[conint(ge=0)]
     # Retry parameters
     num_retries: conint(ge=0)
-    retry_on: Optional[Any]
+    retry_on: Any  # List of exception types or callables, default [Exception]
     retry_algorithm: RetryAlgorithm
     retry_wait: confloat(ge=0)
     retry_jitter: confloat(ge=0, le=1)
-    retry_until: Optional[Any]
+    retry_until: Optional[Any]  # Truly optional, default None
     # Extra options dictionary
     options: dict[str, Any]
 
@@ -713,11 +722,15 @@ class WorkerBuilder(Typed):
         Raises:
             ValueError: If trying to create Ray worker with Pydantic-based class
         """
+        # Import here to avoid circular imports
+        from ...config import global_config
         from .asyncio_worker import AsyncioWorkerProxy
         from .process_worker import ProcessWorkerProxy
         from .sync_worker import SyncWorkerProxy
         from .task_worker import TaskWorker, TaskWorkerMixin
         from .thread_worker import ThreadWorkerProxy
+
+        local_config = global_config.clone()
 
         # Convert mode string to ExecutionMode
         execution_mode = self.mode
@@ -753,9 +766,6 @@ class WorkerBuilder(Typed):
                 {},
             )
 
-        # Import here to avoid circular imports
-        from ...config import global_config
-
         # Process limits (always, even if None - creates empty LimitPool)
         processed_options = dict(self.options)
         processed_options["limits"] = _transform_worker_limits(
@@ -771,20 +781,20 @@ class WorkerBuilder(Typed):
             processed_options["retry_config"] = retry_config
 
         # Get mode defaults for worker timeouts (from global config)
-        mode_defaults = global_config.get_defaults(execution_mode)
+        mode_defaults = local_config.get_defaults(execution_mode)
 
         # Pass mode-specific timeouts to proxy (based on execution mode)
         if execution_mode == ExecutionMode.Threads:
             processed_options["command_queue_timeout"] = mode_defaults.worker_command_queue_timeout
+        elif execution_mode == ExecutionMode.Asyncio:
+            processed_options["loop_ready_timeout"] = mode_defaults.worker_loop_ready_timeout
+            processed_options["thread_ready_timeout"] = mode_defaults.worker_thread_ready_timeout
+            processed_options["sync_queue_timeout"] = mode_defaults.worker_sync_queue_timeout
         elif execution_mode == ExecutionMode.Processes:
             processed_options["result_queue_timeout"] = mode_defaults.worker_result_queue_timeout
             processed_options["result_queue_cleanup_timeout"] = (
                 mode_defaults.worker_result_queue_cleanup_timeout
             )
-        elif execution_mode == ExecutionMode.Asyncio:
-            processed_options["loop_ready_timeout"] = mode_defaults.worker_loop_ready_timeout
-            processed_options["thread_ready_timeout"] = mode_defaults.worker_thread_ready_timeout
-            processed_options["sync_queue_timeout"] = mode_defaults.worker_sync_queue_timeout
         # Sync and Ray modes have no worker-specific timeouts
 
         # Create proxy with init args/kwargs
@@ -819,6 +829,8 @@ class WorkerBuilder(Typed):
             MultiprocessWorkerProxyPool,
             RayWorkerProxyPool,
         )
+
+        local_config = global_config.clone()
 
         # Convert mode string to ExecutionMode
         execution_mode = ExecutionMode(self.mode)
@@ -867,15 +879,13 @@ class WorkerBuilder(Typed):
                 (TaskWorkerPoolMixin, pool_cls),
                 {},
             )
+        # Get mode defaults
+        mode_defaults = local_config.get_defaults(execution_mode)
 
         # Apply default max_workers for pool if not specified
         max_workers = self.max_workers
         if max_workers is None:
-            mode_defaults = global_config.get_defaults(execution_mode)
             max_workers = mode_defaults.max_workers
-
-        # Get mode defaults for pool timeouts (from global config)
-        mode_defaults = global_config.get_defaults(execution_mode)
 
         # Pass pool-specific timeouts (all modes with pools need these for on-demand workers)
         pool_options["on_demand_cleanup_timeout"] = mode_defaults.pool_on_demand_cleanup_timeout
@@ -1374,18 +1384,19 @@ class Worker:
     @validate
     def options(
         cls: Type[T],
-        mode: ExecutionMode = ExecutionMode.Sync,
-        blocking: Optional[bool] = None,
-        max_workers: Optional[conint(ge=0)] = None,
-        load_balancing: Optional[LoadBalancingAlgorithm] = None,
-        on_demand: bool = False,
-        max_queued_tasks: Optional[conint(ge=0)] = None,
+        *,
+        mode: ExecutionMode,
+        blocking: Union[bool, _NO_ARG_TYPE] = _NO_ARG,
+        max_workers: Union[conint(ge=0), None, _NO_ARG_TYPE] = _NO_ARG,
+        load_balancing: Union[LoadBalancingAlgorithm, _NO_ARG_TYPE] = _NO_ARG,
+        on_demand: Union[bool, _NO_ARG_TYPE] = _NO_ARG,
+        max_queued_tasks: Union[conint(ge=0), None, _NO_ARG_TYPE] = _NO_ARG,
         # Retry parameters
-        num_retries: Optional[conint(ge=0)] = None,
+        num_retries: Union[conint(ge=0), _NO_ARG_TYPE] = _NO_ARG,
         retry_on: Optional[Any] = None,
-        retry_algorithm: Optional[RetryAlgorithm] = None,
-        retry_wait: Optional[confloat(ge=0)] = None,
-        retry_jitter: Optional[confloat(ge=0, le=1)] = None,
+        retry_algorithm: Union[RetryAlgorithm, _NO_ARG_TYPE] = _NO_ARG,
+        retry_wait: Union[confloat(ge=0), _NO_ARG_TYPE] = _NO_ARG,
+        retry_jitter: Union[confloat(ge=0, le=1), _NO_ARG_TYPE] = _NO_ARG,
         retry_until: Optional[Any] = None,
         **kwargs: Any,
     ) -> WorkerBuilder:
@@ -1409,8 +1420,7 @@ class Worker:
                 Accepts bool or string representation ("true", "false", "1", "0")
                 Default value determined by global_config.<mode>.blocking
             max_workers: Maximum number of workers in pool (optional)
-                - If None or 1: Creates single worker
-                - If > 1: Creates worker pool with specified size
+                - If None or 1: Creates single worker. If >1: Creates worker pool with specified size.
                 - Sync/Asyncio: Must be 1 or None (raises error otherwise)
                 - Default value determined by global_config.<mode>.max_workers
             load_balancing: Load balancing algorithm (optional)
@@ -1597,33 +1607,43 @@ class Worker:
         mode_defaults = global_config.get_defaults(mode)
 
         # Apply defaults for all parameters if not specified
-        if blocking is None:
+        if blocking is _NO_ARG:
             blocking = mode_defaults.blocking
 
-        if max_queued_tasks is None:
+        if max_workers is _NO_ARG:
+            max_workers = mode_defaults.max_workers
+
+        if on_demand is _NO_ARG:
+            on_demand = mode_defaults.on_demand
+
+        if max_queued_tasks is _NO_ARG:
             max_queued_tasks = mode_defaults.max_queued_tasks
 
-        if load_balancing is None:
+        if load_balancing is _NO_ARG:
             if on_demand:
                 load_balancing = mode_defaults.load_balancing_on_demand
             else:
                 load_balancing = mode_defaults.load_balancing
 
-        if num_retries is None:
+        if num_retries is _NO_ARG:
             num_retries = mode_defaults.num_retries
 
-        if retry_algorithm is None:
+        if retry_algorithm is _NO_ARG:
             retry_algorithm = mode_defaults.retry_algorithm
 
-        if retry_wait is None:
+        if retry_wait is _NO_ARG:
             retry_wait = mode_defaults.retry_wait
 
-        if retry_jitter is None:
+        if retry_jitter is _NO_ARG:
             retry_jitter = mode_defaults.retry_jitter
 
         # Apply default for unwrap_futures if not in kwargs
         if "unwrap_futures" not in kwargs:
             kwargs["unwrap_futures"] = mode_defaults.unwrap_futures
+
+        # Apply default for retry_on if None (default is [Exception])
+        if retry_on is None:
+            retry_on = [Exception]
 
         return WorkerBuilder(
             worker_cls=cls,

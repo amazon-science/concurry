@@ -1,52 +1,21 @@
-"""Algorithm implementations for concurry."""
+"""Algorithm implementations for concurry.
 
-from .load_balancing import (
-    BaseLoadBalancer,
-    LeastActiveLoadBalancer,
-    LeastTotalLoadBalancer,
-    LoadBalancer,
-    RandomBalancer,
-    RoundRobinBalancer,
-)
-from .polling import (
-    AdaptivePollingStrategy,
-    ExponentialPollingStrategy,
-    FixedPollingStrategy,
-    BasePollingStrategy,
-    ProgressivePollingStrategy,
-    Poller,
-)
-from .rate_limiting import (
-    BaseRateLimiter,
-    FixedWindowLimiter,
-    GCRALimiter,
-    LeakyBucketLimiter,
-    RateLimiter,
-    SlidingWindowLimiter,
-    TokenBucketLimiter,
-)
+This module provides factory functions for creating algorithm instances:
+- Poller: Create polling strategies for efficient future completion checking
+- RateLimiter: Create rate limiters for resource protection
+- LoadBalancer: Create load balancers for worker pool distribution
+
+Implementation classes are private and should not be imported directly.
+Always use the factory functions instead.
+"""
+
+from .load_balancing import LoadBalancer
+from .polling import Poller
+from .rate_limiting import RateLimiter
 
 __all__ = [
-    # Polling
-    "BasePollingStrategy",
-    "FixedPollingStrategy",
-    "AdaptivePollingStrategy",
-    "ExponentialPollingStrategy",
-    "ProgressivePollingStrategy",
+    # Factory functions (PUBLIC API)
     "Poller",
-    # Load Balancing
-    "BaseLoadBalancer",
-    "RoundRobinBalancer",
-    "LeastActiveLoadBalancer",
-    "LeastTotalLoadBalancer",
-    "RandomBalancer",
-    "LoadBalancer",
-    # Rate Limiting
-    "BaseRateLimiter",
-    "TokenBucketLimiter",
-    "LeakyBucketLimiter",
-    "SlidingWindowLimiter",
-    "FixedWindowLimiter",
-    "GCRALimiter",
     "RateLimiter",
+    "LoadBalancer",
 ]

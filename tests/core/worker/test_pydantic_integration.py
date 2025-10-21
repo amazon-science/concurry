@@ -72,8 +72,8 @@ class TestWorkerProxyTypedValidation:
             def __init__(self):
                 pass
 
-        # Create worker proxy
-        proxy = TestWorker.options(mode=worker_mode).init()
+        # Create worker proxy (single worker to test direct attribute access)
+        proxy = TestWorker.options(mode=worker_mode, max_workers=1).init()
 
         # Test setting _stopped with correct type (bool)
         proxy._stopped = True
@@ -150,8 +150,8 @@ class TestWorkerProxyTypedValidation:
             def __init__(self):
                 pass
 
-        # Create proxy with extra options
-        proxy = TestWorker.options(mode=worker_mode, custom_option="test_value").init()
+        # Create proxy with extra options (single worker to test direct attribute access)
+        proxy = TestWorker.options(mode=worker_mode, max_workers=1, custom_option="test_value").init()
 
         # Extra options should be in _options
         assert "_options" in proxy.__pydantic_private__
@@ -177,9 +177,9 @@ class TestWorkerProxyTypedValidation:
             def __init__(self):
                 pass
 
-        # Valid mp_context values
+        # Valid mp_context values (single worker to test direct attribute access)
         for context in ["fork", "spawn", "forkserver"]:
-            proxy = TestWorker.options(mode="process", mp_context=context).init()
+            proxy = TestWorker.options(mode="process", max_workers=1, mp_context=context).init()
             assert proxy.mp_context == context
             proxy.stop()
 
@@ -187,7 +187,7 @@ class TestWorkerProxyTypedValidation:
         # Note: Literal type checking might happen at Pydantic validation time
         # or at runtime when actually using the context
         with pytest.raises(Exception):  # ValidationError or ValueError
-            TestWorker.options(mode="process", mp_context="invalid").init()
+            TestWorker.options(mode="process", max_workers=1, mp_context="invalid").init()
 
 
 class TestWorkerTypedFeatures:

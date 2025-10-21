@@ -11,8 +11,10 @@ from pydantic import ConfigDict, PrivateAttr
 from ..constants import LoadBalancingAlgorithm
 
 
-class BaseLoadBalancer(Registry, MutableTyped, ABC):
+class _BaseLoadBalancer(Registry, MutableTyped, ABC):
     """Abstract base class for load balancing algorithms.
+
+    **PRIVATE CLASS**: Do not use directly. Use the LoadBalancer() factory function instead.
 
     Provides a unified interface for different load balancing strategies
     used in worker pools. All algorithm implementations should inherit from this class.
@@ -89,8 +91,10 @@ class BaseLoadBalancer(Registry, MutableTyped, ABC):
         pass
 
 
-class RoundRobinBalancer(BaseLoadBalancer):
+class _RoundRobinBalancer(_BaseLoadBalancer):
     """Round-robin load balancing algorithm with optional offset.
+
+    **PRIVATE CLASS**: Do not use directly. Use the LoadBalancer() factory function instead.
 
     Distributes requests evenly across workers in a circular fashion.
     Each request goes to the next worker in sequence.
@@ -180,8 +184,10 @@ class RoundRobinBalancer(BaseLoadBalancer):
             }
 
 
-class LeastActiveLoadBalancer(BaseLoadBalancer):
+class _LeastActiveLoadBalancer(_BaseLoadBalancer):
     """Least active load balancing algorithm.
+
+    **PRIVATE CLASS**: Do not use directly. Use the LoadBalancer() factory function instead.
 
     Selects the worker with the fewest currently active (in-flight) calls.
     This balances load dynamically based on current worker utilization.
@@ -255,8 +261,10 @@ class LeastActiveLoadBalancer(BaseLoadBalancer):
             }
 
 
-class LeastTotalLoadBalancer(BaseLoadBalancer):
+class _LeastTotalLoadBalancer(_BaseLoadBalancer):
     """Least total load balancing algorithm.
+
+    **PRIVATE CLASS**: Do not use directly. Use the LoadBalancer() factory function instead.
 
     Selects the worker with the fewest total calls over its lifetime.
     This ensures even distribution of total work across workers.
@@ -323,8 +331,10 @@ class LeastTotalLoadBalancer(BaseLoadBalancer):
             }
 
 
-class RandomBalancer(BaseLoadBalancer):
+class _RandomBalancer(_BaseLoadBalancer):
     """Random load balancing algorithm.
+
+    **PRIVATE CLASS**: Do not use directly. Use the LoadBalancer() factory function instead.
 
     Randomly selects a worker for each request. Simple and effective
     for many use cases, especially with stateless workers.
@@ -374,14 +384,18 @@ class RandomBalancer(BaseLoadBalancer):
             }
 
 
-def LoadBalancer(algorithm: LoadBalancingAlgorithm, **kwargs) -> BaseLoadBalancer:
+def LoadBalancer(algorithm: LoadBalancingAlgorithm, **kwargs) -> _BaseLoadBalancer:
     """Factory function to create the appropriate load balancer using Registry pattern.
+
+    This is the only public API for creating load balancers. Implementation
+    classes are private and should not be used directly.
 
     Args:
         algorithm: The load balancing algorithm to use
         **kwargs: Additional keyword arguments to pass to the load balancer constructor
+
     Returns:
-        BaseLoadBalancer instance of the appropriate type
+        Load balancer instance (private implementation class)
 
     Raises:
         ValueError: If algorithm is not recognized
@@ -394,4 +408,4 @@ def LoadBalancer(algorithm: LoadBalancingAlgorithm, **kwargs) -> BaseLoadBalance
         worker_idx = balancer.select_worker(num_workers=10)
         ```
     """
-    return BaseLoadBalancer.of(algorithm, **kwargs)
+    return _BaseLoadBalancer.of(algorithm, **kwargs)

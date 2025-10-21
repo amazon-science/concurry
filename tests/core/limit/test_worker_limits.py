@@ -25,7 +25,15 @@ class TestWorkerLimits:
     """
 
     def test_worker_with_limits(self, worker_mode):
-        """Test that worker can access limits."""
+        """Test that worker can access limits.
+
+        1. Defines RateLimit and ResourceLimit
+        2. Creates TestWorker with limits list
+        3. Calls process(10) which accesses self.limits
+        4. Verifies self.limits is not None
+        5. Verifies result is 20 (10*2)
+        6. Stops worker
+        """
         # Pass list of Limits - each worker will create its own private LimitSet
         limits = [
             RateLimit(key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
@@ -47,7 +55,16 @@ class TestWorkerLimits:
         worker.stop()
 
     def test_worker_using_limits(self, worker_mode):
-        """Test worker actually using limits."""
+        """Test worker actually using limits.
+
+        1. Defines RateLimit for tokens (100 capacity)
+        2. Creates TokenWorker with limits
+        3. Calls process(50) which acquires 50 tokens
+        4. Uses limits.acquire() context manager
+        5. Updates actual usage to 45 tokens (via acq.update())
+        6. Verifies result is "Used 45 tokens"
+        7. Stops worker
+        """
         # Pass list of Limits - each worker will create its own private LimitSet
         limits = [
             RateLimit(key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
@@ -70,7 +87,15 @@ class TestWorkerLimits:
         worker.stop()
 
     def test_worker_with_resource_limits(self, worker_mode):
-        """Test worker using resource limits."""
+        """Test worker using resource limits.
+
+        1. Defines ResourceLimit for connections (capacity=2)
+        2. Creates DBWorker with resource limit
+        3. Calls query() twice, each acquiring 1 connection
+        4. Verifies both queries succeed (within capacity)
+        5. Returns "Query result" for each
+        6. Stops worker
+        """
         # Pass list of Limits - each worker will create its own private LimitSet
         limits = [ResourceLimit(key="connections", capacity=2)]
 
@@ -407,7 +432,7 @@ class TestWorkerWithoutLimits:
         """Test that worker pools work without limits."""
         # Skip sync and asyncio since they don't support pools
         if worker_mode in ("sync", "asyncio"):
-            pytest.skip(f"Pools not supported for {worker_mode} mode")
+            pytest.skip(f"{worker_mode} mode does not support max_workers > 1")
 
         class TestWorker(Worker):
             def process(self, x: int) -> int:
@@ -603,8 +628,8 @@ class TestLimitPoolWorkerIntegration:
             limit_sets=limitsets, load_balancing=LoadBalancingAlgorithm.RoundRobin, worker_index=0
         )
 
-        # Create worker with LimitPool
-        worker = APIWorker.options(mode=worker_mode, limits=pool).init()
+        # Create worker with LimitPool (single worker to ensure sequential processing)
+        worker = APIWorker.options(mode=worker_mode, max_workers=1, limits=pool).init()
 
         # Make calls - should cycle through regions
         results = []
@@ -647,8 +672,8 @@ class TestLimitPoolWorkerIntegration:
             for i in range(2)
         ]
 
-        # Pass list of LimitSets directly
-        worker = APIWorker.options(mode=worker_mode, limits=limitsets).init()
+        # Pass list of LimitSets directly (single worker to ensure sequential processing)
+        worker = APIWorker.options(mode=worker_mode, max_workers=1, limits=limitsets).init()
 
         # Make calls
         results = []
@@ -940,8 +965,8 @@ class TestLimitPoolWorkerIntegration:
             for i in range(2)
         ]
 
-        # Create worker with LimitSets
-        worker = APIWorker.options(mode=mode, limits=limitsets).init()
+        # Create worker with LimitSets (single worker to ensure sequential processing)
+        worker = APIWorker.options(mode=mode, max_workers=1, limits=limitsets).init()
 
         # Make multiple calls - should see different configs due to round-robin
         results = [worker.get_region_and_account().result() for _ in range(4)]

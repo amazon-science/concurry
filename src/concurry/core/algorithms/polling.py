@@ -1,15 +1,19 @@
 """Polling algorithms for efficient future completion checking."""
 
 from abc import ABC, abstractmethod
+from typing import Union
 
 from morphic import MutableTyped, Registry
 from pydantic import ConfigDict
 
+from ...utils import _NO_ARG, _NO_ARG_TYPE
 from ..constants import PollingAlgorithm
 
 
-class BasePollingStrategy(Registry, MutableTyped, ABC):
+class _BasePollingStrategy(Registry, MutableTyped, ABC):
     """Base class for polling strategies using Registry pattern.
+
+    **PRIVATE CLASS**: Do not use directly. Use the Poller() factory function instead.
 
     All polling strategies inherit from this class and are automatically
     registered for factory-based creation.
@@ -38,8 +42,10 @@ class BasePollingStrategy(Registry, MutableTyped, ABC):
         pass
 
 
-class FixedPollingStrategy(BasePollingStrategy):
+class _FixedPollingStrategy(_BasePollingStrategy):
     """Fixed interval polling - constant wait time between checks.
+
+    **PRIVATE CLASS**: Do not use directly. Use the Poller() factory function instead.
 
     This strategy uses a constant polling interval regardless of whether
     futures are completing. Simple and predictable, but may check too
@@ -51,19 +57,27 @@ class FixedPollingStrategy(BasePollingStrategy):
         - When you want complete control over polling frequency
 
     Attributes:
-        interval: Polling interval in seconds. When used via wait() or gather(),
-            the value is taken from global_config.defaults.polling_fixed_interval
+        interval: Polling interval in seconds. Defaults to
+            global_config.defaults.polling_fixed_interval
 
     Example:
         ```python
-        # Check every 50ms
-        strategy = FixedPollingStrategy.of(interval=0.05)
+        # Use Poller() factory instead
+        strategy = Poller(PollingAlgorithm.Fixed, interval=0.05)
         ```
     """
 
     aliases = ["fixed", PollingAlgorithm.Fixed]
 
-    interval: float
+    interval: Union[float, _NO_ARG_TYPE] = _NO_ARG
+
+    def post_initialize(self) -> None:
+        """Apply defaults from global config."""
+        if self.interval is _NO_ARG:
+            from ...config import global_config
+
+            local_config = global_config.clone()
+            object.__setattr__(self, "interval", local_config.defaults.polling_fixed_interval)
 
     def get_next_interval(self) -> float:
         """Get the next polling interval."""
@@ -82,8 +96,10 @@ class FixedPollingStrategy(BasePollingStrategy):
         pass
 
 
-class AdaptivePollingStrategy(BasePollingStrategy):
+class _AdaptivePollingStrategy(_BasePollingStrategy):
     """Adaptive polling that adjusts based on completion rate.
+
+    **PRIVATE CLASS**: Do not use directly. Use the Poller() factory function instead.
 
     This strategy dynamically adjusts the polling interval based on whether
     futures are completing. When futures complete, it speeds up (checks more
@@ -100,20 +116,21 @@ class AdaptivePollingStrategy(BasePollingStrategy):
         - Minimizing both latency and CPU usage
 
     Attributes:
-        min_interval: Minimum polling interval. When used via wait() or gather(),
-            the value is taken from global_config.defaults.polling_adaptive_min_interval
-        max_interval: Maximum polling interval. When used via wait() or gather(),
-            the value is taken from global_config.defaults.polling_adaptive_max_interval
-        current_interval: Current polling interval. When used via wait() or gather(),
-            the initial value is taken from global_config.defaults.polling_adaptive_initial_interval
+        min_interval: Minimum polling interval. Defaults to
+            global_config.defaults.polling_adaptive_min_interval
+        max_interval: Maximum polling interval. Defaults to
+            global_config.defaults.polling_adaptive_max_interval
+        current_interval: Current polling interval. Defaults to
+            global_config.defaults.polling_adaptive_initial_interval
         speedup_factor: Multiplier when futures complete (0.7 = 30% faster)
         slowdown_factor: Multiplier when idle (1.3 = 30% slower)
         consecutive_empty: Number of consecutive empty checks
 
     Example:
         ```python
-        # More aggressive adaptation
-        strategy = AdaptivePollingStrategy.of(
+        # Use Poller() factory instead
+        strategy = Poller(
+            PollingAlgorithm.Adaptive,
             min_interval=0.0001,  # 0.1ms min
             max_interval=0.2,     # 200ms max
             speedup_factor=0.5,   # 50% faster on completion
@@ -124,12 +141,35 @@ class AdaptivePollingStrategy(BasePollingStrategy):
 
     aliases = ["adaptive", PollingAlgorithm.Adaptive]
 
-    min_interval: float
-    max_interval: float
-    current_interval: float
-    speedup_factor: float = 0.7  # Speed up by 30% on completions
-    slowdown_factor: float = 1.3  # Slow down by 30% on no completions
-    consecutive_empty: int = 0  # Track empty checks
+    min_interval: Union[float, _NO_ARG_TYPE] = _NO_ARG
+    max_interval: Union[float, _NO_ARG_TYPE] = _NO_ARG
+    current_interval: Union[float, _NO_ARG_TYPE] = _NO_ARG
+    speedup_factor: Union[float, _NO_ARG_TYPE] = _NO_ARG
+    slowdown_factor: Union[float, _NO_ARG_TYPE] = _NO_ARG
+    consecutive_empty_threshold: Union[int, _NO_ARG_TYPE] = _NO_ARG
+    consecutive_empty: int = 0  # Track empty checks (internal state, not configurable)
+
+    def post_initialize(self) -> None:
+        """Apply defaults from global config."""
+        from ...config import global_config
+
+        local_config = global_config.clone()
+        defaults = local_config.defaults
+
+        if self.min_interval is _NO_ARG:
+            object.__setattr__(self, "min_interval", defaults.polling_adaptive_min_interval)
+        if self.max_interval is _NO_ARG:
+            object.__setattr__(self, "max_interval", defaults.polling_adaptive_max_interval)
+        if self.current_interval is _NO_ARG:
+            object.__setattr__(self, "current_interval", defaults.polling_adaptive_initial_interval)
+        if self.speedup_factor is _NO_ARG:
+            object.__setattr__(self, "speedup_factor", defaults.polling_adaptive_speedup_factor)
+        if self.slowdown_factor is _NO_ARG:
+            object.__setattr__(self, "slowdown_factor", defaults.polling_adaptive_slowdown_factor)
+        if self.consecutive_empty_threshold is _NO_ARG:
+            object.__setattr__(
+                self, "consecutive_empty_threshold", defaults.polling_adaptive_consecutive_empty_threshold
+            )
 
     def get_next_interval(self) -> float:
         """Get the current polling interval."""
@@ -143,7 +183,7 @@ class AdaptivePollingStrategy(BasePollingStrategy):
     def record_no_completion(self) -> None:
         """Slow down after consecutive empty checks to save CPU."""
         self.consecutive_empty += 1
-        if self.consecutive_empty >= 3:  # After 3 empty checks
+        if self.consecutive_empty >= self.consecutive_empty_threshold:
             self.current_interval = min(self.max_interval, self.current_interval * self.slowdown_factor)
 
     def reset(self) -> None:
@@ -153,8 +193,10 @@ class AdaptivePollingStrategy(BasePollingStrategy):
         self.consecutive_empty = 0
 
 
-class ExponentialPollingStrategy(BasePollingStrategy):
+class _ExponentialPollingStrategy(_BasePollingStrategy):
     """Exponential backoff polling.
+
+    **PRIVATE CLASS**: Do not use directly. Use the Poller() factory function instead.
 
     This strategy starts with a fast polling interval and exponentially
     increases it when nothing completes. Resets to fast polling on any
@@ -170,17 +212,18 @@ class ExponentialPollingStrategy(BasePollingStrategy):
         - Operations where latency on the first completion is critical
 
     Attributes:
-        initial_interval: Starting interval. When used via wait() or gather(),
-            the value is taken from global_config.defaults.polling_exponential_initial_interval
-        max_interval: Maximum interval cap. When used via wait() or gather(),
-            the value is taken from global_config.defaults.polling_exponential_max_interval
+        initial_interval: Starting interval. Defaults to
+            global_config.defaults.polling_exponential_initial_interval
+        max_interval: Maximum interval cap. Defaults to
+            global_config.defaults.polling_exponential_max_interval
         multiplier: Growth factor per empty check (2.0 = double)
         current_interval: Current interval
 
     Example:
         ```python
-        # Slower growth, higher max
-        strategy = ExponentialPollingStrategy.of(
+        # Use Poller() factory instead
+        strategy = Poller(
+            PollingAlgorithm.Exponential,
             initial_interval=0.01,  # 10ms start
             max_interval=2.0,       # 2 second max
             multiplier=1.5          # 50% growth
@@ -190,10 +233,26 @@ class ExponentialPollingStrategy(BasePollingStrategy):
 
     aliases = ["exponential", PollingAlgorithm.Exponential]
 
-    initial_interval: float
-    max_interval: float
-    multiplier: float = 2.0  # Double each time
-    current_interval: float
+    initial_interval: Union[float, _NO_ARG_TYPE] = _NO_ARG
+    max_interval: Union[float, _NO_ARG_TYPE] = _NO_ARG
+    multiplier: Union[float, _NO_ARG_TYPE] = _NO_ARG
+    current_interval: Union[float, _NO_ARG_TYPE] = _NO_ARG
+
+    def post_initialize(self) -> None:
+        """Apply defaults from global config."""
+        from ...config import global_config
+
+        local_config = global_config.clone()
+        defaults = local_config.defaults
+
+        if self.initial_interval is _NO_ARG:
+            object.__setattr__(self, "initial_interval", defaults.polling_exponential_initial_interval)
+        if self.max_interval is _NO_ARG:
+            object.__setattr__(self, "max_interval", defaults.polling_exponential_max_interval)
+        if self.multiplier is _NO_ARG:
+            object.__setattr__(self, "multiplier", defaults.polling_exponential_multiplier)
+        if self.current_interval is _NO_ARG:
+            object.__setattr__(self, "current_interval", defaults.polling_exponential_initial_interval)
 
     def get_next_interval(self) -> float:
         """Get the current polling interval."""
@@ -212,8 +271,10 @@ class ExponentialPollingStrategy(BasePollingStrategy):
         self.current_interval = self.initial_interval
 
 
-class ProgressivePollingStrategy(BasePollingStrategy):
+class _ProgressivePollingStrategy(_BasePollingStrategy):
     """Progressive backoff with fixed interval levels.
+
+    **PRIVATE CLASS**: Do not use directly. Use the Poller() factory function instead.
 
     This strategy progresses through predefined polling intervals, staying
     at each level for a fixed number of checks before moving to the next.
@@ -230,7 +291,7 @@ class ProgressivePollingStrategy(BasePollingStrategy):
 
     Attributes:
         intervals: Tuple of interval levels (e.g., 1ms, 5ms, 10ms, 50ms, 100ms).
-            When used via wait() or gather(), this is generated from
+            Defaults to tuple generated from
             global_config.defaults.polling_progressive_min_interval and
             global_config.defaults.polling_progressive_max_interval
         current_index: Current level index
@@ -239,8 +300,9 @@ class ProgressivePollingStrategy(BasePollingStrategy):
 
     Example:
         ```python
-        # Custom interval levels
-        strategy = ProgressivePollingStrategy.of(
+        # Use Poller() factory instead
+        strategy = Poller(
+            PollingAlgorithm.Progressive,
             intervals=(0.001, 0.01, 0.05, 0.1, 0.5, 1.0),
             checks_before_increase=10  # Stay longer at each level
         )
@@ -249,10 +311,27 @@ class ProgressivePollingStrategy(BasePollingStrategy):
 
     aliases = ["progressive", PollingAlgorithm.Progressive]
 
-    intervals: tuple
+    intervals: Union[tuple, _NO_ARG_TYPE] = _NO_ARG
     current_index: int = 0
     checks_at_level: int = 0
-    checks_before_increase: int = 5  # Stay at each level for N checks
+    checks_before_increase: Union[int, _NO_ARG_TYPE] = _NO_ARG
+
+    def post_initialize(self) -> None:
+        """Apply defaults from global config."""
+        from ...config import global_config
+
+        local_config = global_config.clone()
+        defaults = local_config.defaults
+
+        if self.intervals is _NO_ARG:
+            min_int = defaults.polling_progressive_min_interval
+            max_int = defaults.polling_progressive_max_interval
+            object.__setattr__(self, "intervals", (min_int, min_int * 5, min_int * 10, min_int * 50, max_int))
+
+        if self.checks_before_increase is _NO_ARG:
+            object.__setattr__(
+                self, "checks_before_increase", defaults.polling_progressive_checks_before_increase
+            )
 
     def get_next_interval(self) -> float:
         """Get the current interval based on level."""
@@ -276,22 +355,25 @@ class ProgressivePollingStrategy(BasePollingStrategy):
         self.checks_at_level = 0
 
 
-def Poller(algorithm: PollingAlgorithm, **kwargs) -> BasePollingStrategy:
+def Poller(algorithm: PollingAlgorithm, **kwargs) -> _BasePollingStrategy:
     """Create a polling strategy instance using Registry pattern.
+
+    This is the only public API for creating polling strategies. Implementation
+    classes are private and should not be used directly.
 
     Args:
         algorithm: Polling algorithm to use (enum or string name)
         **kwargs: Additional arguments passed to strategy constructor
 
     Returns:
-        BasePollingStrategy instance
+        Polling strategy instance (private implementation class)
 
     Raises:
         ValueError: If algorithm is unknown
 
     Example:
         ```python
-        # Using enum
+        # Using enum with defaults from global_config
         strategy = Poller(PollingAlgorithm.Adaptive)
 
         # Using string
@@ -299,39 +381,11 @@ def Poller(algorithm: PollingAlgorithm, **kwargs) -> BasePollingStrategy:
 
         # With custom parameters
         strategy = Poller(
-            "adaptive",
+            PollingAlgorithm.Adaptive,
             min_interval=0.0001,
             max_interval=0.5
         )
         ```
     """
-    from ...config import global_config
-
-    # Fill in defaults from config if not provided
-    local_config = global_config.clone()
-    defaults = local_config.defaults
-
-    if algorithm in (PollingAlgorithm.Fixed, "fixed", "fixed_polling"):
-        if "interval" not in kwargs:
-            kwargs["interval"] = defaults.polling_fixed_interval
-    elif algorithm in (PollingAlgorithm.Adaptive, "adaptive", "adaptive_polling"):
-        if "min_interval" not in kwargs:
-            kwargs["min_interval"] = defaults.polling_adaptive_min_interval
-        if "max_interval" not in kwargs:
-            kwargs["max_interval"] = defaults.polling_adaptive_max_interval
-        if "current_interval" not in kwargs:
-            kwargs["current_interval"] = defaults.polling_adaptive_initial_interval
-    elif algorithm in (PollingAlgorithm.Exponential, "exponential", "exponential_polling"):
-        if "initial_interval" not in kwargs:
-            kwargs["initial_interval"] = defaults.polling_exponential_initial_interval
-        if "max_interval" not in kwargs:
-            kwargs["max_interval"] = defaults.polling_exponential_max_interval
-        if "current_interval" not in kwargs:
-            kwargs["current_interval"] = defaults.polling_exponential_initial_interval
-    elif algorithm in (PollingAlgorithm.Progressive, "progressive", "progressive_polling"):
-        if "intervals" not in kwargs:
-            min_int = defaults.polling_progressive_min_interval
-            max_int = defaults.polling_progressive_max_interval
-            kwargs["intervals"] = (min_int, min_int * 5, min_int * 10, min_int * 50, max_int)
-
-    return BasePollingStrategy.of(algorithm, **kwargs)
+    # Just delegate to .of() - defaults are handled in post_initialize()
+    return _BasePollingStrategy.of(algorithm, **kwargs)

@@ -636,6 +636,9 @@ class AsyncioFuture(BaseFuture):
         Raises:
             TypeError: If future is not an asyncio.Future instance
         """
+        from ..config import global_config
+
+        local_config = global_config.clone()
         # Validate future type
         if not asyncio.isfuture(future):
             raise TypeError(f"future must be an asyncio.Future, got {type(future).__name__}")
@@ -651,9 +654,7 @@ class AsyncioFuture(BaseFuture):
         self._lock = threading.Lock()
 
         # Get poll interval from config
-        from ..config import global_config
-
-        self._poll_interval = global_config.defaults.asyncio_future_poll_interval
+        self._poll_interval = local_config.defaults.asyncio_future_poll_interval
 
     def result(self, timeout: Optional[float] = None) -> Any:
         """Get the result of the future.

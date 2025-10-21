@@ -24,7 +24,16 @@ class TestBasicLimitEnforcement:
     """Test basic limit enforcement with single workers."""
 
     def test_counter_with_call_limit(self, worker_mode):
-        """Test Counter worker with CallLimit - should throttle execution."""
+        """Test Counter worker with CallLimit - should throttle execution.
+
+        1. Creates Counter worker with CallLimit (20 calls/sec, TokenBucket)
+        2. Makes 100 increment() calls
+        3. First 20 calls use burst capacity (instant)
+        4. Remaining 80 calls throttled at 20/sec (takes ~4 seconds)
+        5. Verifies final count is 105 (5 initial + 100 increments)
+        6. Verifies elapsed time ~4 seconds (validates rate limiting)
+        7. Stops worker
+        """
         # Skip ray mode - use separate ray tests in TestRayWorkerLimits
         if worker_mode == "ray":
             pytest.skip("Ray mode has separate tests in TestRayWorkerLimits class")
@@ -68,7 +77,16 @@ class TestBasicLimitEnforcement:
         w.stop()
 
     def test_counter_with_rate_limit(self, worker_mode):
-        """Test Counter worker with RateLimit - should throttle token consumption."""
+        """Test Counter worker with RateLimit - should throttle token consumption.
+
+        1. Creates TokenCounter worker with RateLimit (50 tokens/sec, TokenBucket)
+        2. Consumes 250 tokens total (10 calls × 25 tokens each)
+        3. First 50 tokens use burst capacity (instant)
+        4. Remaining 200 tokens throttled at 50/sec (takes ~4 seconds)
+        5. Verifies total_tokens is 250
+        6. Verifies elapsed time ~4 seconds (validates token rate limiting)
+        7. Stops worker
+        """
         # Skip ray mode - use separate ray tests in TestRayWorkerLimits
         if worker_mode == "ray":
             pytest.skip("Ray mode has separate tests in TestRayWorkerLimits class")
@@ -117,7 +135,16 @@ class TestBasicLimitEnforcement:
         w.stop()
 
     def test_counter_with_resource_limit(self, worker_mode):
-        """Test Counter worker with ResourceLimit - should block when resources exhausted."""
+        """Test Counter worker with ResourceLimit - should block when resources exhausted.
+
+        1. Creates ResourceWorker with ResourceLimit (2 concurrent connections max)
+        2. Submits 10 process() operations (each holds connection for 0.1s)
+        3. Only 2 operations can run concurrently
+        4. 10 operations / 2 concurrent = ~5 batches × 0.1s = ~0.5s minimum
+        5. Verifies all 10 operations complete
+        6. Verifies elapsed time >= 0.5s (validates concurrency limit)
+        7. Stops worker
+        """
         # Skip ray mode - use separate ray tests in TestRayWorkerLimits
         if worker_mode == "ray":
             pytest.skip("Ray mode has separate tests in TestRayWorkerLimits class")
@@ -166,7 +193,17 @@ class TestSharedLimitSets:
     """Test shared LimitSets across multiple workers."""
 
     def test_shared_limitset_across_workers_inmemory(self, worker_mode):
-        """Test that shared InMemorySharedLimitSet is shared across workers."""
+        """Test that shared InMemorySharedLimitSet is shared across workers (CRITICAL TEST).
+
+        1. Creates shared LimitSet with CallLimit (10 calls/sec, shared=True)
+        2. Creates two Counter workers (w1, w2) sharing same LimitSet
+        3. Makes 10 total calls (5 from w1, 5 from w2) - all share the 10 call limit
+        4. Verifies both workers use THE SAME LimitSet instance
+        5. Verifies all 10 calls complete successfully
+        6. Stops both workers
+
+        This validates limits are SHARED across workers in same process.
+        """
         # Skip process and ray modes - they use different shared limit implementations
         if worker_mode in ("process", "ray"):
             pytest.skip("InMemorySharedLimitSet is only for sync/thread/asyncio modes")
@@ -205,7 +242,17 @@ class TestSharedLimitSets:
         w2.stop()
 
     def test_shared_limitset_across_workers_process(self):
-        """Test that shared MultiprocessSharedLimitSet is shared across process workers."""
+        """Test that shared MultiprocessSharedLimitSet is shared across process workers (CRITICAL TEST).
+
+        1. Creates shared LimitSet for process mode (CallLimit, 10 calls/sec, shared=True)
+        2. Creates two Counter workers in SEPARATE processes (w1, w2)
+        3. Both workers share THE SAME LimitSet via multiprocessing.Manager()
+        4. Makes 10 total calls (5 from w1, 5 from w2) - all share the 10 call limit
+        5. Verifies all calls complete (limits enforced across processes)
+        6. Stops both workers
+
+        This validates limits are SHARED across SEPARATE PROCESSES using Manager().
+        """
 
         class Counter(Worker):
             def __init__(self):
@@ -242,7 +289,16 @@ class TestSharedLimitSets:
         w2.stop()
 
     def test_non_shared_limitset_not_shared(self):
-        """Test that passing list of Limits creates separate LimitSets for each worker."""
+        """Test that passing list of Limits creates separate LimitSets for each worker.
+
+        1. Passes list of Limits (not LimitSet) to two workers
+        2. Each worker creates its OWN PRIVATE LimitSet
+        3. Makes calls from both workers (w1, w2)
+        4. Verifies limits are NOT shared (each has independent limits)
+        5. Stops both workers
+
+        This validates that list[Limit] creates SEPARATE limit instances per worker.
+        """
 
         class Counter(Worker):
             def __init__(self):
@@ -280,7 +336,17 @@ class TestRayWorkerLimits:
     """
 
     def test_shared_limitset_across_ray_workers(self):
-        """Test that shared RaySharedLimitSet works across Ray workers."""
+        """Test that shared RaySharedLimitSet works across Ray workers (CRITICAL TEST).
+
+        1. Creates shared LimitSet for Ray mode (CallLimit, 10 calls/sec, shared=True)
+        2. Creates two Counter Ray actors (w1, w2) in SEPARATE Ray processes
+        3. Both actors share THE SAME LimitSet via Ray actor
+        4. Makes 10 total calls (5 from w1, 5 from w2) - all share the 10 call limit
+        5. Verifies all calls complete (limits enforced across Ray actors)
+        6. Stops both workers
+
+        This validates limits are SHARED across RAY ACTORS using RaySharedLimitSet.
+        """
         pytest.importorskip("ray")
         # Ray is initialized by conftest.py initialize_ray fixture
 
@@ -320,7 +386,18 @@ class TestMixedLimitTypes:
     """Test workers with multiple limit types."""
 
     def test_worker_with_call_and_rate_limits(self, worker_mode):
-        """Test worker with both CallLimit and RateLimit."""
+        """Test worker with both CallLimit and RateLimit.
+
+        1. Creates APIWorker with CallLimit (5 calls/sec) AND RateLimit (10 tokens/sec)
+        2. Makes 10 calls, each consuming 1 token
+        3. CallLimit: 10 calls / 5 per sec = ~2 seconds (BOTTLENECK)
+        4. RateLimit: 10 tokens / 10 per sec = ~1 second
+        5. Verifies elapsed time ~2 seconds (CallLimit is the bottleneck)
+        6. Verifies 10 calls made, 10 tokens consumed
+        7. Stops worker
+
+        This validates BOTH limit types are enforced simultaneously.
+        """
         # Skip ray mode - use separate ray test
         if worker_mode == "ray":
             pytest.skip("Ray mode has separate test")
@@ -524,7 +601,7 @@ class TestSharedLimitSetsWithConfig:
     def test_config_shared_across_workers_inmemory(self, worker_mode):
         """Test that multiple workers can access the same config from shared LimitSet."""
         # Skip process and ray modes - they use different shared limit implementations
-        if worker_mode in ("process", "ray"):
+        if worker_mode not in ("thread", "sync", "asyncio"):
             pytest.skip("InMemorySharedLimitSet is only for sync/thread/asyncio modes")
 
         class APIWorker(Worker):

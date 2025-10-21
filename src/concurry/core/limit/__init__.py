@@ -93,10 +93,7 @@ from .acquisition import Acquisition, LimitSetAcquisition
 from .limit import CallLimit, Limit, RateLimit, ResourceLimit
 from .limit_pool import LimitPool
 from .limit_set import LimitSet
-from ..algorithms.rate_limiting import (
-    BaseRateLimiter,
-    RateLimiter,
-)
+from ..algorithms import RateLimiter
 from ..constants import RateLimitAlgorithm
 
 __all__ = [
@@ -106,7 +103,6 @@ __all__ = [
     "CallLimit",
     "ResourceLimit",
     "RateLimitAlgorithm",
-    "BaseRateLimiter",
     # Acquisition
     "Acquisition",
     "LimitSetAcquisition",

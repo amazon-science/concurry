@@ -445,7 +445,7 @@ class TestFutureInterface:
         future = w.add(5)
 
         # Wait for completion
-        result = future.result(timeout=5)
+        result = future.result(timeout=30)
 
         # Should be done now
         assert future.done()

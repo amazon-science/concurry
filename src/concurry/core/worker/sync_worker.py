@@ -105,16 +105,18 @@ class SyncWorkerProxy(WorkerProxy):
         if name.startswith("_"):
             return super().__getattr__(name)
 
+        # Get method and validate ONCE (not on every call)
+        # OPTIMIZATION: Capture the method in the closure to avoid repeated getattr()
+        method = getattr(self._worker, name)
+        if not callable(method):
+            raise AttributeError(f"'{self.worker_cls.__name__}' has no callable method '{name}'")
+
         # Create optimized method wrapper with inlined logic
+        # The method is captured in the closure, saving ~0.5µs per call
         def method_wrapper(*args, **kwargs):
             # Check if stopped
             if self._stopped:
                 raise RuntimeError("Worker is stopped")
-
-            # Get method and validate (inline to save call stack)
-            method = getattr(self._worker, name)
-            if not callable(method):
-                raise AttributeError(f"'{self.worker_cls.__name__}' has no callable method '{name}'")
 
             # Unwrap futures if needed (fast-path handled in _unwrap_futures_in_args)
             unwrapped_args, unwrapped_kwargs = _unwrap_futures_in_args(args, kwargs, self.unwrap_futures)

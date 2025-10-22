@@ -1633,3 +1633,316 @@ class TestRetryConfigValidation:
                 num_retries=1,
                 retry_until=["not a callable"],
             ).init()
+
+
+# =============================================================================
+# Tests for Infrastructure Method Wrapping Bug (retry_until with Typed/BaseModel)
+# =============================================================================
+
+
+class TypedWorkerWithRetryUntil(Worker, Typed):
+    """Worker inheriting from Typed with retry_until configuration.
+
+    This tests the bug where infrastructure methods (post_initialize,
+    post_set_validate_inputs, etc.) were incorrectly wrapped with retry logic,
+    causing timeout during worker initialization.
+    """
+
+    name: str
+    multiplier: int = 2
+
+    def compute(self, x: int) -> int:
+        """User-defined method that should be wrapped."""
+        return x * self.multiplier
+
+
+class BaseModelWorkerWithRetryUntil(Worker, BaseModel):
+    """Worker inheriting from BaseModel with retry_until configuration.
+
+    Tests the same bug for BaseModel workers.
+    """
+
+    name: str = Field(default="test")
+    multiplier: int = Field(default=2)
+
+    def compute(self, x: int) -> int:
+        """User-defined method that should be wrapped."""
+        return x * self.multiplier
+
+
+class PlainWorkerWithRetryUntil(Worker):
+    """Plain worker (no Typed/BaseModel) with retry_until configuration.
+
+    Control test - should work fine since there are no infrastructure methods.
+    """
+
+    def __init__(self, multiplier: int = 2):
+        self.multiplier = multiplier
+
+    def compute(self, x: int) -> int:
+        """User-defined method that should be wrapped."""
+        return x * self.multiplier
+
+
+class TestRetryUntilWithTypedBaseModel:
+    """Test that retry_until works correctly with Typed and BaseModel workers.
+
+    Critical Bug Test: When retry_until is configured, retry logic wraps all public
+    methods. Previously, this incorrectly wrapped infrastructure methods like
+    post_set_validate_inputs, causing initialization failures.
+
+    This test suite verifies:
+    1. Workers with retry_until can be created successfully (all modes)
+    2. Infrastructure methods are NOT wrapped with retry logic
+    3. User methods ARE wrapped with retry logic
+    4. retry_until validation only applies to user methods
+    """
+
+    def test_typed_worker_with_retry_until_creates_successfully(self, worker_mode):
+        """Test that Typed workers with retry_until can be created.
+
+        This was the primary symptom of the bug - worker creation would timeout
+        because post_set_validate_inputs was being wrapped with retry logic.
+
+        Now works in ALL modes including Ray thanks to auto-composition wrapper!
+        """
+
+        def validate_result(result, **context):
+            """Simple validator that accepts any result."""
+            return True
+
+        # This should NOT timeout or fail (works in ALL modes now!)
+        w = TypedWorkerWithRetryUntil.options(
+            mode=worker_mode, num_retries=3, retry_until=validate_result
+        ).init(name="test", multiplier=2)
+
+        # Verify worker works correctly
+        future = w.compute(5)
+        result = future.result()
+        assert result == 10
+
+        w.stop()
+
+    def test_basemodel_worker_with_retry_until_creates_successfully(self, worker_mode):
+        """Test that BaseModel workers with retry_until can be created.
+
+        Now works in ALL modes including Ray thanks to auto-composition wrapper!
+        """
+
+        def validate_result(result, **context):
+            """Simple validator that accepts any result."""
+            return True
+
+        # This should NOT timeout or fail (works in ALL modes now!)
+        w = BaseModelWorkerWithRetryUntil.options(
+            mode=worker_mode, num_retries=3, retry_until=validate_result
+        ).init(name="test", multiplier=2)
+
+        # Verify worker works correctly
+        future = w.compute(5)
+        result = future.result()
+        assert result == 10
+
+        w.stop()
+
+    def test_plain_worker_with_retry_until_creates_successfully(self, worker_mode):
+        """Test that plain workers with retry_until work (control test)."""
+
+        def validate_result(result, **context):
+            """Simple validator that accepts any result."""
+            return True
+
+        w = PlainWorkerWithRetryUntil.options(
+            mode=worker_mode, num_retries=3, retry_until=validate_result
+        ).init(multiplier=2)
+
+        # Verify worker works correctly
+        future = w.compute(5)
+        result = future.result()
+        assert result == 10
+
+        w.stop()
+
+    def test_retry_until_only_validates_user_methods(self, worker_mode):
+        """Test that retry_until validators only see user method results."""
+        if worker_mode in ("process", "ray"):
+            pytest.skip("Cannot track validation calls across process/ray boundaries")
+
+        validation_calls = []
+
+        def track_validation(result, **context):
+            """Validator that tracks what it's called with."""
+            validation_calls.append({"result": result, "method_name": context.get("method_name")})
+            return True
+
+        w = TypedWorkerWithRetryUntil.options(
+            mode=worker_mode, num_retries=3, retry_until=track_validation
+        ).init(name="test", multiplier=2)
+
+        # Call user method
+        future = w.compute(5)
+        result = future.result()
+        assert result == 10
+
+        w.stop()
+
+        # Verify validator was called for user method
+        assert len(validation_calls) > 0
+        assert any(call["method_name"] == "compute" for call in validation_calls)
+
+        # Verify validator was NOT called for infrastructure methods
+        infrastructure_methods = [
+            "post_initialize",
+            "pre_initialize",
+            "post_set_validate_inputs",
+            "model_dump",
+        ]
+        for method in infrastructure_methods:
+            assert not any(call["method_name"] == method for call in validation_calls), (
+                f"Validator should not be called for infrastructure method {method}"
+            )
+
+    def test_retry_until_validation_failure_retries_user_methods(self, worker_mode):
+        """Test that retry_until failures trigger retries for user methods."""
+        if worker_mode in ("process", "ray"):
+            pytest.skip("Cannot track attempt count across process/ray boundaries")
+
+        attempt_count = 0
+
+        def failing_then_succeeding_validation(result, **context):
+            """Validator that fails first 2 times, then succeeds."""
+            nonlocal attempt_count
+            attempt_count += 1
+            return attempt_count >= 3  # Succeed on 3rd attempt
+
+        w = TypedWorkerWithRetryUntil.options(
+            mode=worker_mode,
+            num_retries=5,  # Allow enough retries
+            retry_until=failing_then_succeeding_validation,
+        ).init(name="test", multiplier=2)
+
+        # This should retry until validation passes
+        future = w.compute(5)
+        result = future.result()
+        assert result == 10
+
+        # Verify it took 3 attempts
+        assert attempt_count == 3
+
+        w.stop()
+
+    def test_typed_worker_pool_with_retry_until(self, pool_mode):
+        """Test that worker pools with Typed workers and retry_until work.
+
+        Now works in ALL pool modes including Ray!
+        """
+
+        def validate_result(result, **context):
+            """Simple validator."""
+            return result > 0
+
+        # Create pool with retry_until (works in ALL modes now!)
+        pool = TypedWorkerWithRetryUntil.options(
+            mode=pool_mode,
+            max_workers=3,
+            num_retries=2,
+            retry_until=validate_result,
+        ).init(name="test", multiplier=2)
+
+        # Submit multiple tasks
+        futures = [pool.compute(i) for i in range(1, 6)]
+        results = [f.result() for f in futures]
+
+        assert results == [2, 4, 6, 8, 10]
+
+        pool.stop()
+
+    def test_retry_until_with_limits_and_typed_worker(self, worker_mode):
+        """Test retry_until works with Limits and Typed workers.
+
+        Now works in ALL modes including Ray!
+        """
+        if worker_mode in ("sync", "asyncio"):
+            pytest.skip(f"{worker_mode} mode doesn't support shared limits")
+
+        def validate_result(result, **context):
+            """Simple validator."""
+            return True
+
+        limits = LimitSet(
+            limits=[
+                CallLimit(window_seconds=60, capacity=100),
+                RateLimit(key="tokens", window_seconds=60, capacity=1000),
+            ],
+            shared=True,
+            mode=worker_mode,
+        )
+
+        w = TypedWorkerWithRetryUntil.options(
+            mode=worker_mode,
+            num_retries=3,
+            retry_until=validate_result,
+            limits=limits,
+        ).init(name="test", multiplier=2)
+
+        # Method should work with both retry_until and limits (works in ALL modes now!)
+        future = w.compute(5)
+        result = future.result()
+        assert result == 10
+
+        w.stop()
+
+    def test_retry_until_signature_incorrect_raises_clear_error(self, worker_mode):
+        """Test that incorrect retry_until signature gives clear error.
+
+        This was part of the original bug - users would pass a function with
+        wrong signature and get confusing timeout errors.
+
+        Now works in ALL modes including Ray!
+        """
+
+        def wrong_signature(response: str) -> bool:
+            """Validator with wrong signature (missing **kwargs)."""
+            return True
+
+        w = TypedWorkerWithRetryUntil.options(
+            mode=worker_mode, num_retries=3, retry_until=wrong_signature
+        ).init(name="test", multiplier=2)
+
+        # Calling the method should fail with a clear error about signature
+        future = w.compute(5)
+        with pytest.raises(Exception) as exc_info:
+            future.result()
+
+        # Error should mention the signature issue
+        error_msg = str(exc_info.value).lower()
+        assert "unexpected keyword argument" in error_msg or "got an unexpected" in error_msg
+
+        w.stop()
+
+    def test_retry_until_with_all_retry_algorithms(self, worker_mode):
+        """Test retry_until works with all retry algorithms.
+
+        Now works in ALL modes including Ray!
+        """
+        for algorithm in [
+            RetryAlgorithm.Linear,
+            RetryAlgorithm.Exponential,
+            RetryAlgorithm.Fibonacci,
+        ]:
+
+            def validate_result(result, **context):
+                return True
+
+            w = TypedWorkerWithRetryUntil.options(
+                mode=worker_mode,
+                num_retries=2,
+                retry_algorithm=algorithm,
+                retry_until=validate_result,
+            ).init(name="test", multiplier=2)
+
+            future = w.compute(5)
+            result = future.result()
+            assert result == 10
+
+            w.stop()

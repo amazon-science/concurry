@@ -207,10 +207,10 @@ class RateLimit(Limit):
     def post_initialize(self) -> NoReturn:
         """Initialize the rate limiter implementation."""
         # Apply default algorithm from global config if not specified
-        if self.algorithm is _NO_ARG:
-            from ...config import global_config
+        from ...config import global_config
 
-            local_config = global_config.clone()
+        local_config = global_config.clone()
+        if self.algorithm is _NO_ARG:
             object.__setattr__(self, "algorithm", local_config.defaults.rate_limit_algorithm)
 
         # Convert max_rate from capacity per window to per second

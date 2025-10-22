@@ -217,6 +217,265 @@ def _validate_shared_limitset_mode_compatibility(limit_set: Any, worker_mode: Ex
     """
 
 
+def _should_use_composition_wrapper(worker_cls: Type) -> bool:
+    """Determine if a worker class should use composition wrapper.
+    
+    Workers that inherit from morphic.Typed or pydantic.BaseModel should use
+    composition wrappers to avoid conflicts with infrastructure methods and frozen models.
+    
+    This is applied for ALL execution modes to ensure consistent behavior and avoid
+    issues with:
+    - Infrastructure methods being wrapped with retry logic
+    - Frozen model constraints
+    - Serialization issues (Ray's __setattr__ conflicts)
+    
+    Note: Check Typed FIRST as it's a subclass of BaseModel.
+    
+    Args:
+        worker_cls: The worker class to check
+        
+    Returns:
+        True if composition wrapper should be used, False otherwise
+        
+    Example:
+        ```python
+        class MyWorker(Worker, Typed):
+            name: str
+            
+        assert _should_use_composition_wrapper(MyWorker) is True
+        
+        class PlainWorker(Worker):
+            def __init__(self):
+                pass
+                
+        assert _should_use_composition_wrapper(PlainWorker) is False
+        ```
+    """
+    # Check for Typed first (it extends BaseModel)
+    try:
+        from morphic import Typed
+        
+        if isinstance(worker_cls, type) and issubclass(worker_cls, Typed):
+            return True
+    except ImportError:
+        pass
+    
+    # Check for BaseModel
+    try:
+        from pydantic import BaseModel
+        
+        if isinstance(worker_cls, type) and issubclass(worker_cls, BaseModel):
+            return True
+    except ImportError:
+        pass
+    
+    return False
+
+
+def _is_infrastructure_method(
+    method_name: str,
+    _cache: dict = {},  # Mutable default for caching
+) -> bool:
+    """Check if a method is defined on infrastructure base classes (Typed/BaseModel).
+
+    This is used to avoid wrapping infrastructure methods with retry logic.
+    Only user-defined methods should be wrapped.
+
+    Uses caching for performance - the method sets from Typed/BaseModel are computed
+    once and reused for all subsequent calls. This is a fast O(1) set lookup.
+
+    Args:
+        method_name: Name of the method to check
+        _cache: Internal cache dict (do not pass explicitly)
+
+    Returns:
+        True if method is defined on Typed or BaseModel, False otherwise
+    """
+    # Initialize cache on first call
+    if len(_cache) == 0:
+        _cache["typed_methods"] = set()
+        _cache["basemodel_methods"] = set()
+        _cache["initialized"] = False
+
+    # Populate cache on first call
+    if not _cache["initialized"]:
+        # Import and cache Typed methods
+        try:
+            from morphic import Typed as TypedBase
+
+            _cache["typed_methods"] = set(TypedBase.__dict__.keys())
+        except ImportError:
+            pass
+
+        # Import and cache BaseModel methods
+        try:
+            from pydantic import BaseModel
+
+            _cache["basemodel_methods"] = set(BaseModel.__dict__.keys())
+        except ImportError:
+            pass
+
+        _cache["initialized"] = True
+
+    # Fast path: O(1) set lookup
+    if method_name in _cache["typed_methods"] or method_name in _cache["basemodel_methods"]:
+        return True
+
+    # Method not an infrastructure method
+    return False
+
+
+def _create_composition_wrapper(worker_cls: Type) -> Type:
+    """Create a composition wrapper for BaseModel/Typed workers.
+
+    This function automatically creates a composition-based wrapper that allows
+    BaseModel/Typed workers to work seamlessly across ALL execution modes. The wrapper:
+
+    1. Does NOT inherit from BaseModel/Typed (avoiding infrastructure method conflicts)
+    2. Uses composition pattern - holds BaseModel/Typed instance internally
+    3. Only exposes user-defined methods (infrastructure methods excluded)
+    4. Delegates method calls to the wrapped instance
+
+    This enables transparent support for workers that inherit from morphic.Typed
+    or pydantic.BaseModel across sync, thread, process, asyncio, and ray modes.
+
+    **Why Composition Instead of Inheritance?**
+
+    - **Avoids infrastructure method wrapping**: Retry logic won't wrap Pydantic methods
+    - **Cleaner separation**: User code separate from framework code
+    - **Ray compatibility**: No conflicts with Ray's actor wrapping
+    - **Consistent behavior**: Same code path for all execution modes
+
+    Args:
+        worker_cls: Original worker class (BaseModel/Typed subclass)
+
+    Returns:
+        Plain Python wrapper class using composition pattern
+
+    Example:
+        ```python
+        # Works seamlessly in ALL modes!
+        class MyWorker(Worker, Typed):
+            name: str
+            def process(self, x: int) -> int:
+                return x * 2
+
+        # Sync mode
+        w = MyWorker.options(mode="sync").init(name="test")
+        result = w.process(5).result()  # Works!
+
+        # Ray mode
+        w = MyWorker.options(mode="ray").init(name="test")
+        result = w.process(5).result()  # Works!
+        ```
+    """
+    # Import Worker class for inheritance
+    # We need to import it locally to avoid circular imports
+    from . import Worker as WorkerBase
+
+    class CompositionWrapper(WorkerBase):
+        """Auto-generated composition wrapper for BaseModel/Typed workers.
+
+        This wrapper holds a BaseModel/Typed instance internally and delegates
+        user-defined method calls to it. Infrastructure methods are not exposed.
+
+        Inherits from Worker to satisfy worker_cls validation and enable
+        seamless integration across all execution modes.
+        """
+
+        def __init__(self, *args, **kwargs):
+            """Initialize by creating the wrapped BaseModel/Typed instance."""
+            # Don't call super().__init__() since Worker base class doesn't define __init__
+            # Create the actual BaseModel/Typed instance internally
+            # This happens inside the Ray actor, so serialization is fine
+            self._wrapped_instance = worker_cls(*args, **kwargs)
+
+        def __getattr__(self, name: str):
+            """Delegate attribute access to wrapped instance.
+
+            Only allows access to user-defined methods, not infrastructure methods.
+            This prevents Ray from trying to serialize infrastructure methods.
+            """
+            # Block access to infrastructure methods
+            if _is_infrastructure_method(name):
+                raise AttributeError(
+                    f"Infrastructure method '{name}' not available in Ray wrapper. "
+                    f"Only user-defined methods are exposed for Ray compatibility."
+                )
+
+            # Delegate to wrapped instance
+            return getattr(self._wrapped_instance, name)
+
+    # Copy all user-defined methods to the wrapper class
+    # This makes them "real" methods on the wrapper, not just __getattr__ lookups
+    for attr_name in dir(worker_cls):
+        # Skip private/dunder methods
+        if attr_name.startswith("_"):
+            continue
+
+        # Skip infrastructure methods
+        if _is_infrastructure_method(attr_name):
+            continue
+
+        # Only process methods defined directly on worker class (not inherited)
+        if attr_name not in worker_cls.__dict__:
+            continue
+
+        attr = getattr(worker_cls, attr_name)
+
+        # Only process callable methods
+        if not callable(attr):
+            continue
+
+        # Skip if it's a class or type
+        if isinstance(attr, type):
+            continue
+
+        # Create a delegating method (async if original is async)
+        # OPTIMIZATION: Capture the unbound method from the original class to avoid
+        # repeated getattr() calls. This is critical for performance in tight loops.
+        def make_method(method_name, is_async, unbound_method):
+            """Create a method that delegates to the wrapped instance.
+            
+            Uses the captured unbound method and binds it directly to _wrapped_instance
+            to avoid slow getattr() lookup on every call.
+            """
+            
+            if is_async:
+                async def async_delegating_method(self, *args, **kwargs):
+                    # Fast path: Call unbound method with wrapped instance directly
+                    # This avoids getattr() overhead (~200ns per call saved)
+                    return await unbound_method(self._wrapped_instance, *args, **kwargs)
+                
+                async_delegating_method.__name__ = method_name
+                async_delegating_method.__qualname__ = f"CompositionWrapper.{method_name}"
+                return async_delegating_method
+            else:
+                def delegating_method(self, *args, **kwargs):
+                    # Fast path: Call unbound method with wrapped instance directly
+                    # This avoids getattr() overhead (~200ns per call saved)
+                    return unbound_method(self._wrapped_instance, *args, **kwargs)
+
+                delegating_method.__name__ = method_name
+                delegating_method.__qualname__ = f"CompositionWrapper.{method_name}"
+                return delegating_method
+
+        # Check if method is async
+        import inspect
+        is_async_method = inspect.iscoroutinefunction(attr)
+        
+        # Add the delegating method to the wrapper class
+        # Pass the unbound method to avoid getattr() on every call
+        setattr(CompositionWrapper, attr_name, make_method(attr_name, is_async_method, attr))
+
+    # Set wrapper class name for debugging
+    CompositionWrapper.__name__ = f"{worker_cls.__name__}_CompositionWrapper"
+    CompositionWrapper.__qualname__ = f"{worker_cls.__qualname__}_CompositionWrapper"
+    CompositionWrapper.__module__ = worker_cls.__module__
+
+    return CompositionWrapper
+
+
 def _create_worker_wrapper(
     worker_cls: Type, limits: Any, retry_config: Optional[Any] = None, for_ray: bool = False
 ) -> Type:
@@ -301,7 +560,12 @@ def _create_worker_wrapper(
 
                 # Use object.__setattr__ to bypass frozen models (Typed/BaseModel)
                 # This allows limits to work with frozen Pydantic models
-                object.__setattr__(self, "limits", limit_pool)
+                # IMPORTANT: If this is a composition wrapper (Ray compatibility),
+                # set limits on the wrapped instance where user methods execute
+                if hasattr(self, "_wrapped_instance"):
+                    object.__setattr__(self._wrapped_instance, "limits", limit_pool)
+                else:
+                    object.__setattr__(self, "limits", limit_pool)
 
         WorkerWithLimits.__name__ = f"{worker_cls.__name__}_WithLimits"
         WorkerWithLimits.__qualname__ = f"{worker_cls.__qualname__}_WithLimits"
@@ -330,7 +594,12 @@ def _create_worker_wrapper(
 
             # Use object.__setattr__ to bypass frozen models (Typed/BaseModel)
             # This allows limits to work with frozen Pydantic models
-            object.__setattr__(self, "limits", limit_pool)
+            # IMPORTANT: If this is a composition wrapper (Ray compatibility),
+            # set limits on the wrapped instance where user methods execute
+            if hasattr(self, "_wrapped_instance"):
+                object.__setattr__(self._wrapped_instance, "limits", limit_pool)
+            else:
+                object.__setattr__(self, "limits", limit_pool)
 
         def __getattribute__(self, name: str):
             """Intercept method calls and wrap with retry logic if configured."""
@@ -346,6 +615,9 @@ def _create_worker_wrapper(
                 and callable(attr)
                 and not isinstance(attr, type)
             ):
+                # For composition wrappers (Typed/BaseModel), infrastructure methods
+                # are already filtered out - only user-defined methods are exposed
+                
                 # Check if this method has already been wrapped
                 # (to avoid double-wrapping on repeated access)
                 if hasattr(attr, "__wrapped_with_retry__"):
@@ -377,6 +649,8 @@ def _create_worker_wrapper(
         import inspect
 
         # Get methods defined directly on the worker class (not inherited)
+        # For composition wrappers (Typed/BaseModel), only user-defined methods
+        # are exposed, so infrastructure methods are already filtered out
         for attr_name in dir(worker_cls):
             # Skip private/dunder methods
             if attr_name.startswith("_"):
@@ -630,56 +904,29 @@ class WorkerBuilder(Typed):
 
         return False
 
-    def _check_ray_pydantic_compatibility(self, execution_mode: ExecutionMode) -> None:
-        """Check for Ray + Pydantic incompatibility and raise/warn appropriately.
+    def _apply_composition_wrapper_if_needed(self) -> None:
+        """Apply composition wrapper for Typed/BaseModel workers across ALL modes.
 
-        Args:
-            execution_mode: The execution mode being used
+        Workers that inherit from morphic.Typed or pydantic.BaseModel use composition
+        wrappers to avoid conflicts with infrastructure methods, frozen model constraints,
+        and serialization issues.
 
-        Raises:
-            ValueError: If trying to create Ray worker with Pydantic-based class
+        This is applied for ALL execution modes (sync, thread, process, asyncio, ray)
+        to ensure consistent behavior and avoid:
+        - Infrastructure methods being wrapped with retry logic
+        - Frozen model constraints
+        - Ray's __setattr__ conflicts with Pydantic
+
+        The composition wrapper transparently delegates to the wrapped instance, making
+        this transformation invisible to user code.
         """
-        try:
-            from pydantic import BaseModel
-        except ImportError:
-            # Pydantic not installed, no issue
+        # Check if this worker class should use composition wrapper
+        if not _should_use_composition_wrapper(self.worker_cls):
             return
 
-        # Check if worker class is a Pydantic BaseModel subclass
-        is_pydantic_based = isinstance(self.worker_cls, type) and issubclass(self.worker_cls, BaseModel)
-
-        if not is_pydantic_based:
-            return
-
-        # Issue warning if Ray is installed (even if not using Ray mode)
-        try:
-            import ray
-
-            if execution_mode != ExecutionMode.Ray:
-                # Warn that Ray mode won't work with this worker
-                warnings.warn(
-                    f"Worker class '{self.worker_cls.__name__}' inherits from Pydantic BaseModel. "
-                    f"This worker will NOT be compatible with Ray mode due to Ray's actor wrapping "
-                    f"conflicting with Pydantic's __setattr__. Consider using composition instead of "
-                    f"inheritance if you need Ray support.",
-                    UserWarning,
-                    stacklevel=5,
-                )
-        except ImportError:
-            # Ray not installed, no warning needed
-            pass
-
-        # Raise error if actually trying to use Ray mode
-        if execution_mode == ExecutionMode.Ray:
-            raise ValueError(
-                f"Cannot create Ray worker with Pydantic-based class '{self.worker_cls.__name__}'. "
-                f"Ray's actor wrapping mechanism conflicts with Pydantic's __setattr__ implementation. "
-                f"\n\nWorkaround: Use composition instead of inheritance:\n"
-                f"  class {self.worker_cls.__name__}(Worker):\n"
-                f"      def __init__(self, ...):\n"
-                f"          self.config = YourPydanticModel(...)\n"
-                f"\nThis applies to both morphic.Typed and pydantic.BaseModel."
-            )
+        # Create composition wrapper for ALL modes
+        original_cls = self.worker_cls
+        object.__setattr__(self, "worker_cls", _create_composition_wrapper(self.worker_cls))
 
     def init(self, *args: Any, **kwargs: Any) -> Any:
         """Initialize the worker instance with initialization arguments.
@@ -735,8 +982,8 @@ class WorkerBuilder(Typed):
         # Convert mode string to ExecutionMode
         execution_mode = self.mode
 
-        # Check for Ray + Pydantic incompatibility
-        self._check_ray_pydantic_compatibility(execution_mode)
+        # Apply composition wrapper for Typed/BaseModel workers (all modes)
+        self._apply_composition_wrapper_if_needed()
 
         # Select appropriate proxy class
         if execution_mode == ExecutionMode.Sync:
@@ -835,8 +1082,8 @@ class WorkerBuilder(Typed):
         # Convert mode string to ExecutionMode
         execution_mode = ExecutionMode(self.mode)
 
-        # Check for Ray + Pydantic incompatibility
-        self._check_ray_pydantic_compatibility(execution_mode)
+        # Apply composition wrapper for Typed/BaseModel workers (all modes)
+        self._apply_composition_wrapper_if_needed()
 
         # Process limits for pool (always, even if None - creates empty LimitPool)
         # Note: worker_index will be assigned per-worker in pool initialization

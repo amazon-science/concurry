@@ -4,6 +4,7 @@ from typing import Literal
 
 from .frameworks import _IS_IPYWIDGETS_INSTALLED, _IS_RAY_INSTALLED, RayContext
 from .progress import ProgressBar
+from .timer import Timer, TimerError
 
 # Sentinel value to distinguish "no argument provided" from "None provided"
 # This is useful when a function parameter can legitimately be None, but you need
@@ -23,6 +24,8 @@ _NO_ARG_TYPE = Literal[_NO_ARG]
 
 __all__ = [
     "ProgressBar",
+    "Timer",
+    "TimerError",
     "_IS_IPYWIDGETS_INSTALLED",
     "_IS_RAY_INSTALLED",
     "RayContext",

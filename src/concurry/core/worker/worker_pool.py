@@ -15,6 +15,7 @@ from pydantic import PrivateAttr, confloat, conint
 from ..algorithms.load_balancing import LoadBalancer
 from ..constants import ExecutionMode, LoadBalancingAlgorithm
 from ..future import BaseFuture
+from ..retry import RetryConfig
 from .base_worker import Worker, _transform_worker_limits
 
 
@@ -129,7 +130,15 @@ class WorkerProxyPool(Typed, ABC):
             ```
     """
 
-    # Public fields (immutable after creation)
+    # ========================================================================
+    # PUBLIC ATTRIBUTES - NO DEFAULTS ALLOWED
+    # All values must be passed from WorkerBuilder (with defafults picked from
+    # global_config)
+    # ========================================================================
+    # CRITICAL: Public attributes MUST NOT have default values.
+    # All values must be explicitly passed from WorkerBuilder, which resolves
+    # defaults from global_config. This ensures all defaults are centralized
+    # and can be overridden globally via temp_config().
     worker_cls: Type[Worker]
     mode: ExecutionMode
     max_workers: conint(ge=0)
@@ -138,12 +147,12 @@ class WorkerProxyPool(Typed, ABC):
     blocking: bool
     unwrap_futures: bool
     limits: Optional[Any]  # Shared LimitSet (processed by WorkerBuilder)
-    retry_config: Optional[Any] = None  # RetryConfig instance (processed by WorkerBuilder)
-    max_queued_tasks: Optional[conint(ge=0)] = None  # Default comes from global_config
+    retry_config: Optional[RetryConfig]
+    max_queued_tasks: Optional[conint(ge=0)]
     init_args: tuple
     init_kwargs: dict
 
-    # Configuration (NO defaults - values passed from WorkerBuilder via global config)
+    # On-demand configuration (values passed from WorkerBuilder via global config)
     on_demand_cleanup_timeout: confloat(ge=0)
     on_demand_slot_max_wait: confloat(ge=0)
 

@@ -7,7 +7,7 @@ from typing import Any, Callable, ClassVar, Optional, Type, TypeVar, Union
 
 from morphic import Typed, validate
 from morphic.structs import map_collection
-from pydantic import ConfigDict, PrivateAttr, confloat, conint
+from pydantic import PrivateAttr, confloat, conint
 
 from ...utils import _NO_ARG, _NO_ARG_TYPE
 from ..constants import ExecutionMode, LoadBalancingAlgorithm
@@ -219,56 +219,56 @@ def _validate_shared_limitset_mode_compatibility(limit_set: Any, worker_mode: Ex
 
 def _should_use_composition_wrapper(worker_cls: Type) -> bool:
     """Determine if a worker class should use composition wrapper.
-    
+
     Workers that inherit from morphic.Typed or pydantic.BaseModel should use
     composition wrappers to avoid conflicts with infrastructure methods and frozen models.
-    
+
     This is applied for ALL execution modes to ensure consistent behavior and avoid
     issues with:
     - Infrastructure methods being wrapped with retry logic
     - Frozen model constraints
     - Serialization issues (Ray's __setattr__ conflicts)
-    
+
     Note: Check Typed FIRST as it's a subclass of BaseModel.
-    
+
     Args:
         worker_cls: The worker class to check
-        
+
     Returns:
         True if composition wrapper should be used, False otherwise
-        
+
     Example:
         ```python
         class MyWorker(Worker, Typed):
             name: str
-            
+
         assert _should_use_composition_wrapper(MyWorker) is True
-        
+
         class PlainWorker(Worker):
             def __init__(self):
                 pass
-                
+
         assert _should_use_composition_wrapper(PlainWorker) is False
         ```
     """
     # Check for Typed first (it extends BaseModel)
     try:
         from morphic import Typed
-        
+
         if isinstance(worker_cls, type) and issubclass(worker_cls, Typed):
             return True
     except ImportError:
         pass
-    
+
     # Check for BaseModel
     try:
         from pydantic import BaseModel
-        
+
         if isinstance(worker_cls, type) and issubclass(worker_cls, BaseModel):
             return True
     except ImportError:
         pass
-    
+
     return False
 
 
@@ -436,21 +436,23 @@ def _create_composition_wrapper(worker_cls: Type) -> Type:
         # repeated getattr() calls. This is critical for performance in tight loops.
         def make_method(method_name, is_async, unbound_method):
             """Create a method that delegates to the wrapped instance.
-            
+
             Uses the captured unbound method and binds it directly to _wrapped_instance
             to avoid slow getattr() lookup on every call.
             """
-            
+
             if is_async:
+
                 async def async_delegating_method(self, *args, **kwargs):
                     # Fast path: Call unbound method with wrapped instance directly
                     # This avoids getattr() overhead (~200ns per call saved)
                     return await unbound_method(self._wrapped_instance, *args, **kwargs)
-                
+
                 async_delegating_method.__name__ = method_name
                 async_delegating_method.__qualname__ = f"CompositionWrapper.{method_name}"
                 return async_delegating_method
             else:
+
                 def delegating_method(self, *args, **kwargs):
                     # Fast path: Call unbound method with wrapped instance directly
                     # This avoids getattr() overhead (~200ns per call saved)
@@ -462,8 +464,9 @@ def _create_composition_wrapper(worker_cls: Type) -> Type:
 
         # Check if method is async
         import inspect
+
         is_async_method = inspect.iscoroutinefunction(attr)
-        
+
         # Add the delegating method to the wrapper class
         # Pass the unbound method to avoid getattr() on every call
         setattr(CompositionWrapper, attr_name, make_method(attr_name, is_async_method, attr))
@@ -617,7 +620,7 @@ def _create_worker_wrapper(
             ):
                 # For composition wrappers (Typed/BaseModel), infrastructure methods
                 # are already filtered out - only user-defined methods are exposed
-                
+
                 # Check if this method has already been wrapped
                 # (to avoid double-wrapping on repeated access)
                 if hasattr(attr, "__wrapped_with_retry__"):
@@ -804,7 +807,15 @@ class WorkerBuilder(Typed):
     provides immutable configuration with validation.
     """
 
-    # Public configuration fields (immutable after creation)
+    # ========================================================================
+    # PUBLIC CONFIGURATION FIELDS - NO DEFAULTS ALLOWED
+    # All values must be explicitly passed from Worker.options()
+    # ========================================================================
+    # CRITICAL: Public attributes MUST NOT have default values.
+    # All defaults come from global_config and are applied in Worker.options()
+    # ========================================================================
+
+    # Core worker configuration
     worker_cls: Type["Worker"]
     mode: ExecutionMode
     blocking: bool
@@ -812,6 +823,7 @@ class WorkerBuilder(Typed):
     load_balancing: LoadBalancingAlgorithm
     on_demand: bool
     max_queued_tasks: Optional[conint(ge=0)]
+
     # Retry parameters
     num_retries: conint(ge=0)
     retry_on: Any  # List of exception types or callables, default [Exception]
@@ -819,8 +831,16 @@ class WorkerBuilder(Typed):
     retry_wait: confloat(ge=0)
     retry_jitter: confloat(ge=0, le=1)
     retry_until: Optional[Any]  # Truly optional, default None
-    # Extra options dictionary
-    options: dict[str, Any]
+
+    # Worker-level configuration
+    unwrap_futures: bool
+    limits: Optional[Any]  # LimitSet, List[Limit], or None
+
+    # Mode-specific options (passed through to worker implementation)
+    # For Ray: num_cpus, num_gpus, resources, actor_options, etc.
+    # For Process: mp_context (fork, spawn, forkserver)
+    # These are passed as-is without validation
+    mode_options: dict[str, Any]
 
     @classmethod
     def pre_initialize(cls, data: dict) -> None:
@@ -829,13 +849,13 @@ class WorkerBuilder(Typed):
         This method is called by Typed before field validation.
         """
         # Check for deprecated parameters
-        if "init_args" in data.get("options", {}):
+        if "init_args" in data:
             raise ValueError(
                 "The 'init_args' parameter is no longer supported. "
                 "Use .init(*args) instead. "
                 "Example: Worker.options(mode='thread').init(arg1, arg2)"
             )
-        if "init_kwargs" in data.get("options", {}):
+        if "init_kwargs" in data:
             raise ValueError(
                 "The 'init_kwargs' parameter is no longer supported. "
                 "Use .init(**kwargs) instead. "
@@ -1014,47 +1034,49 @@ class WorkerBuilder(Typed):
             )
 
         # Process limits (always, even if None - creates empty LimitPool)
-        processed_options = dict(self.options)
-        processed_options["limits"] = _transform_worker_limits(
-            limits=processed_options.get("limits"),
+        limits = _transform_worker_limits(
+            limits=self.limits,
             mode=execution_mode,
             is_pool=False,
             worker_index=0,  # Single workers use index 0
         )
 
-        # Create retry config if needed
+        # Create retry config (always pass it, even if None)
         retry_config = self._create_retry_config()
-        if retry_config is not None:
-            processed_options["retry_config"] = retry_config
 
         # Get mode defaults for worker timeouts (from global config)
         mode_defaults = local_config.get_defaults(execution_mode)
 
-        # Pass mode-specific timeouts to proxy (based on execution mode)
+        # Build kwargs with only known proxy fields
+        proxy_kwargs = {
+            "worker_cls": self.worker_cls,
+            "init_args": args,
+            "init_kwargs": kwargs,
+            "blocking": self.blocking,
+            "max_queued_tasks": self.max_queued_tasks,
+            "unwrap_futures": self.unwrap_futures,
+            "limits": limits,
+            "retry_config": retry_config,
+        }
+
+        # Add mode-specific timeout fields
         if execution_mode == ExecutionMode.Threads:
-            processed_options["command_queue_timeout"] = mode_defaults.worker_command_queue_timeout
+            proxy_kwargs["command_queue_timeout"] = mode_defaults.worker_command_queue_timeout
         elif execution_mode == ExecutionMode.Asyncio:
-            processed_options["loop_ready_timeout"] = mode_defaults.worker_loop_ready_timeout
-            processed_options["thread_ready_timeout"] = mode_defaults.worker_thread_ready_timeout
-            processed_options["sync_queue_timeout"] = mode_defaults.worker_sync_queue_timeout
+            proxy_kwargs["loop_ready_timeout"] = mode_defaults.worker_loop_ready_timeout
+            proxy_kwargs["thread_ready_timeout"] = mode_defaults.worker_thread_ready_timeout
+            proxy_kwargs["sync_queue_timeout"] = mode_defaults.worker_sync_queue_timeout
         elif execution_mode == ExecutionMode.Processes:
-            processed_options["result_queue_timeout"] = mode_defaults.worker_result_queue_timeout
-            processed_options["result_queue_cleanup_timeout"] = (
-                mode_defaults.worker_result_queue_cleanup_timeout
-            )
+            proxy_kwargs["result_queue_timeout"] = mode_defaults.worker_result_queue_timeout
+            proxy_kwargs["result_queue_cleanup_timeout"] = mode_defaults.worker_result_queue_cleanup_timeout
         # Sync and Ray modes have no worker-specific timeouts
 
-        # Create proxy with init args/kwargs
-        # Typed expects all parameters as keyword arguments
-        # Note: mode is NOT passed - it's a class variable set by each proxy subclass
-        return proxy_cls(
-            worker_cls=self.worker_cls,
-            init_args=args,
-            init_kwargs=kwargs,
-            blocking=self.blocking,
-            max_queued_tasks=self.max_queued_tasks,
-            **processed_options,
-        )
+        # Merge mode_options (pass through as-is to proxy)
+        # For Ray: actor_options, num_cpus, num_gpus, resources, etc.
+        # For Process: mp_context (fork, spawn, forkserver)
+        proxy_kwargs.update(self.mode_options)
+
+        return proxy_cls(**proxy_kwargs)
 
     def _create_pool(self, args: tuple, kwargs: dict) -> Any:
         """Create a worker pool.
@@ -1088,20 +1110,14 @@ class WorkerBuilder(Typed):
         # Process limits for pool (always, even if None - creates empty LimitPool)
         # Note: worker_index will be assigned per-worker in pool initialization
         limits = _transform_worker_limits(
-            limits=self.options.get("limits"),
+            limits=self.limits,
             mode=execution_mode,
             is_pool=True,
             worker_index=0,  # Placeholder, actual indices assigned per worker
         )
 
-        # Update options with processed limits
-        pool_options = dict(self.options)
-        pool_options["limits"] = limits
-
-        # Create retry config if needed
+        # Create retry config (always pass it, even if None)
         retry_config = self._create_retry_config()
-        if retry_config is not None:
-            pool_options["retry_config"] = retry_config
 
         # Select appropriate pool class
         if execution_mode in (ExecutionMode.Sync, ExecutionMode.Asyncio, ExecutionMode.Threads):
@@ -1134,25 +1150,30 @@ class WorkerBuilder(Typed):
         if max_workers is None:
             max_workers = mode_defaults.max_workers
 
-        # Pass pool-specific timeouts (all modes with pools need these for on-demand workers)
-        pool_options["on_demand_cleanup_timeout"] = mode_defaults.pool_on_demand_cleanup_timeout
-        pool_options["on_demand_slot_max_wait"] = mode_defaults.pool_on_demand_slot_max_wait
+        # Create pool instance with known pool fields + mode_options
+        pool_kwargs = {
+            "worker_cls": self.worker_cls,
+            "mode": execution_mode,
+            "max_workers": max_workers,
+            "load_balancing": self.load_balancing,
+            "on_demand": self.on_demand,
+            "blocking": self.blocking,
+            "max_queued_tasks": self.max_queued_tasks,
+            "unwrap_futures": self.unwrap_futures,
+            "limits": limits,
+            "retry_config": retry_config,
+            "init_args": args,
+            "init_kwargs": kwargs,
+            "on_demand_cleanup_timeout": mode_defaults.pool_on_demand_cleanup_timeout,
+            "on_demand_slot_max_wait": mode_defaults.pool_on_demand_slot_max_wait,
+        }
 
-        # Create pool instance
-        return pool_cls(
-            worker_cls=self.worker_cls,
-            mode=execution_mode,
-            max_workers=max_workers,
-            load_balancing=self.load_balancing,
-            on_demand=self.on_demand,
-            blocking=self.blocking,
-            max_queued_tasks=self.max_queued_tasks,
-            unwrap_futures=self.options.get("unwrap_futures", True),
-            limits=limits,
-            init_args=args,
-            init_kwargs=kwargs,
-            **{k: v for k, v in pool_options.items() if k not in ("limits", "unwrap_futures")},
-        )
+        # Merge mode_options (pass through as-is to pool)
+        # For Ray: actor_options, num_cpus, num_gpus, resources, etc.
+        # For Process: mp_context (fork, spawn, forkserver)
+        pool_kwargs.update(self.mode_options)
+
+        return pool_cls(**pool_kwargs)
 
 
 class Worker:
@@ -1884,9 +1905,16 @@ class Worker:
         if retry_jitter is _NO_ARG:
             retry_jitter = mode_defaults.retry_jitter
 
-        # Apply default for unwrap_futures if not in kwargs
-        if "unwrap_futures" not in kwargs:
-            kwargs["unwrap_futures"] = mode_defaults.unwrap_futures
+        # Extract unwrap_futures from kwargs (with default)
+        unwrap_futures = kwargs.pop("unwrap_futures", mode_defaults.unwrap_futures)
+
+        # Extract limits from kwargs
+        limits = kwargs.pop("limits", None)
+
+        # Everything else in kwargs is mode-specific options (passed through as-is)
+        # For Ray: actor_options dict containing num_cpus, num_gpus, resources, etc.
+        # For Process: mp_context (fork, spawn, forkserver)
+        mode_options = kwargs  # Pass through all remaining kwargs
 
         # Apply default for retry_on if None (default is [Exception])
         if retry_on is None:
@@ -1906,7 +1934,9 @@ class Worker:
             retry_wait=retry_wait,
             retry_jitter=retry_jitter,
             retry_until=retry_until,
-            options=kwargs,  # Pass **kwargs as options dict
+            unwrap_futures=unwrap_futures,
+            limits=limits,
+            mode_options=mode_options,
         )
 
     def __new__(cls, *args, **kwargs):
@@ -2013,7 +2043,9 @@ class WorkerProxy(Typed, ABC):
 
         class CustomWorkerProxy(WorkerProxy):
             # Public fields (immutable after creation)
-            custom_option: str = "default"
+            # NOTE: DO NOT add defaults to public fields!
+            # All values must be passed from WorkerBuilder via global_config
+            custom_option: str
 
             # Private attributes (mutable, type-checked)
             _custom_state: int = PrivateAttr()
@@ -2024,41 +2056,45 @@ class WorkerProxy(Typed, ABC):
                 self._custom_state = 0
                 self._custom_resource = SomeNonSerializableObject()
         ```
+
+    **CRITICAL: No Default Values on Public Attributes**
+
+    Public attributes (those without _ prefix) MUST NOT have default values.
+    All values must be explicitly passed from WorkerBuilder, which resolves defaults
+    from global_config. This ensures:
+    1. All defaults are centralized in global_config
+    2. Users can override defaults globally via temp_config()
+    3. Mode-specific defaults are correctly applied
+
+    Private attributes (prefixed with _) can and should have defaults via PrivateAttr().
     """
 
-    # Override Typed's config to allow extra fields
-    model_config = ConfigDict(
-        extra="allow",  # Allow extra fields beyond defined ones
-        frozen=True,
-        validate_default=True,
-        arbitrary_types_allowed=True,
-        validate_assignment=False,
-        validate_private_assignment=True,
-    )
-
-    worker_cls: Type[Worker]
-    blocking: bool = False
-    unwrap_futures: bool = True
-    init_args: tuple = ()
-    init_kwargs: dict = {}
-    limits: Optional[Any] = None  # LimitSet instance (processed by WorkerBuilder)
-    retry_config: Optional[Any] = None  # RetryConfig instance (processed by WorkerBuilder)
-    max_queued_tasks: Optional[conint(ge=0)] = None
+    # NOTE: model_config is NOT to be overridden - we use Typed's default config
     mode: ClassVar[ExecutionMode]  # ExecutionMode (set by subclasses as class variable)
 
-    # Private attributes (defined with PrivateAttr, initialized in post_initialize)
+    # ========================================================================
+    # PUBLIC ATTRIBUTES - NO DEFAULTS ALLOWED
+    # All values must be passed from WorkerBuilder (with defaults picked from
+    # global_config)
+    # ========================================================================
+    worker_cls: Type[Worker]
+    blocking: bool
+    unwrap_futures: bool
+    init_args: tuple
+    init_kwargs: dict
+    limits: Optional[Any]  # Possibly non-shared LimitSet instance (processed by WorkerBuilder)
+    retry_config: Optional[RetryConfig]
+    max_queued_tasks: Optional[conint(ge=0)]
+
+    # ========================================================================
+    # PRIVATE ATTRIBUTES - Defaults via PrivateAttr() are okay
+    # ========================================================================
     _stopped: bool = PrivateAttr(default=False)
-    _options: dict[str, Any] = PrivateAttr(default_factory=dict)
     _method_cache: dict[str, Any] = PrivateAttr(default_factory=dict)
     _submission_semaphore: Optional[Any] = PrivateAttr(default=None)
 
     def post_initialize(self) -> None:
         """Initialize private attributes after Typed validation."""
-        # Capture any extra fields that weren't explicitly defined
-        # Pydantic stores extra fields in __pydantic_extra__
-        if hasattr(self, "__pydantic_extra__") and self.__pydantic_extra__:
-            self._options = dict(self.__pydantic_extra__)
-
         # Initialize submission queue semaphore
         # Skip if blocking mode, sync mode, asyncio mode, or max_queued_tasks is None (bypass queuing)
         # AsyncIO workers benefit from unlimited concurrent submissions since they handle

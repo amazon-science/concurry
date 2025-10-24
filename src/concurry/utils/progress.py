@@ -221,13 +221,19 @@ class ProgressBar:
     ) -> TqdmProgressBar:
         """Create a tqdm progress bar with the specified style."""
         if style == "auto":
+            # When ipywidgets is not installed, force standard tqdm to avoid notebook.py issues
             if _IS_IPYWIDGETS_INSTALLED:
                 kwargs["ncols"]: Optional[int] = None
-            return AutoTqdmProgressBar(**kwargs)
+                return AutoTqdmProgressBar(**kwargs)
+            else:
+                return StdTqdmProgressBar(**kwargs)
         elif style == "notebook":
+            # When ipywidgets is not installed, force standard tqdm to avoid notebook.py issues
             if _IS_IPYWIDGETS_INSTALLED:
                 kwargs["ncols"]: Optional[int] = None
-            return NotebookTqdmProgressBar(**kwargs)
+                return NotebookTqdmProgressBar(**kwargs)
+            else:
+                return StdTqdmProgressBar(**kwargs)
         elif _IS_RAY_INSTALLED and style == "ray":
             from ray.experimental import tqdm_ray
 
@@ -526,14 +532,30 @@ class ProgressBar:
                 pbar.close()  # Ensure cleanup
             ```
         """
-        self.pbar.refresh()
-        self.pbar.close()
-        self.pbar.refresh()
+        try:
+            self.pbar.refresh()
+            self.pbar.close()
+            self.pbar.refresh()
+        except AttributeError:
+            # Handle cases where tqdm.notebook doesn't have properly initialized disp method
+            # This can happen when ipywidgets is installed but not properly configured
+            try:
+                # Try to close without the refresh
+                self.pbar.close()
+            except (AttributeError, Exception):
+                # If that fails too, just pass - the progress bar will be cleaned up by GC
+                pass
 
     def __del__(self) -> None:
         """Clean up the progress bar when the object is deleted."""
         if hasattr(self, "pbar") and self.pbar is not None:
-            self.pbar.close()
+            try:
+                self.pbar.close()
+            except (AttributeError, Exception):
+                # Handle cases where tqdm.notebook doesn't have properly initialized disp method
+                # This can happen when ipywidgets is installed but not properly configured
+                # Silently ignore the error during cleanup to avoid polluting stderr
+                pass
 
     def __getattr__(self, name: str) -> Any:
         """Handle access to extra fields."""

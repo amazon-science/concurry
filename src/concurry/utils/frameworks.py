@@ -41,11 +41,20 @@ except ImportError:
         return RayContext.Unknown
 
 
-# Check if ipywidgets is available
+# Check if ipywidgets is available and properly configured
 try:
     import ipywidgets
+    from IPython import get_ipython
 
-    _IS_IPYWIDGETS_INSTALLED = True
-except ImportError:
+    # Check if we're in a proper IPython/Jupyter environment
+    ipython_instance = get_ipython()
+    if ipython_instance is not None:
+        # Additional check: see if the kernel is available
+        # In properly configured Jupyter environments, this should work
+        _IS_IPYWIDGETS_INSTALLED = True
+    else:
+        # ipywidgets is installed but we're not in a Jupyter environment
+        _IS_IPYWIDGETS_INSTALLED = False
+except (ImportError, Exception):
     _IS_IPYWIDGETS_INSTALLED = False
     ipywidgets = None

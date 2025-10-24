@@ -349,7 +349,7 @@ def _validate_result(
     for validator in validators:
         try:
             # Pass result and context to validator
-            if not validator(result=result, **context):
+            if not validator(result, **context):
                 validator_name = getattr(validator, "__name__", str(validator))
                 return False, f"Validator '{validator_name}' returned False"
         except Exception as e:

@@ -224,16 +224,28 @@ class ProgressBar:
         **kwargs,
     ) -> TqdmProgressBar:
         """Create a tqdm progress bar with the specified style."""
+        import threading
+        
+        # Check if we're in a background thread
+        # Main thread name is typically 'MainThread', background threads have different names
+        is_main_thread = threading.current_thread() is threading.main_thread()
+        
+        # Force standard tqdm if in background thread to avoid ipykernel context issues
+        # Even if ipywidgets is installed, it won't work in background threads
+        use_ipywidgets = _IS_IPYWIDGETS_INSTALLED and is_main_thread
+        
         if style == "auto":
-            # When ipywidgets is not installed, force standard tqdm to avoid notebook.py issues
-            if _IS_IPYWIDGETS_INSTALLED:
+            # When ipywidgets is not available or we're in a background thread,
+            # force standard tqdm to avoid notebook.py issues
+            if use_ipywidgets:
                 kwargs["ncols"]: Optional[int] = None
                 return AutoTqdmProgressBar(**kwargs)
             else:
                 return StdTqdmProgressBar(**kwargs)
         elif style == "notebook":
-            # When ipywidgets is not installed, force standard tqdm to avoid notebook.py issues
-            if _IS_IPYWIDGETS_INSTALLED:
+            # When ipywidgets is not available or we're in a background thread,
+            # force standard tqdm to avoid notebook.py issues
+            if use_ipywidgets:
                 kwargs["ncols"]: Optional[int] = None
                 return NotebookTqdmProgressBar(**kwargs)
             else:

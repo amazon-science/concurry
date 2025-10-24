@@ -202,15 +202,19 @@ class ProgressBar:
                 self._extra_fields[field_name] = field_value
 
         # Create progress bar with current settings
-        pbar = self._create_pbar(
-            **{
-                k: v
-                for k, v in {**self.__dict__, **self._extra_fields}.items()
-                if k not in {"pbar", "color", "_pending_updates", "_extra_fields"}
-            }
-        )
+        kwargs_for_pbar = {
+            k: v
+            for k, v in {**self.__dict__, **self._extra_fields}.items()
+            if k not in {"pbar", "color", "_pending_updates", "_extra_fields"}
+        }
+
+        pbar = self._create_pbar(**kwargs_for_pbar)
         pbar.color = self.color
-        pbar.refresh()
+        try:
+            pbar.refresh()
+        except (LookupError, RuntimeError, Exception):
+            # Handle threading issues - silently ignore refresh errors
+            pass
         self.pbar = pbar
 
     @classmethod
@@ -298,10 +302,15 @@ class ProgressBar:
         """
         self._pending_updates += n
         if abs(self._pending_updates) >= self.miniters:
-            out = self.pbar.update(n=self._pending_updates)
-            self.refresh()
-            self._pending_updates = 0
-            return out
+            try:
+                out = self.pbar.update(n=self._pending_updates)
+                self.refresh()
+                self._pending_updates = 0
+                return out
+            except (LookupError, RuntimeError, Exception):
+                # Handle threading issues - mark updates as processed to avoid accumulation
+                self._pending_updates = 0
+                return None
         else:
             return None
 
@@ -320,9 +329,13 @@ class ProgressBar:
             pbar.set_n(50)  # Jump to 50% complete
             ```
         """
-        self.pbar.update(n=new_n - self.pbar.n)
-        self._pending_updates = 0  # Clear all updates after setting new value
-        self.refresh()
+        try:
+            self.pbar.update(n=new_n - self.pbar.n)
+            self._pending_updates = 0  # Clear all updates after setting new value
+            self.refresh()
+        except (LookupError, RuntimeError, Exception):
+            # Handle threading issues - mark updates as processed
+            self._pending_updates = 0
 
     def set_total(self, new_total: int) -> None:
         """Set the total number of items to process.
@@ -341,9 +354,13 @@ class ProgressBar:
             pbar.set_total(150)
             ```
         """
-        self.pbar.total = new_total
-        self._pending_updates = 0  # Clear all updates after setting new value
-        self.refresh()
+        try:
+            self.pbar.total = new_total
+            self._pending_updates = 0  # Clear all updates after setting new value
+            self.refresh()
+        except (LookupError, RuntimeError, Exception):
+            # Handle threading issues
+            self._pending_updates = 0
 
     def set_description(self, desc: Optional[str] = None, refresh: Optional[bool] = True) -> Optional[str]:
         """Set the description of the progress bar.
@@ -368,9 +385,13 @@ class ProgressBar:
                 pbar.update(1)
             ```
         """
-        out = self.pbar.set_description(desc=desc, refresh=refresh)
-        self.refresh()
-        return out
+        try:
+            out = self.pbar.set_description(desc=desc, refresh=refresh)
+            self.refresh()
+            return out
+        except (LookupError, RuntimeError, Exception):
+            # Handle threading issues
+            return None
 
     def set_unit(self, new_unit: str) -> None:
         """Set the unit displayed in the progress bar.
@@ -388,8 +409,12 @@ class ProgressBar:
             pbar.set_unit("MB")  # Switch to showing MB processed
             ```
         """
-        self.pbar.unit = new_unit
-        self.refresh()
+        try:
+            self.pbar.unit = new_unit
+            self.refresh()
+        except (LookupError, RuntimeError, Exception):
+            # Handle threading issues
+            pass
 
     def success(self, desc: Optional[str] = None, close: bool = True, append_desc: bool = True) -> None:
         """Mark the progress bar as successful (green color).
@@ -496,7 +521,11 @@ class ProgressBar:
                 if append_desc:
                     desc: str = f"[{desc}] {self.pbar.desc}"
                 self.pbar.desc = desc
-            self.pbar.refresh()
+            try:
+                self.pbar.refresh()
+            except (LookupError, RuntimeError, Exception):
+                # Handle threading issues - silently ignore refresh errors
+                pass
             if close:
                 self.close()
 
@@ -513,8 +542,14 @@ class ProgressBar:
             pbar.refresh()  # Apply the change
             ```
         """
-        self.pbar.colour = self.color
-        self.pbar.refresh()
+        try:
+            self.pbar.colour = self.color
+            self.pbar.refresh()
+        except (LookupError, RuntimeError, Exception):
+            # Handle threading issues in Jupyter environments where ipykernel's
+            # shell_parent context variable may not be available in background threads
+            # Silently ignore refresh errors to prevent error spam in logs
+            pass
 
     def close(self) -> None:
         """Close and clean up the progress bar.

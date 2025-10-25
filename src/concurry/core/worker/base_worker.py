@@ -395,7 +395,27 @@ def _create_composition_wrapper(worker_cls: Type) -> Type:
 
             Only allows access to user-defined methods, not infrastructure methods.
             This prevents Ray from trying to serialize infrastructure methods.
+
+            CRITICAL: This method must handle Ray-internal attributes carefully to avoid
+            infinite recursion when Ray's tracing system or client mode inspects the wrapper.
             """
+            # CRITICAL: Don't delegate Ray-internal attributes
+            # Ray's tracing system and client mode check for these attributes,
+            # and delegating them causes infinite recursion through Ray's tracing wrapper
+            # Common Ray attributes: _ray_trace_ctx, __ray_*, RAY_CLIENT_MODE_ATTR, etc.
+            if (
+                name.startswith("_ray")
+                or name.startswith("__ray")
+                or name == "RAY_CLIENT_MODE_ATTR"
+                or name.startswith("__pydantic")  # Also prevent Pydantic internals from being delegated
+            ):
+                raise AttributeError(f"Internal attribute '{name}' not available on composition wrapper")
+
+            # Check if _wrapped_instance exists (handles access during initialization)
+            # This prevents AttributeError during __init__ before _wrapped_instance is set
+            if "_wrapped_instance" not in self.__dict__:
+                raise AttributeError(f"'{name}' cannot be accessed before wrapper initialization is complete")
+
             # Block access to infrastructure methods
             if _is_infrastructure_method(name):
                 raise AttributeError(
@@ -404,6 +424,7 @@ def _create_composition_wrapper(worker_cls: Type) -> Type:
                 )
 
             # Delegate to wrapped instance
+            # This will raise AttributeError if the attribute doesn't exist on wrapped instance
             return getattr(self._wrapped_instance, name)
 
     # Copy all user-defined methods to the wrapper class

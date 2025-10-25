@@ -29,6 +29,11 @@ When you create a Typed/BaseModel worker in Ray mode, Concurry automatically:
 4. Delegates method calls to the internal instance
 
 This is transparent to users - just use `.options(mode="ray")` as normal!
+
+**Test Timeouts:**
+
+Tests use 15-second timeouts to account for Ray client mode's additional latency.
+Ray client mode has network overhead that makes operations slower than standard mode.
 """
 
 import asyncio
@@ -44,6 +49,10 @@ from concurry.core.worker.process_worker import ProcessWorkerProxy
 from concurry.core.worker.sync_worker import SyncWorkerProxy
 from concurry.core.worker.thread_worker import ThreadWorkerProxy
 from concurry.utils import _IS_RAY_INSTALLED
+
+# Default timeout for test result() calls
+# Increased to 15 seconds to handle Ray client mode's additional latency
+FUTURE_TIMEOUT = 15
 
 # Worker mode fixture and cleanup are provided by tests/conftest.py
 
@@ -224,7 +233,7 @@ class TestWorkerTypedFeatures:
 
         # Should work with various initialization patterns
         w = CustomWorker.options(mode=worker_mode).init(1, 2, c=3, extra1="x", extra2="y")
-        result = w.process().result(timeout=5)
+        result = w.process().result(timeout=FUTURE_TIMEOUT)
         assert result == 6
         w.stop()
 
@@ -408,10 +417,10 @@ class TestTypedWorkerBasics:
         w = TypedWorkerSimple.options(mode=worker_mode).init(name="test", value=10)
 
         # Should be able to call methods
-        result = w.get_name().result(timeout=5)
+        result = w.get_name().result(timeout=FUTURE_TIMEOUT)
         assert result == "test"
 
-        result = w.compute(5).result(timeout=5)
+        result = w.compute(5).result(timeout=FUTURE_TIMEOUT)
         assert result == 50
 
         w.stop()
@@ -420,7 +429,7 @@ class TestTypedWorkerBasics:
         """Test Typed worker initialization with keyword arguments across all modes including Ray."""
         w = TypedWorkerSimple.options(mode=worker_mode).init(name="worker1", value=20)
 
-        result = w.compute(3).result(timeout=5)
+        result = w.compute(3).result(timeout=FUTURE_TIMEOUT)
         assert result == 60
 
         w.stop()
@@ -430,7 +439,7 @@ class TestTypedWorkerBasics:
         w = TypedWorkerSimple.options(mode=worker_mode).init(name="default_test")
 
         # value should default to 0
-        result = w.compute(10).result(timeout=5)
+        result = w.compute(10).result(timeout=FUTURE_TIMEOUT)
         assert result == 0
 
         w.stop()
@@ -442,7 +451,7 @@ class TestTypedWorkerBasics:
             name="Alice", age=30, email="alice@example.com", tags=["python", "ml"]
         )
 
-        info = w.get_info().result(timeout=5)
+        info = w.get_info().result(timeout=FUTURE_TIMEOUT)
         assert info["name"] == "Alice"
         assert info["age"] == 30
         assert info["email"] == "alice@example.com"
@@ -478,7 +487,7 @@ class TestTypedWorkerBasics:
         w = TypedWorkerWithHooks.options(mode=worker_mode).init(first_name="John", last_name="Doe")
 
         # full_name should be set by pre_initialize
-        result = w.get_full_name().result(timeout=5)
+        result = w.get_full_name().result(timeout=FUTURE_TIMEOUT)
         assert result == "John Doe"
 
         w.stop()
@@ -488,9 +497,9 @@ class TestTypedWorkerBasics:
         w = TypedWorkerSimple.options(mode=worker_mode).init(name="stateful", value=5)
 
         # Make multiple calls
-        result1 = w.compute(2).result(timeout=5)
-        result2 = w.compute(3).result(timeout=5)
-        result3 = w.compute(4).result(timeout=5)
+        result1 = w.compute(2).result(timeout=FUTURE_TIMEOUT)
+        result2 = w.compute(3).result(timeout=FUTURE_TIMEOUT)
+        result3 = w.compute(4).result(timeout=FUTURE_TIMEOUT)
 
         assert result1 == 10
         assert result2 == 15
@@ -508,11 +517,11 @@ class TestTypedWorkerBasics:
         w = TypedWorkerAsync.options(mode=worker_mode).init(name="async_test", multiplier=3)
 
         # Test async method
-        result1 = w.async_compute(10).result(timeout=5)
+        result1 = w.async_compute(10).result(timeout=FUTURE_TIMEOUT)
         assert result1 == 30
 
         # Test sync method
-        result2 = w.sync_compute(10).result(timeout=5)
+        result2 = w.sync_compute(10).result(timeout=FUTURE_TIMEOUT)
         assert result2 == 30
 
         w.stop()
@@ -542,10 +551,10 @@ class TestPydanticWorkerBasics:
         w = PydanticWorkerSimple.options(mode=worker_mode).init(name="test", value=10)
 
         # Should be able to call methods
-        result = w.get_name().result(timeout=5)
+        result = w.get_name().result(timeout=FUTURE_TIMEOUT)
         assert result == "test"
 
-        result = w.compute(5).result(timeout=5)
+        result = w.compute(5).result(timeout=FUTURE_TIMEOUT)
         assert result == 50
 
         w.stop()
@@ -554,7 +563,7 @@ class TestPydanticWorkerBasics:
         """Test Pydantic worker initialization with keyword arguments in all modes including Ray."""
         w = PydanticWorkerSimple.options(mode=worker_mode).init(name="worker1", value=20)
 
-        result = w.compute(3).result(timeout=5)
+        result = w.compute(3).result(timeout=FUTURE_TIMEOUT)
         assert result == 60
 
         w.stop()
@@ -564,7 +573,7 @@ class TestPydanticWorkerBasics:
         w = PydanticWorkerSimple.options(mode=worker_mode).init(name="default_test")
 
         # value should default to 0
-        result = w.compute(10).result(timeout=5)
+        result = w.compute(10).result(timeout=FUTURE_TIMEOUT)
         assert result == 0
 
         w.stop()
@@ -576,7 +585,7 @@ class TestPydanticWorkerBasics:
             name="Alice", age=30, email="alice@example.com", tags=["python", "ml"]
         )
 
-        info = w.get_info().result(timeout=5)
+        info = w.get_info().result(timeout=FUTURE_TIMEOUT)
         assert info["name"] == "Alice"
         assert info["age"] == 30
         assert info["email"] == "alice@example.com"
@@ -613,11 +622,11 @@ class TestPydanticWorkerBasics:
         w = PydanticWorkerAsync.options(mode=worker_mode).init(name="async_test", multiplier=3)
 
         # Test async method
-        result1 = w.async_compute(10).result(timeout=5)
+        result1 = w.async_compute(10).result(timeout=FUTURE_TIMEOUT)
         assert result1 == 30
 
         # Test sync method
-        result2 = w.sync_compute(10).result(timeout=5)
+        result2 = w.sync_compute(10).result(timeout=FUTURE_TIMEOUT)
         assert result2 == 30
 
         w.stop()
@@ -646,7 +655,7 @@ class TestModelWorkerAdvanced:
         """Test that Typed worker can be serialized for process mode."""
         w = TypedWorkerSimple.options(mode="process").init(name="process_test", value=15)
 
-        result = w.compute(2).result(timeout=5)
+        result = w.compute(2).result(timeout=FUTURE_TIMEOUT)
         assert result == 30
 
         w.stop()
@@ -660,7 +669,7 @@ class TestModelWorkerAdvanced:
             name="ray_test", value=20
         )
 
-        result = w.compute(2).result(timeout=5)
+        result = w.compute(2).result(timeout=FUTURE_TIMEOUT)
         assert result == 40
 
         w.stop()
@@ -669,7 +678,7 @@ class TestModelWorkerAdvanced:
         """Test that Pydantic worker can be serialized for process mode."""
         w = PydanticWorkerSimple.options(mode="process").init(name="process_test", value=15)
 
-        result = w.compute(2).result(timeout=5)
+        result = w.compute(2).result(timeout=FUTURE_TIMEOUT)
         assert result == 30
 
         w.stop()
@@ -683,7 +692,7 @@ class TestModelWorkerAdvanced:
             name="ray_test", value=20
         )
 
-        result = w.compute(2).result(timeout=5)
+        result = w.compute(2).result(timeout=FUTURE_TIMEOUT)
         assert result == 40
 
         w.stop()
@@ -693,8 +702,8 @@ class TestModelWorkerAdvanced:
         w1 = TypedWorkerSimple.options(mode=worker_mode).init(name="worker1", value=10)
         w2 = TypedWorkerSimple.options(mode=worker_mode).init(name="worker2", value=20)
 
-        result1 = w1.compute(2).result(timeout=5)
-        result2 = w2.compute(2).result(timeout=5)
+        result1 = w1.compute(2).result(timeout=FUTURE_TIMEOUT)
+        result2 = w2.compute(2).result(timeout=FUTURE_TIMEOUT)
 
         assert result1 == 20
         assert result2 == 40
@@ -707,8 +716,8 @@ class TestModelWorkerAdvanced:
         w1 = PydanticWorkerSimple.options(mode=worker_mode).init(name="worker1", value=10)
         w2 = PydanticWorkerSimple.options(mode=worker_mode).init(name="worker2", value=20)
 
-        result1 = w1.compute(2).result(timeout=5)
-        result2 = w2.compute(2).result(timeout=5)
+        result1 = w1.compute(2).result(timeout=FUTURE_TIMEOUT)
+        result2 = w2.compute(2).result(timeout=FUTURE_TIMEOUT)
 
         assert result1 == 20
         assert result2 == 40
@@ -722,7 +731,7 @@ class TestModelWorkerAdvanced:
 
         # Make multiple calls
         futures = [pool.compute(i) for i in range(10)]
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=FUTURE_TIMEOUT) for f in futures]
 
         expected = [i * 5 for i in range(10)]
         assert results == expected
@@ -735,7 +744,7 @@ class TestModelWorkerAdvanced:
 
         # Make multiple calls
         futures = [pool.compute(i) for i in range(10)]
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=FUTURE_TIMEOUT) for f in futures]
 
         expected = [i * 5 for i in range(10)]
         assert results == expected
@@ -760,13 +769,67 @@ class TestRayCompatibility:
             name="test", value=10
         )
 
-        result = worker.get_name().result(timeout=5)
+        result = worker.get_name().result(timeout=FUTURE_TIMEOUT)
         assert result == "test"
 
-        result = worker.compute(5).result(timeout=5)
+        result = worker.compute(5).result(timeout=FUTURE_TIMEOUT)
         assert result == 50
 
         worker.stop()
+
+    @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
+    def test_typed_worker_ray_simple_case(self):
+        """Test simple Typed worker with Ray (regression test for recursion bug).
+
+        This test verifies that the CompositionWrapper.__getattr__ fix prevents
+        infinite recursion when Ray's tracing system tries to access internal attributes.
+        The bug manifested when using Ray client mode or when Ray's tracing is enabled.
+        """
+        # Ray is initialized by conftest.py initialize_ray fixture
+
+        # Create a minimal Typed worker (similar to user's Cat example)
+        class SimpleTypedWorker(Worker, Typed):
+            def meow(self) -> str:
+                return "meow"
+
+        # This should not cause RecursionError
+        # Previously failed with "maximum recursion depth exceeded" when Ray's
+        # tracing system called __getattr__ for _ray_trace_ctx and similar attributes
+        worker = SimpleTypedWorker.options(mode="ray", actor_options={"num_cpus": 0.01}).init()
+
+        result = worker.meow().result(timeout=FUTURE_TIMEOUT)
+        assert result == "meow"
+
+        worker.stop()
+
+    @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
+    def test_typed_worker_ray_pool_simple_case(self):
+        """Test simple Typed worker pool with Ray (regression test for pool recursion bug).
+
+        This test verifies that the CompositionWrapper fix works correctly with pools.
+        The user reported RecursionError when creating a pool with max_workers=2.
+        """
+        # Ray is initialized by conftest.py initialize_ray fixture
+
+        # Create a minimal Typed worker
+        class CatWorker(Worker, Typed):
+            def meow(self) -> str:
+                return "meow"
+
+        # This should not cause RecursionError
+        # User's original failing case: max_workers=2, actor_options=dict(num_cpus=0.01)
+        pool = CatWorker.options(mode="ray", max_workers=2, actor_options={"num_cpus": 0.01}).init()
+
+        # Test that the pool works correctly
+        result = pool.meow().result(timeout=FUTURE_TIMEOUT)
+        assert result == "meow"
+
+        # Test multiple concurrent calls
+        futures = [pool.meow() for _ in range(10)]
+        results = [f.result(timeout=FUTURE_TIMEOUT) for f in futures]
+        assert all(r == "meow" for r in results)
+
+        pool.stop()
 
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
     def test_pydantic_worker_ray_mode_works(self):
@@ -777,10 +840,10 @@ class TestRayCompatibility:
             name="test", value=10
         )
 
-        result = worker.get_name().result(timeout=5)
+        result = worker.get_name().result(timeout=FUTURE_TIMEOUT)
         assert result == "test"
 
-        result = worker.compute(5).result(timeout=5)
+        result = worker.compute(5).result(timeout=FUTURE_TIMEOUT)
         assert result == 50
 
         worker.stop()
@@ -795,7 +858,7 @@ class TestRayCompatibility:
         )
 
         futures = [pool.compute(i) for i in range(10)]
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=FUTURE_TIMEOUT) for f in futures]
 
         assert results == [i * 10 for i in range(10)]
 
@@ -811,7 +874,7 @@ class TestRayCompatibility:
         )
 
         futures = [pool.compute(i) for i in range(10)]
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=FUTURE_TIMEOUT) for f in futures]
 
         assert results == [i * 10 for i in range(10)]
 
@@ -832,7 +895,7 @@ class TestRayCompatibility:
 
         # Should work without issues (as before)
         worker = RegularWorker.options(mode="ray", actor_options={"num_cpus": 0.1}).init(value=10)
-        result = worker.compute(5).result(timeout=5)
+        result = worker.compute(5).result(timeout=FUTURE_TIMEOUT)
         assert result == 50
         worker.stop()
 
@@ -846,7 +909,7 @@ class TestRayCompatibility:
             name="Alice", age=30, email="alice@example.com", tags=["python", "ml"]
         )
 
-        info = worker.get_info().result(timeout=5)
+        info = worker.get_info().result(timeout=FUTURE_TIMEOUT)
         assert info["name"] == "Alice"
         assert info["age"] == 30
         assert info["email"] == "alice@example.com"
@@ -861,7 +924,7 @@ class TestRayCompatibility:
                 name="Bob", age=-5
             )
             # Try to call a method - this should fail because the actor died during creation
-            result = worker.get_info().result(timeout=5)
+            result = worker.get_info().result(timeout=FUTURE_TIMEOUT)
             # If we get here, validation didn't work - fail the test
             worker.stop()
             assert False, "Expected validation error for negative age, but worker was created successfully"
@@ -876,7 +939,7 @@ class TestRayCompatibility:
             worker = TypedWorkerWithValidation.options(mode="ray", actor_options={"num_cpus": 0.1}).init(
                 name="Charlie", age=200
             )
-            result = worker.get_info().result(timeout=5)
+            result = worker.get_info().result(timeout=FUTURE_TIMEOUT)
             worker.stop()
             assert False, "Expected validation error for age > 150, but worker was created successfully"
         except Exception as e:
@@ -888,7 +951,7 @@ class TestRayCompatibility:
             worker = TypedWorkerWithValidation.options(mode="ray", actor_options={"num_cpus": 0.1}).init(
                 name="", age=25
             )
-            result = worker.get_info().result(timeout=5)
+            result = worker.get_info().result(timeout=FUTURE_TIMEOUT)
             worker.stop()
             assert False, "Expected validation error for empty name, but worker was created successfully"
         except Exception as e:
@@ -905,7 +968,7 @@ class TestRayCompatibility:
             name="Alice", age=30, email="alice@example.com", tags=["python", "ml"]
         )
 
-        info = worker.get_info().result(timeout=5)
+        info = worker.get_info().result(timeout=FUTURE_TIMEOUT)
         assert info["name"] == "Alice"
         assert info["age"] == 30
         assert info["email"] == "alice@example.com"
@@ -918,7 +981,7 @@ class TestRayCompatibility:
             worker = PydanticWorkerWithValidation.options(mode="ray", actor_options={"num_cpus": 0.1}).init(
                 name="Bob", age=-5
             )
-            result = worker.get_info().result(timeout=5)
+            result = worker.get_info().result(timeout=FUTURE_TIMEOUT)
             worker.stop()
             assert False, "Expected validation error for negative age, but worker was created successfully"
         except Exception as e:
@@ -931,7 +994,7 @@ class TestRayCompatibility:
                 name="A" * 100,
                 age=25,  # max_length=50
             )
-            result = worker.get_info().result(timeout=5)
+            result = worker.get_info().result(timeout=FUTURE_TIMEOUT)
             worker.stop()
             assert False, "Expected validation error for name too long, but worker was created successfully"
         except Exception as e:
@@ -948,7 +1011,7 @@ class TestRayCompatibility:
             name="default_test"
         )
 
-        result = worker.compute(10).result(timeout=5)
+        result = worker.compute(10).result(timeout=FUTURE_TIMEOUT)
         assert result == 0  # value defaults to 0, so 10 * 0 = 0
 
         worker.stop()
@@ -964,7 +1027,7 @@ class TestRayCompatibility:
         )
 
         # full_name should be set by pre_initialize hook
-        result = worker.get_full_name().result(timeout=5)
+        result = worker.get_full_name().result(timeout=FUTURE_TIMEOUT)
         assert result == "John Doe"
 
         worker.stop()
@@ -978,7 +1041,7 @@ class TestRayCompatibility:
         worker = TypedWorkerWithValidation.options(mode="ray", actor_options={"num_cpus": 0.1}).init(
             name="Test", age=50
         )
-        info = worker.get_info().result(timeout=5)
+        info = worker.get_info().result(timeout=FUTURE_TIMEOUT)
         assert info["age"] == 50
         worker.stop()
 
@@ -987,7 +1050,7 @@ class TestRayCompatibility:
             worker = TypedWorkerWithValidation.options(mode="ray", actor_options={"num_cpus": 0.1}).init(
                 name="Test", age=-1
             )
-            result = worker.get_info().result(timeout=5)
+            result = worker.get_info().result(timeout=FUTURE_TIMEOUT)
             worker.stop()
             assert False, "Expected validation error for age < 0"
         except Exception:
@@ -999,7 +1062,7 @@ class TestRayCompatibility:
             worker = TypedWorkerWithValidation.options(mode="ray", actor_options={"num_cpus": 0.1}).init(
                 name="Test", age=151
             )
-            result = worker.get_info().result(timeout=5)
+            result = worker.get_info().result(timeout=FUTURE_TIMEOUT)
             worker.stop()
             assert False, "Expected validation error for age > 150"
         except Exception:
@@ -1015,7 +1078,7 @@ class TestRayCompatibility:
         worker = PydanticWorkerWithValidation.options(mode="ray", actor_options={"num_cpus": 0.1}).init(
             name="ValidName", age=30
         )
-        info = worker.get_info().result(timeout=5)
+        info = worker.get_info().result(timeout=FUTURE_TIMEOUT)
         assert info["name"] == "ValidName"
         worker.stop()
 
@@ -1024,7 +1087,7 @@ class TestRayCompatibility:
             worker = PydanticWorkerWithValidation.options(mode="ray", actor_options={"num_cpus": 0.1}).init(
                 name="", age=30
             )
-            result = worker.get_info().result(timeout=5)
+            result = worker.get_info().result(timeout=FUTURE_TIMEOUT)
             worker.stop()
             assert False, "Expected validation error for empty name"
         except Exception:
@@ -1036,7 +1099,7 @@ class TestRayCompatibility:
             worker = PydanticWorkerWithValidation.options(mode="ray", actor_options={"num_cpus": 0.1}).init(
                 name="X" * 51, age=30
             )
-            result = worker.get_info().result(timeout=5)
+            result = worker.get_info().result(timeout=FUTURE_TIMEOUT)
             worker.stop()
             assert False, "Expected validation error for name too long"
         except Exception:
@@ -1052,7 +1115,7 @@ class TestRayCompatibility:
         worker = TypedWorkerWithValidation.options(mode="ray", actor_options={"num_cpus": 0.1}).init(
             name="Test", age=30, email="test@example.com"
         )
-        info = worker.get_info().result(timeout=5)
+        info = worker.get_info().result(timeout=FUTURE_TIMEOUT)
         assert info["email"] == "test@example.com"
         worker.stop()
 
@@ -1060,7 +1123,7 @@ class TestRayCompatibility:
         worker = TypedWorkerWithValidation.options(mode="ray", actor_options={"num_cpus": 0.1}).init(
             name="Test", age=30
         )
-        info = worker.get_info().result(timeout=5)
+        info = worker.get_info().result(timeout=FUTURE_TIMEOUT)
         assert info["email"] is None
         worker.stop()
 
@@ -1073,11 +1136,11 @@ class TestRayCompatibility:
         worker = TypedWorkerWithValidation.options(mode="ray", actor_options={"num_cpus": 0.1}).init(
             name="Test", age=30, tags=["python", "ml", "data"]
         )
-        info = worker.get_info().result(timeout=5)
+        info = worker.get_info().result(timeout=FUTURE_TIMEOUT)
         assert info["tags"] == ["python", "ml", "data"]
 
         # Test add_tag method
-        result = worker.add_tag("new_tag").result(timeout=5)
+        result = worker.add_tag("new_tag").result(timeout=FUTURE_TIMEOUT)
         assert result == ["python", "ml", "data", "new_tag"]
 
         worker.stop()
@@ -1086,7 +1149,7 @@ class TestRayCompatibility:
         worker = TypedWorkerWithValidation.options(mode="ray", actor_options={"num_cpus": 0.1}).init(
             name="Test", age=30
         )
-        info = worker.get_info().result(timeout=5)
+        info = worker.get_info().result(timeout=FUTURE_TIMEOUT)
         assert info["tags"] == []
         worker.stop()
 
@@ -1102,7 +1165,7 @@ class TestRayCompatibility:
 
         # Submit tasks to all workers in the pool
         futures = [pool.get_info() for _ in range(10)]
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=FUTURE_TIMEOUT) for f in futures]
 
         # All results should have the same validated data
         for result in results:
@@ -1125,7 +1188,7 @@ class TestRayCompatibility:
 
         # Submit tasks across the pool
         futures = [pool.get_info() for _ in range(15)]
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=FUTURE_TIMEOUT) for f in futures]
 
         # All workers should return validated data
         for result in results:
@@ -1147,7 +1210,7 @@ class TestRayCompatibility:
             ).init(name="Invalid", age=-10)  # Invalid: age < 0
 
             # Try to use the pool - should fail
-            result = pool.get_info().result(timeout=5)
+            result = pool.get_info().result(timeout=FUTURE_TIMEOUT)
             pool.stop()
             assert False, "Expected pool creation to fail due to validation error"
         except Exception as e:
@@ -1168,7 +1231,7 @@ class TestRayCompatibility:
         # Submit multiple tasks - they should all return the same result
         # (each actor has value=10)
         futures = [pool.compute(5) for _ in range(9)]  # 3 tasks per worker
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=FUTURE_TIMEOUT) for f in futures]
 
         # All should return 50 (5 * 10)
         assert all(r == 50 for r in results)
@@ -1186,7 +1249,7 @@ class TestRayCompatibility:
         )
 
         # value defaults to 0
-        result = pool.compute(10).result(timeout=5)
+        result = pool.compute(10).result(timeout=FUTURE_TIMEOUT)
         assert result == 0
         pool.stop()
 
@@ -1195,7 +1258,7 @@ class TestRayCompatibility:
             mode="ray", max_workers=2, actor_options={"num_cpus": 0.1}
         ).init(name="Complete", age=45, email="complete@example.com", tags=["tag1", "tag2", "tag3"])
 
-        info = pool.get_info().result(timeout=5)
+        info = pool.get_info().result(timeout=FUTURE_TIMEOUT)
         assert info["name"] == "Complete"
         assert info["age"] == 45
         assert info["email"] == "complete@example.com"
@@ -1207,7 +1270,7 @@ class TestRayCompatibility:
             mode="ray", max_workers=2, actor_options={"num_cpus": 0.1}
         ).init(name="X", age=0)  # Minimum valid age
 
-        info = pool.get_info().result(timeout=5)
+        info = pool.get_info().result(timeout=FUTURE_TIMEOUT)
         assert info["age"] == 0
         pool.stop()
 
@@ -1215,7 +1278,7 @@ class TestRayCompatibility:
             mode="ray", max_workers=2, actor_options={"num_cpus": 0.1}
         ).init(name="Y" * 50, age=150)  # Maximum valid age and name length
 
-        info = pool.get_info().result(timeout=5)
+        info = pool.get_info().result(timeout=FUTURE_TIMEOUT)
         assert info["age"] == 150
         assert len(info["name"]) == 50
         pool.stop()
@@ -1253,7 +1316,7 @@ class TestRayCompatibility:
             mode="ray", max_workers=2, actor_options={"num_cpus": 0.1}
         ).init(name="A", age=0)  # min_length=1, ge=0
 
-        info = pool.get_info().result(timeout=5)
+        info = pool.get_info().result(timeout=FUTURE_TIMEOUT)
         assert info["name"] == "A"
         assert info["age"] == 0
         pool.stop()
@@ -1263,7 +1326,7 @@ class TestRayCompatibility:
             mode="ray", max_workers=2, actor_options={"num_cpus": 0.1}
         ).init(name="X" * 50, age=150)  # max_length=50, le=150
 
-        info = pool.get_info().result(timeout=5)
+        info = pool.get_info().result(timeout=FUTURE_TIMEOUT)
         assert len(info["name"]) == 50
         assert info["age"] == 150
         pool.stop()
@@ -1274,7 +1337,7 @@ class TestRayCompatibility:
                 mode="ray", max_workers=2, actor_options={"num_cpus": 0.1}
             ).init(name="", age=30)  # Empty name violates min_length=1
 
-            result = pool.get_info().result(timeout=5)
+            result = pool.get_info().result(timeout=FUTURE_TIMEOUT)
             pool.stop()
             assert False, "Expected validation error for empty name"
         except Exception:
@@ -1286,7 +1349,7 @@ class TestRayCompatibility:
                 mode="ray", max_workers=2, actor_options={"num_cpus": 0.1}
             ).init(name="X" * 51, age=30)  # Name too long
 
-            result = pool.get_info().result(timeout=5)
+            result = pool.get_info().result(timeout=FUTURE_TIMEOUT)
             pool.stop()
             assert False, "Expected validation error for name too long"
         except Exception:
@@ -1311,7 +1374,7 @@ class TestRayCompatibility:
         # Submit tasks that would use the shared limit
         # All workers share the same limit pool
         futures = [pool.get_info() for _ in range(10)]
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=FUTURE_TIMEOUT) for f in futures]
 
         # All should succeed and return validated data
         assert len(results) == 10
@@ -1332,7 +1395,7 @@ class TestRayCompatibility:
 
         # Test 1: Method that returns validated field directly
         futures = [pool.get_info() for _ in range(6)]
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=FUTURE_TIMEOUT) for f in futures]
 
         for result in results:
             assert result["name"] == "FieldAccess"
@@ -1340,7 +1403,7 @@ class TestRayCompatibility:
 
         # Test 2: Method that modifies list field (returns new list)
         futures = [pool.add_tag("newtag") for _ in range(6)]
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=FUTURE_TIMEOUT) for f in futures]
 
         # Each call should return the original tags + new tag
         for result in results:
@@ -1359,7 +1422,7 @@ class TestRayCompatibility:
 
         # Submit 12 tasks (should distribute evenly: 4 per worker)
         futures = [pool.compute(i) for i in range(12)]
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=FUTURE_TIMEOUT) for f in futures]
 
         # Each result should be correct (i * 5)
         expected = [i * 5 for i in range(12)]
@@ -1380,7 +1443,7 @@ class TestRayCompatibility:
 
         # All workers should have full_name set by pre_initialize
         futures = [pool.get_full_name() for _ in range(6)]
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=FUTURE_TIMEOUT) for f in futures]
 
         assert all(r == "Jane Smith" for r in results)
 
@@ -1397,7 +1460,7 @@ class TestRayCompatibility:
                 mode="ray", max_workers=3, actor_options={"num_cpus": 0.1}
             ).init(name="Error", age=-1)
             # If we somehow get past init, trying to use it should fail
-            result = pool.get_info().result(timeout=5)
+            result = pool.get_info().result(timeout=FUTURE_TIMEOUT)
             pool.stop()
 
         # Test 2: Name constraint violation
@@ -1405,7 +1468,7 @@ class TestRayCompatibility:
             pool = TypedWorkerWithValidation.options(
                 mode="ray", max_workers=3, actor_options={"num_cpus": 0.1}
             ).init(name="", age=30)
-            result = pool.get_info().result(timeout=5)
+            result = pool.get_info().result(timeout=FUTURE_TIMEOUT)
             pool.stop()
 
         # Test 3: After failed pool creation, we can create a valid pool
@@ -1413,7 +1476,7 @@ class TestRayCompatibility:
             mode="ray", max_workers=3, actor_options={"num_cpus": 0.1}
         ).init(name="Valid", age=30)
 
-        result = pool.get_info().result(timeout=5)
+        result = pool.get_info().result(timeout=FUTURE_TIMEOUT)
         assert result["name"] == "Valid"
         assert result["age"] == 30
 
@@ -1429,7 +1492,7 @@ class TestRayCompatibility:
             mode="ray", max_workers=2, actor_options={"num_cpus": 0.1}
         ).init(name="WithEmail", age=30, email="test@pool.com")
 
-        info = pool.get_info().result(timeout=5)
+        info = pool.get_info().result(timeout=FUTURE_TIMEOUT)
         assert info["email"] == "test@pool.com"
         pool.stop()
 
@@ -1438,7 +1501,7 @@ class TestRayCompatibility:
             mode="ray", max_workers=2, actor_options={"num_cpus": 0.1}
         ).init(name="NoEmail", age=30)
 
-        info = pool.get_info().result(timeout=5)
+        info = pool.get_info().result(timeout=FUTURE_TIMEOUT)
         assert info["email"] is None
         pool.stop()
 
@@ -1447,7 +1510,7 @@ class TestRayCompatibility:
             mode="ray", max_workers=2, actor_options={"num_cpus": 0.1}
         ).init(name="WithTags", age=30, tags=["a", "b", "c"])
 
-        info = pool.get_info().result(timeout=5)
+        info = pool.get_info().result(timeout=FUTURE_TIMEOUT)
         assert info["tags"] == ["a", "b", "c"]
         pool.stop()
 
@@ -1456,7 +1519,7 @@ class TestRayCompatibility:
             mode="ray", max_workers=2, actor_options={"num_cpus": 0.1}
         ).init(name="NoTags", age=30)
 
-        info = pool.get_info().result(timeout=5)
+        info = pool.get_info().result(timeout=FUTURE_TIMEOUT)
         assert info["tags"] == []
         pool.stop()
 
@@ -1482,10 +1545,10 @@ class TestModelWorkerEdgeCases:
             name="complex", data={"key": "value"}, items=[1, 2, 3]
         )
 
-        data = w.get_data().result(timeout=5)
+        data = w.get_data().result(timeout=FUTURE_TIMEOUT)
         assert data == {"key": "value"}
 
-        items = w.get_items().result(timeout=5)
+        items = w.get_items().result(timeout=FUTURE_TIMEOUT)
         assert items == [1, 2, 3]
 
         w.stop()
@@ -1508,10 +1571,10 @@ class TestModelWorkerEdgeCases:
             name="complex", data={"key": "value"}, items=[1, 2, 3]
         )
 
-        data = w.get_data().result(timeout=5)
+        data = w.get_data().result(timeout=FUTURE_TIMEOUT)
         assert data == {"key": "value"}
 
-        items = w.get_items().result(timeout=5)
+        items = w.get_items().result(timeout=FUTURE_TIMEOUT)
         assert items == [1, 2, 3]
 
         w.stop()
@@ -1535,12 +1598,12 @@ class TestModelWorkerEdgeCases:
 
         # Both should work in all modes including Ray
         w1 = Worker1.options(mode=worker_mode).init(value=10)
-        result1 = w1.compute().result(timeout=5)
+        result1 = w1.compute().result(timeout=FUTURE_TIMEOUT)
         assert result1 == 20
         w1.stop()
 
         w2 = Worker2.options(mode=worker_mode).init(value=15)
-        result2 = w2.compute().result(timeout=5)
+        result2 = w2.compute().result(timeout=FUTURE_TIMEOUT)
         assert result2 == 30
         w2.stop()
 
@@ -1563,12 +1626,12 @@ class TestModelWorkerEdgeCases:
 
         # Both should work in all modes including Ray
         w1 = Worker1.options(mode=worker_mode).init(value=10)
-        result1 = w1.compute().result(timeout=5)
+        result1 = w1.compute().result(timeout=FUTURE_TIMEOUT)
         assert result1 == 20
         w1.stop()
 
         w2 = Worker2.options(mode=worker_mode).init(value=15)
-        result2 = w2.compute().result(timeout=5)
+        result2 = w2.compute().result(timeout=FUTURE_TIMEOUT)
         assert result2 == 30
         w2.stop()
 
@@ -1937,11 +2000,11 @@ class TestMorphicValidateOnWorkerMethods:
         worker = ValidatedWorker.options(mode=worker_mode).init(multiplier=5)
 
         # Valid call
-        result = worker.process(10, scale=2.0).result(timeout=5)
+        result = worker.process(10, scale=2.0).result(timeout=FUTURE_TIMEOUT)
         assert result == 100.0
 
         # String should be coerced to int/float
-        result = worker.process("5", scale="3.0").result(timeout=5)
+        result = worker.process("5", scale="3.0").result(timeout=FUTURE_TIMEOUT)
         assert result == 75.0
 
         worker.stop()
@@ -1953,11 +2016,11 @@ class TestMorphicValidateOnWorkerMethods:
         """
         worker = TypedValidatedWorker.options(mode=worker_mode).init(name="validated", multiplier=3)
 
-        result = worker.compute(5, y=3).result(timeout=5)
+        result = worker.compute(5, y=3).result(timeout=FUTURE_TIMEOUT)
         assert result == 24  # (5 + 3) * 3
 
         # Type coercion
-        result = worker.compute("10", y="5").result(timeout=5)
+        result = worker.compute("10", y="5").result(timeout=FUTURE_TIMEOUT)
         assert result == 45  # (10 + 5) * 3
 
         worker.stop()
@@ -1969,11 +2032,11 @@ class TestMorphicValidateOnWorkerMethods:
         """
         worker = PydanticValidatedWorker.options(mode=worker_mode).init(name="validated", multiplier=4)
 
-        result = worker.compute(10, y=5).result(timeout=5)
+        result = worker.compute(10, y=5).result(timeout=FUTURE_TIMEOUT)
         assert result == 60  # (10 + 5) * 4
 
         # Type coercion
-        result = worker.compute("8", y="2").result(timeout=5)
+        result = worker.compute("8", y="2").result(timeout=FUTURE_TIMEOUT)
         assert result == 40  # (8 + 2) * 4
 
         worker.stop()
@@ -1985,11 +2048,11 @@ class TestMorphicValidateOnWorkerMethods:
         """
         worker = AsyncValidatedWorker.options(mode=worker_mode).init(base=100)
 
-        result = worker.async_compute(42, delay=0.001).result(timeout=5)
+        result = worker.async_compute(42, delay=0.001).result(timeout=FUTURE_TIMEOUT)
         assert result == 142
 
         # Type coercion on async method
-        result = worker.async_compute("50", delay=0.001).result(timeout=5)
+        result = worker.async_compute("50", delay=0.001).result(timeout=FUTURE_TIMEOUT)
         assert result == 150
 
         worker.stop()
@@ -2002,9 +2065,9 @@ class TestMorphicValidateOnWorkerMethods:
         worker = MultiValidatedWorker.options(mode=worker_mode).init(base=10)
 
         # Test all methods
-        assert worker.add(5).result(timeout=5) == 15
-        assert worker.multiply(3, factor=4).result(timeout=5) == 12
-        assert worker.complex_calc("5", "3", c="2.5").result(timeout=5) == 20.0
+        assert worker.add(5).result(timeout=FUTURE_TIMEOUT) == 15
+        assert worker.multiply(3, factor=4).result(timeout=FUTURE_TIMEOUT) == 12
+        assert worker.complex_calc("5", "3", c="2.5").result(timeout=FUTURE_TIMEOUT) == 20.0
 
         worker.stop()
 
@@ -2020,11 +2083,11 @@ class TestPydanticValidateCallOnWorkerMethods:
         worker = PydanticValidateCallWorker.options(mode=worker_mode).init(multiplier=4)
 
         # Valid call
-        result = worker.process(10, scale=2.5).result(timeout=5)
+        result = worker.process(10, scale=2.5).result(timeout=FUTURE_TIMEOUT)
         assert result == 100.0
 
         # Pydantic should coerce string to int/float
-        result = worker.process("5", scale="2.0").result(timeout=5)
+        result = worker.process("5", scale="2.0").result(timeout=FUTURE_TIMEOUT)
         assert result == 40.0
 
         worker.stop()
@@ -2036,7 +2099,7 @@ class TestPydanticValidateCallOnWorkerMethods:
         """
         worker = TypedValidateCallWorker.options(mode=worker_mode).init(name="validated", multiplier=3)
 
-        result = worker.compute(10, y=5).result(timeout=5)
+        result = worker.compute(10, y=5).result(timeout=FUTURE_TIMEOUT)
         assert result == 45  # (10 + 5) * 3
 
         worker.stop()
@@ -2048,11 +2111,11 @@ class TestPydanticValidateCallOnWorkerMethods:
         """
         worker = FullyValidatedWorker.options(mode=worker_mode).init(name="validated", multiplier=5)
 
-        result = worker.compute(10, y=5).result(timeout=5)
+        result = worker.compute(10, y=5).result(timeout=FUTURE_TIMEOUT)
         assert result == 75  # (10 + 5) * 5
 
         # Type coercion
-        result = worker.compute("8", y="2").result(timeout=5)
+        result = worker.compute("8", y="2").result(timeout=FUTURE_TIMEOUT)
         assert result == 50  # (8 + 2) * 5
 
         worker.stop()
@@ -2065,13 +2128,13 @@ class TestPydanticValidateCallOnWorkerMethods:
         worker = StrictWorker.options(mode=worker_mode).init()
 
         # Valid call
-        result = worker.strict_process(42, name="test").result(timeout=5)
+        result = worker.strict_process(42, name="test").result(timeout=FUTURE_TIMEOUT)
         assert result == "test: 42"
 
         # Invalid: missing required argument should fail
         try:
             future = worker.strict_process(42)
-            future.result(timeout=5)
+            future.result(timeout=FUTURE_TIMEOUT)
             assert False, "Should have raised validation error"
         except Exception:
             # Expected - validation error occurred
@@ -2086,11 +2149,11 @@ class TestPydanticValidateCallOnWorkerMethods:
         """
         worker = AsyncValidateCallWorker.options(mode=worker_mode).init(base=10)
 
-        result = worker.async_process(5, multiplier=3).result(timeout=5)
+        result = worker.async_process(5, multiplier=3).result(timeout=FUTURE_TIMEOUT)
         assert result == 45  # (5 + 10) * 3
 
         # Type coercion
-        result = worker.async_process("8", multiplier="2").result(timeout=5)
+        result = worker.async_process("8", multiplier="2").result(timeout=FUTURE_TIMEOUT)
         assert result == 36  # (8 + 10) * 2
 
         worker.stop()
@@ -2106,14 +2169,14 @@ class TestValidateOnWorkerInit:
         a function decorator, not class inheritance.
         """
         worker = InitValidatedWorker.options(mode=worker_mode).init(value=42, name="test")
-        result = worker.get_info().result(timeout=5)
+        result = worker.get_info().result(timeout=FUTURE_TIMEOUT)
         assert result["value"] == 42
         assert result["name"] == "test"
         worker.stop()
 
         # Type coercion
         worker = InitValidatedWorker.options(mode=worker_mode).init(value="100", name="coerced")
-        result = worker.get_info().result(timeout=5)
+        result = worker.get_info().result(timeout=FUTURE_TIMEOUT)
         assert result["value"] == 100  # Coerced to int
         worker.stop()
 
@@ -2123,14 +2186,14 @@ class TestValidateOnWorkerInit:
         Note: @validate_call works with ALL modes including Ray.
         """
         worker = PydanticInitWorker.options(mode=worker_mode).init(count=50, label="test")
-        result = worker.get_data().result(timeout=5)
+        result = worker.get_data().result(timeout=FUTURE_TIMEOUT)
         assert result["count"] == 50
         assert result["label"] == "test"
         worker.stop()
 
         # Type coercion
         worker = PydanticInitWorker.options(mode=worker_mode).init(count="75", label="coerced")
-        result = worker.get_data().result(timeout=5)
+        result = worker.get_data().result(timeout=FUTURE_TIMEOUT)
         assert result["count"] == 75  # Coerced to int
         worker.stop()
 
@@ -2140,7 +2203,7 @@ class TestValidateOnWorkerInit:
         Note: @validate works with ALL modes including Ray.
         """
         worker = ThreadInitWorker.options(mode=worker_mode).init(value="10", multiplier="3")
-        result = worker.compute().result(timeout=5)
+        result = worker.compute().result(timeout=FUTURE_TIMEOUT)
         assert result == 30  # Coerced values: 10 * 3
         worker.stop()
 
@@ -2153,7 +2216,7 @@ class TestValidateCombinations:
         worker = ComplexWorkerValidated.options(mode=worker_mode).init(name="  processor  ", multiplier=5)
 
         # Name should be normalized by pre_initialize
-        result = worker.process("10", factor="2.0").result(timeout=5)
+        result = worker.process("10", factor="2.0").result(timeout=FUTURE_TIMEOUT)
         assert result == 100.0  # 10 * 5 * 2.0
 
         worker.stop()
@@ -2162,11 +2225,11 @@ class TestValidateCombinations:
         """Test Pydantic worker with @validate_call decorated methods in all modes including Ray."""
         worker = FullyValidatedPydanticWorker.options(mode=worker_mode).init(name="validator", rate=20)
 
-        result = worker.compute(5, scale=2.0).result(timeout=5)
+        result = worker.compute(5, scale=2.0).result(timeout=FUTURE_TIMEOUT)
         assert result == 200.0  # 5 * 20 * 2.0
 
         # Type coercion
-        result = worker.compute("3", scale="3.0").result(timeout=5)
+        result = worker.compute("3", scale="3.0").result(timeout=FUTURE_TIMEOUT)
         assert result == 180.0  # 3 * 20 * 3.0
 
         worker.stop()
@@ -2179,10 +2242,10 @@ class TestValidateCombinations:
         worker = MixedValidationWorker.options(mode=worker_mode).init(base=100)
 
         # Both decorators work on same worker
-        result1 = worker.morphic_method("10").result(timeout=5)
+        result1 = worker.morphic_method("10").result(timeout=FUTURE_TIMEOUT)
         assert result1 == 110
 
-        result2 = worker.pydantic_method("20", y="5").result(timeout=5)
+        result2 = worker.pydantic_method("20", y="5").result(timeout=FUTURE_TIMEOUT)
         assert result2 == 125
 
         worker.stop()
@@ -2206,7 +2269,7 @@ class TestLimitsWithTypedWorkers:
 
         worker = APIWorker.options(mode=worker_mode, limits=limits).init(name="API Service", api_key="secret")
 
-        result = worker.call_api(100).result(timeout=5)
+        result = worker.call_api(100).result(timeout=FUTURE_TIMEOUT)
         assert "used 100 tokens" in result
         worker.stop()
 
@@ -2218,7 +2281,7 @@ class TestLimitsWithTypedWorkers:
             db_name="production", max_connections=10
         )
 
-        result = worker.query("SELECT * FROM users").result(timeout=5)
+        result = worker.query("SELECT * FROM users").result(timeout=FUTURE_TIMEOUT)
         assert result["db"] == "production"
         assert result["result"] == "success"
         worker.stop()
@@ -2240,7 +2303,7 @@ class TestLimitsWithTypedWorkers:
             name="Processor", requests_per_minute=100
         )
 
-        result = worker.process("test data").result(timeout=5)
+        result = worker.process("test data").result(timeout=FUTURE_TIMEOUT)
         assert "processed: test data" in result
         worker.stop()
 
@@ -2268,7 +2331,7 @@ class TestLimitsWithPydanticWorkers:
             service_name="LLM Service", max_tokens=5000
         )
 
-        result = worker.process_request(250).result(timeout=5)
+        result = worker.process_request(250).result(timeout=FUTURE_TIMEOUT)
         assert result["service"] == "LLM Service"
         assert result["tokens_used"] == 250
         worker.stop()
@@ -2290,7 +2353,7 @@ class TestWorkerPoolsWithTypedWorkers:
 
         # Submit multiple tasks
         futures = [pool.compute(i) for i in range(10)]
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=FUTURE_TIMEOUT) for f in futures]
 
         assert len(results) == 10
         assert all(r["result"] == i * 5 for i, r in enumerate(results))
@@ -2308,7 +2371,7 @@ class TestWorkerPoolsWithTypedWorkers:
 
         # All workers share the same 100 token/sec limit
         futures = [pool.process(i) for i in range(5)]
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=FUTURE_TIMEOUT) for f in futures]
 
         assert len(results) == 5
         pool.stop()
@@ -2319,7 +2382,7 @@ class TestWorkerPoolsWithTypedWorkers:
 
         # Make multiple calls - they'll be distributed across workers
         futures = [pool.process(i) for i in range(10)]
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=FUTURE_TIMEOUT) for f in futures]
 
         # All results should be correct (stateless processing)
         assert len(results) == 10
@@ -2337,7 +2400,7 @@ class TestWorkerPoolsWithPydanticWorkers:
         )
 
         futures = [pool.compute(i) for i in range(12)]
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=FUTURE_TIMEOUT) for f in futures]
 
         assert len(results) == 12
         assert all(r["result"] == i * 3 for i, r in enumerate(results))
@@ -2348,7 +2411,7 @@ class TestWorkerPoolsWithPydanticWorkers:
         pool = ProcessPoolWorker.options(mode="process", max_workers=2).init(name="process_pool", value=7)
 
         futures = [pool.compute(i) for i in range(6)]
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=FUTURE_TIMEOUT) for f in futures]
 
         assert results == [0, 7, 14, 21, 28, 35]
         pool.stop()
@@ -2368,11 +2431,11 @@ class TestValidateOnWorkerMethods:
         worker = ValidatedWorker.options(mode=worker_mode).init(multiplier=5)
 
         # Valid call
-        result = worker.process(10, scale=2.0).result(timeout=5)
+        result = worker.process(10, scale=2.0).result(timeout=FUTURE_TIMEOUT)
         assert result == 100.0
 
         # String should be coerced to int/float
-        result = worker.process("5", scale="3.0").result(timeout=5)
+        result = worker.process("5", scale="3.0").result(timeout=FUTURE_TIMEOUT)
         assert result == 75.0
 
         worker.stop()
@@ -2381,11 +2444,11 @@ class TestValidateOnWorkerMethods:
         """Test morphic.validate on Typed worker methods in all modes including Ray."""
         worker = TypedValidatedWorker.options(mode=worker_mode).init(name="validated", multiplier=3)
 
-        result = worker.compute(5, y=3).result(timeout=5)
+        result = worker.compute(5, y=3).result(timeout=FUTURE_TIMEOUT)
         assert result == 24  # (5 + 3) * 3
 
         # Type coercion
-        result = worker.compute("10", y="5").result(timeout=5)
+        result = worker.compute("10", y="5").result(timeout=FUTURE_TIMEOUT)
         assert result == 45  # (10 + 5) * 3
 
         worker.stop()
@@ -2397,7 +2460,7 @@ class TestValidateOnWorkerMethods:
         """
         worker = AsyncValidatedWorker.options(mode=worker_mode).init(base=100)
 
-        result = worker.async_compute(42, delay=0.001).result(timeout=5)
+        result = worker.async_compute(42, delay=0.001).result(timeout=FUTURE_TIMEOUT)
         assert result == 142
 
         worker.stop()
@@ -2412,11 +2475,11 @@ class TestValidateCallOnWorkerMethods:
         worker = PydanticValidateCallWorker.options(mode=worker_mode).init(multiplier=4)
 
         # Valid call
-        result = worker.process(10, scale=2.5).result(timeout=5)
+        result = worker.process(10, scale=2.5).result(timeout=FUTURE_TIMEOUT)
         assert result == 100.0
 
         # Pydantic should coerce string to int/float
-        result = worker.process("5", scale="2.0").result(timeout=5)
+        result = worker.process("5", scale="2.0").result(timeout=FUTURE_TIMEOUT)
         assert result == 40.0
 
         worker.stop()
@@ -2426,11 +2489,11 @@ class TestValidateCallOnWorkerMethods:
         # Use module-level FullyValidatedWorker class
         worker = FullyValidatedWorker.options(mode=worker_mode).init(name="validated", multiplier=5)
 
-        result = worker.compute(10, y=5).result(timeout=5)
+        result = worker.compute(10, y=5).result(timeout=FUTURE_TIMEOUT)
         assert result == 75  # (10 + 5) * 5
 
         # Type coercion
-        result = worker.compute("8", y="2").result(timeout=5)
+        result = worker.compute("8", y="2").result(timeout=FUTURE_TIMEOUT)
         assert result == 50  # (8 + 2) * 5
 
         worker.stop()
@@ -2443,14 +2506,14 @@ class TestValidateCallOnWorkerMethods:
         worker = StrictWorker.options(mode=worker_mode).init()
 
         # Valid call
-        result = worker.strict_process(42, name="test").result(timeout=5)
+        result = worker.strict_process(42, name="test").result(timeout=FUTURE_TIMEOUT)
         assert result == "test: 42"
 
         # Invalid: missing required argument should fail
         # Note: This might fail at call time or when getting result
         try:
             future = worker.strict_process(42)
-            future.result(timeout=5)
+            future.result(timeout=FUTURE_TIMEOUT)
             assert False, "Should have raised validation error"
         except Exception:
             # Expected - validation error occurred
@@ -2477,7 +2540,7 @@ class TestComplexValidationScenarios:
             name="complex", max_tokens=1000
         )
 
-        result = worker.process("test prompt", tokens=200).result(timeout=5)
+        result = worker.process("test prompt", tokens=200).result(timeout=FUTURE_TIMEOUT)
         assert result["name"] == "complex"
         assert result["tokens"] == 200
         worker.stop()
@@ -2492,7 +2555,7 @@ class TestComplexValidationScenarios:
         )
 
         futures = [pool.compute(i, y=1) for i in range(6)]
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=FUTURE_TIMEOUT) for f in futures]
 
         assert len(results) == 6
         assert all(r["result"] == (i + 1) * 4 for i, r in enumerate(results))
@@ -2503,7 +2566,7 @@ class TestComplexValidationScenarios:
         worker = FullValidationStackWorker.options(mode=worker_mode).init(name="  validator  ", rate=20)
 
         # Name should be normalized by pre_initialize
-        result = worker.process(5, scale=2.0).result(timeout=5)
+        result = worker.process(5, scale=2.0).result(timeout=FUTURE_TIMEOUT)
         assert result["name"] == "Validator"  # Stripped and titled
         assert result["result"] == 200.0  # 5 * 20 * 2.0
         worker.stop()

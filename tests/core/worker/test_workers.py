@@ -93,7 +93,7 @@ class TestWorkerBasics:
         """
         w = SimpleWorker.options(mode=worker_mode).init(10)
         future = w.add(5)
-        result = future.result(timeout=5)
+        result = future.result(timeout=15)
         assert result == 15
         w.stop()
 
@@ -120,7 +120,7 @@ class TestWorkerBasics:
             # Thread, asyncio, and process modes return a future that contains the original error
             future = w.nonexistent_method()
             with pytest.raises(AttributeError):
-                future.result(timeout=5)
+                future.result(timeout=15)
 
         w.stop()
 
@@ -140,9 +140,9 @@ class TestWorkerBasics:
         future2 = w.multiply(2)
         future3 = w.get_value()
 
-        assert future1.result(timeout=5) == 15
-        assert future2.result(timeout=5) == 20
-        assert future3.result(timeout=5) == 10
+        assert future1.result(timeout=15) == 15
+        assert future2.result(timeout=15) == 20
+        assert future3.result(timeout=15) == 10
 
         w.stop()
 
@@ -174,7 +174,7 @@ class TestWorkerBasics:
         """
         w = DecoratedWorker.options(mode=worker_mode).init("TestBot")
         future = w.greet()
-        result = future.result(timeout=5)
+        result = future.result(timeout=15)
         assert result == "Hello from TestBot"
         w.stop()
 
@@ -194,7 +194,7 @@ class TestWorkerExceptions:
         future = w.raise_error("test error")
 
         with pytest.raises(Exception) as exc_info:
-            future.result(timeout=5)
+            future.result(timeout=15)
 
         # Check that the error message is preserved
         assert "test error" in str(exc_info.value)
@@ -221,7 +221,7 @@ class TestWorkerExceptions:
             # Thread, asyncio, and process modes - original error is in the future
             future = w.nonexistent_method(123)
             with pytest.raises(AttributeError):
-                future.result(timeout=5)
+                future.result(timeout=15)
 
         w.stop()
 
@@ -247,7 +247,7 @@ class TestWorkerConcurrency:
 
         # Check all results
         for future, expected in futures:
-            result = future.result(timeout=5)
+            result = future.result(timeout=15)
             assert result == expected
 
         w.stop()
@@ -269,7 +269,7 @@ class TestWorkerConcurrency:
         future = w.sleep_and_return(1.0, 42)
 
         # Wait for result
-        result = future.result(timeout=5)
+        result = future.result(timeout=15)
         elapsed = time.time() - start_time
 
         assert result == 42
@@ -326,15 +326,15 @@ class TestWorkerState:
         w2 = StatefulWorker.options(mode=worker_mode, max_workers=1).init()
 
         # Modify state in both workers
-        result1 = w1.increment(5).result(timeout=5)
-        result2 = w2.increment(10).result(timeout=5)
+        result1 = w1.increment(5).result(timeout=15)
+        result2 = w2.increment(10).result(timeout=15)
 
         assert result1 == 5
         assert result2 == 10
 
         # Check that states are independent
-        counter1 = w1.get_counter().result(timeout=5)
-        counter2 = w2.get_counter().result(timeout=5)
+        counter1 = w1.get_counter().result(timeout=15)
+        counter2 = w2.get_counter().result(timeout=15)
 
         assert counter1 == 5
         assert counter2 == 10
@@ -357,7 +357,7 @@ class TestWorkerLifecycle:
         w = SimpleWorker.options(mode=worker_mode).init(10)
 
         # Use the worker
-        result = w.add(5).result(timeout=5)
+        result = w.add(5).result(timeout=15)
         assert result == 15
 
         # Stop the worker
@@ -381,7 +381,7 @@ class TestWorkerLifecycle:
 
         # Use all workers
         for i, w in enumerate(workers):
-            result = w.get_value().result(timeout=5)
+            result = w.get_value().result(timeout=15)
             assert result == i
 
         # Stop all workers
@@ -400,7 +400,7 @@ class TestWorkerInitialization:
         3. Stops worker
         """
         w = SimpleWorker.options(mode=worker_mode).init(42)
-        result = w.get_value().result(timeout=5)
+        result = w.get_value().result(timeout=15)
         assert result == 42
         w.stop()
 
@@ -412,7 +412,7 @@ class TestWorkerInitialization:
         3. Stops worker
         """
         w = SimpleWorker.options(mode=worker_mode).init(value=99)
-        result = w.get_value().result(timeout=5)
+        result = w.get_value().result(timeout=15)
         assert result == 99
         w.stop()
 
@@ -424,7 +424,7 @@ class TestWorkerInitialization:
         3. Stops worker
         """
         w = DecoratedWorker.options(mode=worker_mode).init("Alice")
-        result = w.greet().result(timeout=5)
+        result = w.greet().result(timeout=15)
         assert result == "Hello from Alice"
         w.stop()
 
@@ -502,7 +502,7 @@ class TestFutureInterface:
 
         # Should raise when getting result
         with pytest.raises(Exception):
-            future.result(timeout=5)
+            future.result(timeout=15)
 
         w.stop()
 
@@ -525,7 +525,7 @@ class TestTaskWorkerSubmit:
 
         w = TaskWorker.options(mode=worker_mode).init()
         future = w.submit(add, 5, 10)
-        result = future.result(timeout=5)
+        result = future.result(timeout=15)
         assert result == 15
         w.stop()
 
@@ -544,7 +544,7 @@ class TestTaskWorkerSubmit:
 
         w = TaskWorker.options(mode=worker_mode).init()
         future = w.submit(multiply, 3, 4, factor=2)
-        result = future.result(timeout=5)
+        result = future.result(timeout=15)
         assert result == 24
         w.stop()
 
@@ -553,7 +553,7 @@ class TestTaskWorkerSubmit:
 
         w = TaskWorker.options(mode=worker_mode).init()
         future = w.submit(lambda x: x**2, 5)
-        result = future.result(timeout=5)
+        result = future.result(timeout=15)
         assert result == 25
         w.stop()
 
@@ -567,7 +567,7 @@ class TestTaskWorkerSubmit:
         future = w.submit(failing_fn)
 
         with pytest.raises(Exception) as exc_info:
-            future.result(timeout=5)
+            future.result(timeout=15)
 
         assert "Task failed" in str(exc_info.value) or "failed" in str(exc_info.value).lower()
         w.stop()
@@ -581,7 +581,7 @@ class TestTaskWorkerSubmit:
         w = TaskWorker.options(mode=worker_mode).init()
 
         futures = [w.submit(compute, i) for i in range(5)]
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=15) for f in futures]
 
         assert results == [0, 2, 4, 6, 8]
         w.stop()
@@ -643,7 +643,7 @@ class TestTaskWorkerSubmit:
 
         w = TaskWorker.options(mode=worker_mode).init()
         future = w.submit(compute, 3, 4)
-        result = future.result(timeout=5)
+        result = future.result(timeout=15)
 
         assert result == 25
         w.stop()
@@ -652,7 +652,7 @@ class TestTaskWorkerSubmit:
         """Test submitting lambda functions."""
         w = TaskWorker.options(mode=worker_mode).init()
 
-        result = w.submit(lambda x: x * 10, 5).result(timeout=5)
+        result = w.submit(lambda x: x * 10, 5).result(timeout=15)
         assert result == 50
 
         w.stop()
@@ -662,7 +662,7 @@ class TestTaskWorkerSubmit:
         w = TaskWorker.options(mode=worker_mode).init()
 
         futures = [w.submit(lambda x: x**2, i) for i in range(5)]
-        results = [f.result(timeout=5) for f in futures]
+        results = [f.result(timeout=15) for f in futures]
 
         assert results == [0, 1, 4, 9, 16]
         w.stop()
@@ -674,7 +674,7 @@ class TestTaskWorkerSubmit:
             return (x + y) * multiplier
 
         w = TaskWorker.options(mode=worker_mode).init()
-        result = w.submit(compute, 5, 10, multiplier=2).result(timeout=5)
+        result = w.submit(compute, 5, 10, multiplier=2).result(timeout=15)
 
         assert result == 30
         w.stop()
@@ -700,7 +700,7 @@ class TestTaskWorkerSubmit:
         future = w.submit(failing_task)
 
         with pytest.raises(Exception) as exc_info:
-            future.result(timeout=5)
+            future.result(timeout=15)
 
         assert "failed" in str(exc_info.value).lower()
         w.stop()
@@ -728,7 +728,7 @@ class TestTaskWorkerSubmit:
         for mode in modes:
             # Ray is initialized by conftest.py initialize_ray fixture
             w = TaskWorker.options(mode=mode).init()
-            result = w.submit(lambda x: x * 2, 5).result(timeout=5)
+            result = w.submit(lambda x: x * 2, 5).result(timeout=15)
             assert result == 10
             w.stop()
 
@@ -746,7 +746,7 @@ class TestRayWorker:
         # Ray is initialized by conftest.py initialize_ray fixture
         w = SimpleWorker.options(mode="ray", actor_options={"num_cpus": 1, "num_gpus": 0}).init(10)
 
-        result = w.add(5).result(timeout=5)
+        result = w.add(5).result(timeout=15)
         assert result == 15
 
         w.stop()
@@ -792,7 +792,7 @@ class TestAsyncFunctionSupport:
         """Test calling async methods on workers."""
         w = AsyncWorker.options(mode=worker_mode).init(10)
         future = w.async_add(5)
-        result = future.result(timeout=5)
+        result = future.result(timeout=15)
         assert result == 15
         w.stop()
 
@@ -801,15 +801,15 @@ class TestAsyncFunctionSupport:
         w = AsyncWorker.options(mode=worker_mode).init(10)
 
         # Call async method
-        result1 = w.async_add(5).result(timeout=5)
+        result1 = w.async_add(5).result(timeout=15)
         assert result1 == 15
 
         # Call sync method
-        result2 = w.sync_method(3).result(timeout=5)
+        result2 = w.sync_method(3).result(timeout=15)
         assert result2 == 13
 
         # Call another async method
-        result3 = w.async_multiply(2).result(timeout=5)
+        result3 = w.async_multiply(2).result(timeout=15)
         assert result3 == 20
 
         w.stop()
@@ -820,7 +820,7 @@ class TestAsyncFunctionSupport:
         future = w.async_error()
 
         with pytest.raises(Exception) as exc_info:
-            future.result(timeout=5)
+            future.result(timeout=15)
 
         assert "Async error occurred" in str(exc_info.value)
         w.stop()
@@ -836,7 +836,7 @@ class TestAsyncFunctionSupport:
 
         w = TaskWorker.options(mode=worker_mode).init()
         future = w.submit(async_compute, 3, 4)
-        result = future.result(timeout=5)
+        result = future.result(timeout=15)
         assert result == 25
         w.stop()
 
@@ -853,7 +853,7 @@ class TestAsyncFunctionSupport:
 
         w = TaskWorker.options(mode=worker_mode).init()
         future = w.submit(async_square, 7)
-        result = future.result(timeout=5)
+        result = future.result(timeout=15)
         assert result == 49
         w.stop()
 
@@ -869,7 +869,7 @@ class TestAsyncFunctionSupport:
 
         # Check all results
         for future, expected in futures:
-            result = future.result(timeout=5)
+            result = future.result(timeout=15)
             assert result == expected
 
         w.stop()
@@ -1136,7 +1136,7 @@ class TestAsyncIOPerformance:
             results_async = [f.result(timeout=30) for f in futures]
             time_async = time.time() - start_time
             # Clean up the aiohttp session
-            w_async.cleanup_session().result(timeout=5)
+            w_async.cleanup_session().result(timeout=15)
             w_async.stop()
 
             # Verify results are correct

@@ -35,6 +35,7 @@ dependencies = [
 [project.optional-dependencies]
 ray = [
     "ray>=2.0.0",
+    "ray[client]",
     "cloudpickle>=2.0.0",
 ]
 dev = [

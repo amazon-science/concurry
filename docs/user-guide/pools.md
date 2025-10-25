@@ -231,6 +231,276 @@ rr_pool.stop()
 la_pool.stop()
 ```
 
+## Non-Blocking Pool Submissions
+
+A critical design principle in concurry is that **all pool submissions are non-blocking**. When you call a method on a pool, it returns a future instantly without blocking, regardless of how many tasks are already queued.
+
+### How Pool Submissions Work
+
+Pool submissions involve two non-blocking steps:
+
+**Step 1: Pool Dispatch** (Instant - Non-Blocking)
+- You call `pool.method(args)`
+- Load balancer selects a worker instantly (O(1) operation)
+- Returns future immediately
+- Your code never blocks
+
+**Step 2: Worker Queuing** (Internal - Non-Blocking)
+- Selected worker queues task internally
+- Worker proxy manages queue to execution backend
+- Controlled by `max_queued_tasks` per worker
+- Transparent to your code
+
+```python
+from concurry import Worker
+import time
+
+class SlowWorker(Worker):
+    def task(self, duration: float) -> str:
+        time.sleep(duration)
+        return f"Done: {duration}s"
+
+# Create pool: 5 workers, each with queue of 10
+pool = SlowWorker.options(
+    mode="thread",
+    max_workers=5,
+    max_queued_tasks=10  # Per-worker queue depth
+).init()
+
+start = time.time()
+
+# All 1000 submissions dispatch instantly (non-blocking!)
+# Load balancer distributes across 5 workers instantly
+# Each worker manages its own queue to its thread
+futures = [pool.task(0.1) for _ in range(1000)]
+
+dispatch_time = time.time() - start
+print(f"Dispatched 1000 tasks in {dispatch_time:.3f}s")  # ~0.002s (instant!)
+
+# Total capacity: 5 workers × 10 queue = 50 in-flight to threads
+# Remaining 950 wait in worker proxy queues (not in your code)
+
+results = [f.result() for f in futures]
+total_time = time.time() - start
+print(f"Total execution: {total_time:.1f}s")  # ~20s (parallel execution)
+
+pool.stop()
+```
+
+**Key Observations:**
+- Dispatch takes milliseconds for 1000 tasks
+- Your code never blocks on submission
+- Pool handles backpressure internally
+- Workers execute tasks in parallel
+
+### Per-Worker Queue Management
+
+Each worker in the pool independently manages its own submission queue:
+
+```python
+pool = MyWorker.options(
+    mode="thread",
+    max_workers=3,           # 3 workers
+    max_queued_tasks=5,      # Each has queue of 5
+    load_balancing="round_robin"
+).init()
+
+# Submit 30 tasks - all dispatch instantly
+futures = [pool.process(i) for i in range(30)]
+
+# Distribution with round-robin:
+# - Worker 0: Gets tasks 0, 3, 6, 9, 12, 15, 18, 21, 24, 27
+# - Worker 1: Gets tasks 1, 4, 7, 10, 13, 16, 19, 22, 25, 28
+# - Worker 2: Gets tasks 2, 5, 8, 11, 14, 17, 20, 23, 26, 29
+#
+# Each worker forwards first 5 to thread, queues remaining 5
+# Total in-flight to threads: 15 (3 workers × 5 queue)
+# Remaining 15 wait in worker proxy queues
+```
+
+### Pool Capacity
+
+The effective capacity of a pool is `max_workers × max_queued_tasks`:
+
+```python
+# Small pool, large queues
+pool1 = MyWorker.options(
+    mode="thread",
+    max_workers=2,       # 2 workers
+    max_queued_tasks=50  # 50 each
+).init()
+# Capacity: 100 tasks in-flight to threads
+
+# Large pool, small queues  
+pool2 = MyWorker.options(
+    mode="thread",
+    max_workers=10,      # 10 workers
+    max_queued_tasks=10  # 10 each
+).init()
+# Capacity: 100 tasks in-flight to threads
+
+# Both have same capacity but different characteristics:
+# - pool1: Better for sequential bottlenecks
+# - pool2: Better for parallel execution
+```
+
+### Load Balancing is Instant
+
+All load balancing algorithms select workers instantly without blocking:
+
+```python
+# Round-robin: O(1) counter increment
+rr_pool = MyWorker.options(
+    mode="thread",
+    max_workers=10,
+    load_balancing="round_robin"
+).init()
+
+# Least active: O(N) scan of worker states (N=max_workers)
+# Still instant for typical pool sizes
+la_pool = MyWorker.options(
+    mode="thread",
+    max_workers=10,
+    load_balancing="active"
+).init()
+
+# Both dispatch instantly - no user-facing blocking
+```
+
+### On-Demand Pools: Also Non-Blocking
+
+On-demand pools create workers dynamically, but dispatch is still non-blocking:
+
+```python
+pool = MyWorker.options(
+    mode="thread",
+    on_demand=True,
+    max_workers=10  # Max 10 concurrent on-demand workers
+).init()
+
+start = time.time()
+
+# All 100 submissions dispatch instantly
+# Workers created asynchronously as needed
+futures = [pool.process(i) for i in range(100)]
+
+dispatch_time = time.time() - start
+print(f"Dispatched 100 tasks in {dispatch_time:.3f}s")  # ~0.001s
+
+# Workers are created/destroyed in background
+# Your code never blocks on worker creation
+results = [f.result() for f in futures]
+pool.stop()
+```
+
+### Why This Matters
+
+**For High-Throughput Workloads:**
+
+```python
+# You can submit as fast as you want
+pool = MyWorker.options(mode="ray", max_workers=100).init()
+
+# Tight loop - no blocking
+for item in massive_dataset:  # Millions of items
+    future = pool.process(item)  # Instant return
+    # Continue immediately - no waiting
+
+# All futures available instantly for tracking/collection
+```
+
+**For Bursty Traffic:**
+
+```python
+# Handle traffic spikes without blocking
+api_pool = APIWorker.options(mode="thread", max_workers=50).init()
+
+@app.route("/process")
+def handle_request():
+    data = request.json
+    # Submission is instant - no request blocking
+    future = api_pool.process(data)
+    # Can return immediately or wait for result
+    return {"task_id": future.uuid}
+```
+
+**For Pipeline Composition:**
+
+```python
+# Chain multiple pools without blocking
+fetcher_pool = Fetcher.options(mode="thread", max_workers=10).init()
+processor_pool = Processor.options(mode="process", max_workers=4).init()
+
+# All submissions instant - futures chain automatically
+for url in urls:
+    fetched = fetcher_pool.fetch(url)      # Instant
+    processed = processor_pool.process(fetched)  # Instant
+    # Continue to next item without waiting
+```
+
+### Best Practices
+
+**1. Don't Worry About Submission Speed**
+
+Submissions are always instant - no need to optimize:
+
+```python
+# ✅ Good: Just submit naturally
+pool = MyWorker.options(mode="thread", max_workers=10).init()
+futures = [pool.process(item) for item in items]
+
+# ❌ Unnecessary: Artificial throttling
+for item in items:
+    pool.process(item)
+    time.sleep(0.001)  # Pointless - submission is already instant
+```
+
+**2. Trust the Queue Defaults**
+
+Default `max_queued_tasks` values are tuned for each mode:
+
+```python
+# ✅ Good: Use defaults
+pool = MyWorker.options(mode="thread", max_workers=10).init()
+# Each worker has max_queued_tasks=100 (default)
+
+# ❌ Avoid: Micro-optimizing without measurement
+pool = MyWorker.options(
+    mode="thread",
+    max_workers=10,
+    max_queued_tasks=47  # Why this specific number?
+).init()
+```
+
+**3. Consider Pool Size vs Queue Depth**
+
+Balance based on your workload characteristics:
+
+```python
+# For I/O-bound: More workers, larger queues
+io_pool = MyWorker.options(
+    mode="thread",
+    max_workers=20,      # Many workers
+    max_queued_tasks=100  # Large queues (default)
+).init()
+
+# For CPU-bound: Fewer workers, smaller queues
+cpu_pool = MyWorker.options(
+    mode="process",
+    max_workers=4,       # Match CPU cores
+    max_queued_tasks=5   # Small queues (default)
+).init()
+```
+
+### Summary
+
+- **Pool dispatch is always instant** - load balancer selects worker instantly
+- **Worker submissions are non-blocking** - futures return immediately
+- **Per-worker queues are independent** - each manages its own backpressure
+- **Total capacity = max_workers × max_queued_tasks**
+- **Your code never blocks on submission** - submit as fast as you want
+- **Trust the defaults** - they're tuned for typical workloads
+
 ## Resource Limits with Pools
 
 Worker pools can enforce shared resource limits across all workers, ensuring the entire pool respects rate limits and resource constraints.

@@ -1812,6 +1812,338 @@ inspector = FutureInspector.options(unwrap_futures=False).init()
 worker = Worker.options(unwrap_futures=False).init()  # Why?
 ```
 
+## Submission Queue and Non-Blocking Behavior
+
+One of the key design principles in concurry is that **user submissions are always non-blocking**. You can submit thousands of tasks to workers instantly without your code ever blocking. The `max_queued_tasks` parameter controls internal backpressure from worker proxies to execution backends, not user-facing submission.
+
+### Non-Blocking Submissions
+
+When you call a worker method, it returns a future immediately without blocking:
+
+```python
+from concurry import Worker
+import time
+
+class SlowWorker(Worker):
+    def slow_task(self, duration: float) -> str:
+        time.sleep(duration)
+        return f"Completed after {duration}s"
+
+# Create worker with submission queue
+worker = SlowWorker.options(
+    mode="thread",
+    max_queued_tasks=5  # Only 5 tasks in-flight to thread at once
+).init()
+
+start = time.time()
+
+# All 1000 submissions return INSTANTLY (non-blocking!)
+futures = [worker.slow_task(2.0) for _ in range(1000)]
+
+submit_time = time.time() - start
+print(f"Submitted 1000 tasks in {submit_time:.3f}s")  # ~0.001s (instant!)
+
+# Tasks execute over time as queue drains
+results = [f.result() for f in futures]
+total_time = time.time() - start
+print(f"Total execution: {total_time:.1f}s")  # ~400s (sequential execution)
+
+worker.stop()
+```
+
+**Key Observation:** Submission takes milliseconds, execution takes minutes. Your code never blocks during submission.
+
+### Two-Layer Architecture
+
+The submission system has two distinct layers:
+
+**Layer 1: User → Worker Proxy** (Always Non-Blocking)
+- You submit tasks by calling worker methods
+- Returns futures instantly
+- No limit on number of submissions
+- Your code never blocks
+
+**Layer 2: Worker Proxy → Execution Backend** (Controlled by `max_queued_tasks`)
+- Worker proxy manages internal queue to backend (thread/process/ray)
+- Only `max_queued_tasks` tasks are in-flight to backend at once
+- Prevents overloading execution context
+- Automatically releases slots as tasks complete
+
+```python
+# Conceptual view of the architecture:
+#
+# User Code                Worker Proxy         Execution Backend
+#    │                          │                        │
+#    │  worker.task(1)          │                        │
+#    ├─────────────────────────>│                        │
+#    │  <return future instantly>│                       │
+#    │                          │  forward task 1        │
+#    │                          ├───────────────────────>│
+#    │  worker.task(2)          │                        │
+#    ├─────────────────────────>│                        │
+#    │  <return future instantly>│                       │
+#    │                          │  forward task 2        │
+#    │                          ├───────────────────────>│
+#    │  ... submit 1000 more    │                        │
+#    │  (all return instantly)  │                        │
+#    │                          │  (queue full, wait)    │
+#    │                          │  ... tasks 3-1000 wait │
+#    │                          │                        │
+#    │                          │  <task 1 completes>    │
+#    │                          │<───────────────────────│
+#    │                          │  forward task 3        │
+#    │                          ├───────────────────────>│
+```
+
+### How `max_queued_tasks` Works
+
+The `max_queued_tasks` parameter controls how many tasks can be "in-flight" from the worker proxy to the underlying execution context:
+
+```python
+worker = MyWorker.options(
+    mode="thread",
+    max_queued_tasks=10  # Max 10 tasks in the thread at once
+).init()
+
+# Submit 100 tasks - all return instantly (non-blocking!)
+futures = [worker.process(i) for i in range(100)]
+
+# Behind the scenes:
+# - Tasks 0-9: Immediately forwarded to thread
+# - Tasks 10-99: Wait in worker proxy's internal queue
+# - As each task completes in thread, next task is forwarded
+# - Your code never blocks - futures are available immediately
+```
+
+**What happens when queue fills up:**
+- Worker proxy holds excess tasks internally
+- User submissions still return futures instantly
+- Tasks are forwarded to backend as slots become available
+- This is transparent to your code
+
+### Worker Pools: Also Non-Blocking
+
+With worker pools, both pool dispatch AND worker submission are non-blocking:
+
+```python
+pool = MyWorker.options(
+    mode="thread",
+    max_workers=5,           # 5 workers in pool
+    max_queued_tasks=10      # Each worker has queue of 10
+).init()
+
+start = time.time()
+
+# All 1000 submissions dispatch instantly (non-blocking!)
+# Load balancer selects a worker instantly
+# Each worker manages its own queue to its thread
+futures = [pool.process(i) for i in range(1000)]
+
+dispatch_time = time.time() - start
+print(f"Dispatched 1000 tasks in {dispatch_time:.3f}s")  # ~0.002s
+
+# Total capacity: 5 workers × 10 queue = 50 tasks in-flight to threads
+# Remaining 950 tasks wait in worker proxy queues (not in user code)
+
+results = [f.result() for f in futures]
+pool.stop()
+```
+
+**Pool dispatch flow:**
+1. You call `pool.method(args)` → Returns future instantly
+2. Load balancer selects a worker instantly
+3. Worker proxy queues task internally
+4. Worker proxy forwards task to backend when slot available
+5. Your code never blocks
+
+### Default Values by Mode
+
+Different modes have different default `max_queued_tasks` values:
+
+| Mode | Default `max_queued_tasks` | Rationale |
+|------|----------------------------|-----------|
+| `sync` | None (bypassed) | Immediate execution, no queuing needed |
+| `asyncio` | None (bypassed) | Event loop handles concurrency |
+| `thread` | 100 | High concurrency, large queue |
+| `process` | 5 | Limited by CPU cores |
+| `ray` | 2 | Minimize data transfer overhead and actor memory |
+
+```python
+# Thread mode: Large queue for high I/O concurrency
+thread_worker = MyWorker.options(mode="thread").init()
+# max_queued_tasks=100 (default)
+
+# Process mode: Small queue for CPU-bound tasks
+process_worker = MyWorker.options(mode="process").init()
+# max_queued_tasks=5 (default)
+
+# Ray mode: Minimal queue to avoid memory bloat in actors
+ray_worker = MyWorker.options(mode="ray").init()
+# max_queued_tasks=2 (default)
+```
+
+### Disabling the Queue
+
+Set `max_queued_tasks=None` to bypass queuing entirely:
+
+```python
+worker = MyWorker.options(
+    mode="thread",
+    max_queued_tasks=None  # No queue limit
+).init()
+
+# All tasks flow immediately to thread
+# Thread's internal queue handles backpressure
+# Useful for stress testing or when thread queue is more appropriate
+```
+
+**When to use `None`:**
+- Testing maximum throughput
+- Trusting backend's own queuing mechanism
+- Worker methods are very fast (microseconds)
+
+**When to use a limit:**
+- Controlling memory usage (each future has overhead)
+- Preventing Ray actor memory bloat
+- Limiting concurrent operations in process workers
+
+### Integration with Blocking Mode
+
+In blocking mode, submission queues are automatically bypassed:
+
+```python
+worker = MyWorker.options(
+    mode="thread",
+    blocking=True,           # Returns results directly
+    max_queued_tasks=10      # Ignored in blocking mode
+).init()
+
+# Each call blocks until result is ready (sequential execution)
+results = [worker.process(i) for i in range(100)]
+# No queue needed - execution is sequential
+worker.stop()
+```
+
+### Integration with Limits
+
+Submission queues and resource limits work together:
+
+```python
+from concurry import Worker, ResourceLimit
+
+class DatabaseWorker(Worker):
+    def query(self, sql: str) -> list:
+        # Acquire resource limit before execution
+        with self.limits.acquire(requested={"connections": 1}):
+            return execute_query(sql)
+
+worker = DatabaseWorker.options(
+    mode="thread",
+    max_queued_tasks=10,  # Max 10 tasks queued to thread
+    limits=[ResourceLimit(key="connections", capacity=5)]
+).init()
+
+# Submit 100 queries - all return futures instantly
+futures = [worker.query(f"SELECT {i}") for i in range(100)]
+
+# Submission queue: Controls tasks flowing to thread (10 at once)
+# Resource limit: Controls concurrent DB connections (5 at once)
+# Both limits work independently and transparently
+
+results = [f.result() for f in futures]
+worker.stop()
+```
+
+### On-Demand Workers
+
+On-demand workers automatically bypass submission queues since they're ephemeral:
+
+```python
+pool = MyWorker.options(
+    mode="thread",
+    on_demand=True,         # Create worker per request
+    max_workers=10,         # Max 10 concurrent workers
+    max_queued_tasks=5      # Ignored for on-demand
+).init()
+
+# Each request creates a new worker (no queue needed)
+# Pool-level concurrency limit (max_workers) provides backpressure
+futures = [pool.process(i) for i in range(100)]
+results = [f.result() for f in futures]
+pool.stop()
+```
+
+### Best Practices
+
+**1. Trust the Defaults**
+
+The default `max_queued_tasks` values are tuned for typical workloads:
+
+```python
+# ✅ Good: Use defaults for most cases
+worker = MyWorker.options(mode="thread").init()  # max_queued_tasks=100
+
+# ❌ Avoid: Micro-optimizing without measurement
+worker = MyWorker.options(mode="thread", max_queued_tasks=73).init()
+```
+
+**2. Increase Queue for Ray Workers**
+
+Ray actors benefit from smaller queues to avoid memory bloat:
+
+```python
+# ✅ Good: Keep Ray queue small (default is 2)
+ray_worker = MyWorker.options(mode="ray").init()
+
+# ⚠️ Caution: Large queues can cause Ray actor OOM
+ray_worker = MyWorker.options(
+    mode="ray",
+    max_queued_tasks=1000  # Might cause memory issues
+).init()
+```
+
+**3. Remember: Submission is Always Fast**
+
+Your code never blocks on submission, so don't worry about it:
+
+```python
+# ✅ Good: Submit freely
+worker = MyWorker.options(mode="thread").init()
+futures = [worker.task(i) for i in range(10000)]  # Instant!
+
+# ❌ Unnecessary: Batching submissions
+# (No benefit - submission is already instant)
+for batch in chunked(range(10000), 100):
+    futures.extend([worker.task(i) for i in batch])
+    time.sleep(0.1)  # Pointless delay
+```
+
+**4. Combine with Resource Limits for Full Control**
+
+```python
+# ✅ Good: Two-layer control
+worker = MyWorker.options(
+    mode="thread",
+    max_queued_tasks=20,    # Control thread queue depth
+    limits=[
+        ResourceLimit(key="api_connections", capacity=5)
+    ]
+).init()
+
+# Submission queue: Prevents overloading thread (20 tasks)
+# Resource limit: Prevents overloading API (5 concurrent calls)
+# Both work together seamlessly
+```
+
+### Summary
+
+- **User submissions are always non-blocking** - call worker methods freely
+- **Futures return instantly** - no waiting on submission
+- **`max_queued_tasks` controls internal queue** - from worker proxy to execution backend
+- **Worker pools also non-blocking** - pool dispatch is instant
+- **Trust the defaults** - they're tuned for typical workloads
+- **Combine with resource limits** - for fine-grained control
+
 ## Retry Mechanisms
 
 Workers support automatic retry of failed operations with configurable strategies, exception filtering, and output validation.

@@ -164,7 +164,6 @@ class WorkerProxyPool(Typed, ABC):
     _on_demand_workers: list[Any] = PrivateAttr()
     _on_demand_lock: Any = PrivateAttr()
     _on_demand_counter: conint(ge=0) = PrivateAttr()  # Counter for on-demand worker indices
-    _worker_semaphores: list[Any] = PrivateAttr()  # Per-worker submission semaphores
 
     def post_initialize(self) -> None:
         """Initialize private attributes after Typed validation."""
@@ -181,21 +180,8 @@ class WorkerProxyPool(Typed, ABC):
         object.__setattr__(self, "_on_demand_lock", threading.Lock())
         object.__setattr__(self, "_on_demand_counter", 0)  # Start at 0 for on-demand
 
-        # Initialize per-worker semaphores list (will be populated after pool initialization)
-        object.__setattr__(self, "_worker_semaphores", [])
-
         # Initialize the pool
         self._initialize_pool()
-
-        # Create per-worker semaphores for persistent pool
-        # Skip if on-demand (each on-demand worker has its own semaphore), blocking mode, or asyncio mode
-        # AsyncIO pools don't need submission queuing since the event loop handles concurrency
-
-        if not self.on_demand and not self.blocking and self.mode != ExecutionMode.Asyncio:
-            # Each worker gets its own semaphore
-            for _ in range(len(self._workers)):
-                semaphore = threading.BoundedSemaphore(self.max_queued_tasks)
-                self._worker_semaphores.append(semaphore)
 
     @abstractmethod
     def _initialize_pool(self) -> None:
@@ -231,28 +217,20 @@ class WorkerProxyPool(Typed, ABC):
         pass
 
     def _wrap_future_with_tracking(self, future: BaseFuture, worker_idx: int) -> BaseFuture:
-        """Wrap a future to track completion for load balancing and release semaphore.
+        """Wrap a future to track completion for load balancing.
 
         Args:
             future: The future to wrap
             worker_idx: Index of the worker that created the future
 
         Returns:
-            Wrapped future that records completion and releases semaphore
+            Wrapped future that records completion
         """
 
-        # Use callback to release semaphore when future completes
-        # This ensures semaphore is released regardless of whether .result() is called
         def on_complete(f):
             try:
                 # Record completion for load balancer
                 self._load_balancer.record_complete(worker_idx)
-                # Release worker's submission semaphore
-                if len(self._worker_semaphores) > 0:
-                    try:
-                        self._worker_semaphores[worker_idx].release()
-                    except Exception:
-                        pass  # Ignore release errors
             except Exception:
                 pass  # Ignore any errors in callback
 
@@ -401,19 +379,8 @@ class WorkerProxyPool(Typed, ABC):
             worker_idx = self._load_balancer.select_worker(len(self._workers))
             worker = self._workers[worker_idx]
 
-            # Acquire worker's submission semaphore first (blocks if queue full)
-            # This must happen BEFORE the stopped check to avoid race condition:
-            # Without this order, a thread could check _stopped (False), then block
-            # on semaphore acquisition, then stop() is called, then thread wakes up
-            # and executes the method even though pool is stopped.
-            if not self.blocking and len(self._worker_semaphores) > 0:
-                self._worker_semaphores[worker_idx].acquire()
-
-            # Now check if stopped - this is atomic with execution because we
-            # already hold the semaphore. If stopped, release semaphore and raise.
+            # Check if stopped
             if self._stopped:
-                if not self.blocking and len(self._worker_semaphores) > 0:
-                    self._worker_semaphores[worker_idx].release()
                 raise RuntimeError("Worker pool is stopped")
 
             # Record start for load balancer
@@ -438,9 +405,6 @@ class WorkerProxyPool(Typed, ABC):
                 # Not a future (e.g., iterator from map), return as-is
                 # Record completion immediately since we don't track iterators
                 self._load_balancer.record_complete(worker_idx)
-                # Release semaphore for non-future results
-                if len(self._worker_semaphores) > 0:
-                    self._worker_semaphores[worker_idx].release()
                 return result
 
         # Cache the wrapper (safely, in case it doesn't exist yet during __init__)
@@ -465,22 +429,9 @@ class WorkerProxyPool(Typed, ABC):
             - load_balancer: Load balancer statistics
             - stopped: Whether pool is stopped
             - max_queued_tasks: Per-worker submission queue capacity
-            - submission_queues: list of per-worker queue info
         """
         with self._on_demand_lock:
             on_demand_active = len(self._on_demand_workers)
-
-        # Get semaphore info
-        submission_queue_info = []
-        for idx, sem in enumerate(self._worker_semaphores):
-            # BoundedSemaphore doesn't expose current value directly
-            # We can only provide capacity info
-            submission_queue_info.append(
-                {
-                    "worker_idx": idx,
-                    "capacity": self.max_queued_tasks,
-                }
-            )
 
         return {
             "total_workers": len(self._workers),
@@ -490,7 +441,6 @@ class WorkerProxyPool(Typed, ABC):
             "load_balancer": self._load_balancer.get_stats(),
             "stopped": self._stopped,
             "max_queued_tasks": self.max_queued_tasks,
-            "submission_queues": submission_queue_info,
         }
 
     def get_worker_stats(self, worker_id: int) -> dict[str, Any]:

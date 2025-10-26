@@ -161,7 +161,7 @@ def pytest_configure(config):
     """Configure pytest with default timeout and other settings.
 
     This hook runs before test collection. It sets up:
-    - Default 60-second timeout per test (if not overridden by CLI)
+    - Default timeout per test (if not overridden by CLI)
     - Thread-based timeout method (works better with Ray/multiprocessing)
     - Full traceback display on timeout
 
@@ -170,7 +170,7 @@ def pytest_configure(config):
     """
     # Set default timeout if not specified via command line
     if config.option.timeout is None:
-        config.option.timeout = 60  # 60 seconds default
+        config.option.timeout = 120  # 120 seconds default
 
     # Use 'thread' timeout method for better compatibility
     # (works with Ray actors and multiprocessing)

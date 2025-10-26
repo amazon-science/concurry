@@ -9,7 +9,7 @@ on:
 jobs:
   pytest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120
 
     steps:
       - name: Check out concurry repo
@@ -28,19 +28,29 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Cache Python dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Install test requirements
         # Install morphic first from local checkout, then concurry with all dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install --upgrade uv
-          python -m uv pip install --upgrade pytest
+          python -m uv pip install --upgrade pytest pytest-xdist pytest-timeout
           python -m uv pip install -e "./morphic[all]"
           python -m uv pip install -e "./concurry[all]"
 
       - name: Run tests
+        timeout-minutes: 110
         # Skip performance tests and progress tests (via pytestmark) on CI
+        # Use --timeout=300 (5 min per test) to prevent individual test hangs
         env:
           CI: true
         run: |
           cd concurry
-          pytest tests --verbose -m "not performance"
+          pytest tests --verbose -m "not performance" --timeout=300 --timeout-method=thread

@@ -8,7 +8,7 @@ Users can customize defaults at both levels.
 """
 
 from contextlib import contextmanager
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from morphic import MutableTyped
 from pydantic import ConfigDict, confloat, conint
@@ -53,6 +53,9 @@ class GlobalDefaults(MutableTyped):
     load_balancing: LoadBalancingAlgorithm = LoadBalancingAlgorithm.RoundRobin
     load_balancing_on_demand: LoadBalancingAlgorithm = LoadBalancingAlgorithm.Random
     on_demand: bool = False  # Default for Worker.options() on_demand parameter
+
+    # Multiprocessing configuration (process mode only)
+    mp_context: Literal["fork", "spawn", "forkserver"] = "forkserver"  # forkserver is safe with gRPC threads
 
     # @task decorator configuration
     task_decorator_on_demand: bool = True  # Default for @task decorator
@@ -155,6 +158,9 @@ class ExecutionModeDefaults(MutableTyped):
     load_balancing: Optional[LoadBalancingAlgorithm] = None
     load_balancing_on_demand: Optional[LoadBalancingAlgorithm] = None
     on_demand: Optional[bool] = None
+
+    # Multiprocessing configuration (process mode only)
+    mp_context: Optional[Literal["fork", "spawn", "forkserver"]] = None
 
     # @task decorator configuration
     task_decorator_on_demand: Optional[bool] = None
@@ -321,6 +327,10 @@ class ResolvedDefaults:
     @property
     def on_demand(self) -> bool:
         return self._mode.on_demand if self._mode.on_demand is not None else self._global.on_demand
+
+    @property
+    def mp_context(self) -> Literal["fork", "spawn", "forkserver"]:
+        return self._mode.mp_context if self._mode.mp_context is not None else self._global.mp_context
 
     @property
     def task_decorator_on_demand(self) -> bool:

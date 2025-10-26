@@ -50,6 +50,7 @@ def _transform_worker_limits(
         ValueError: If limits configuration is invalid
     """
     # Import here to avoid circular imports
+    from ...config import global_config
     from ..limit import Limit
     from ..limit.limit_pool import LimitPool
     from ..limit.limit_set import (
@@ -60,17 +61,23 @@ def _transform_worker_limits(
         RaySharedLimitSet,
     )
 
+    # Get mp_context from global config for process mode
+    mp_context = None
+    if mode == ExecutionMode.Processes:
+        local_config = global_config.clone()
+        mp_context = local_config.defaults.mp_context
+
     # Case 1: None -> Create empty LimitPool with empty LimitSet
     if limits is None:
         # Create empty LimitSet
         if is_pool:
-            empty_limitset = LimitSet(limits=[], shared=True, mode=mode)
+            empty_limitset = LimitSet(limits=[], shared=True, mode=mode, mp_context=mp_context)
         else:
             if mode in (ExecutionMode.Ray, ExecutionMode.Processes):
                 # For Ray/Process, create list to be wrapped remotely
                 empty_limitset = []
             else:
-                empty_limitset = LimitSet(limits=[], shared=False, mode=ExecutionMode.Sync)
+                empty_limitset = LimitSet(limits=[], shared=False, mode=ExecutionMode.Sync, mp_context=None)
 
         # Wrap in LimitPool (unless it's a list for remote creation)
         if isinstance(empty_limitset, list):
@@ -89,11 +96,11 @@ def _transform_worker_limits(
         if len(limits) == 0:
             # Empty list -> treat as no limits
             if is_pool:
-                empty_limitset = LimitSet(limits=[], shared=True, mode=mode)
+                empty_limitset = LimitSet(limits=[], shared=True, mode=mode, mp_context=mp_context)
             else:
                 if mode in (ExecutionMode.Ray, ExecutionMode.Processes):
                     return []  # Will be wrapped remotely
-                empty_limitset = LimitSet(limits=[], shared=False, mode=ExecutionMode.Sync)
+                empty_limitset = LimitSet(limits=[], shared=False, mode=ExecutionMode.Sync, mp_context=None)
             return LimitPool(
                 limit_sets=[empty_limitset],
                 worker_index=worker_index,
@@ -103,11 +110,11 @@ def _transform_worker_limits(
         if all(isinstance(item, Limit) for item in limits):
             # Create LimitSet from Limits
             if is_pool:
-                limitset = LimitSet(limits=limits, shared=True, mode=mode)
+                limitset = LimitSet(limits=limits, shared=True, mode=mode, mp_context=mp_context)
             else:
                 if mode in (ExecutionMode.Ray, ExecutionMode.Processes):
                     return limits  # Keep as list, will be wrapped remotely
-                limitset = LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync)
+                limitset = LimitSet(limits=limits, shared=False, mode=ExecutionMode.Sync, mp_context=None)
             return LimitPool(
                 limit_sets=[limitset],
                 worker_index=worker_index,
@@ -173,7 +180,9 @@ def _transform_worker_limits(
                     UserWarning,
                     stacklevel=4,
                 )
-                new_limitset = LimitSet(limits=limits_list, shared=False, mode=ExecutionMode.Sync)
+                new_limitset = LimitSet(
+                    limits=limits_list, shared=False, mode=ExecutionMode.Sync, mp_context=None
+                )
                 return LimitPool(
                     limit_sets=[new_limitset],
                     worker_index=worker_index,
@@ -209,6 +218,14 @@ def _transform_worker_limits(
 def _validate_shared_limitset_mode_compatibility(limit_set: Any, worker_mode: ExecutionMode) -> None:
     """Validate that a LimitSet is compatible with the worker mode.
 
+    This validation prevents runtime errors from mode mismatches:
+    - MultiprocessSharedLimitSet uses multiprocessing.Manager() (only works across processes)
+    - RaySharedLimitSet uses Ray actor (only works across Ray actors)
+    - InMemorySharedLimitSet uses threading.Lock (works in same process only)
+
+    Using the wrong LimitSet backend for a worker mode will either fail to share limits
+    (each worker gets own copy) or cause serialization/communication errors.
+
     Args:
         limit_set: The LimitSet to validate
         worker_mode: The worker's execution mode
@@ -216,6 +233,28 @@ def _validate_shared_limitset_mode_compatibility(limit_set: Any, worker_mode: Ex
     Raises:
         ValueError: If the LimitSet is not compatible with the worker mode
     """
+    from ..limit.limit_set import InMemorySharedLimitSet, MultiprocessSharedLimitSet, RaySharedLimitSet
+
+    # Check for mode mismatches that would cause issues
+    if isinstance(limit_set, MultiprocessSharedLimitSet) and worker_mode != ExecutionMode.Processes:
+        raise ValueError(
+            f"MultiprocessSharedLimitSet can only be used with process mode workers, "
+            f"but worker_mode is {worker_mode}. "
+            f"Create LimitSet with mode='{worker_mode.value}' to match worker mode."
+        )
+    elif isinstance(limit_set, RaySharedLimitSet) and worker_mode != ExecutionMode.Ray:
+        raise ValueError(
+            f"RaySharedLimitSet can only be used with ray mode workers, "
+            f"but worker_mode is {worker_mode}. "
+            f"Create LimitSet with mode='{worker_mode.value}' to match worker mode."
+        )
+    elif isinstance(limit_set, InMemorySharedLimitSet) and worker_mode in (
+        ExecutionMode.Processes,
+        ExecutionMode.Ray,
+    ):
+        # This is okay - InMemorySharedLimitSet can be used with process/ray workers
+        # It just won't share across workers (each worker gets its own copy)
+        pass
 
 
 def _should_use_composition_wrapper(worker_cls: Type) -> bool:
@@ -1091,6 +1130,9 @@ class WorkerBuilder(Typed):
         elif execution_mode == ExecutionMode.Processes:
             proxy_kwargs["result_queue_timeout"] = mode_defaults.worker_result_queue_timeout
             proxy_kwargs["result_queue_cleanup_timeout"] = mode_defaults.worker_result_queue_cleanup_timeout
+            # Add mp_context from config if not in mode_options
+            if "mp_context" not in self.mode_options:
+                proxy_kwargs["mp_context"] = mode_defaults.mp_context
         # Sync and Ray modes have no worker-specific timeouts
 
         # Merge mode_options (pass through as-is to proxy)

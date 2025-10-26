@@ -89,6 +89,24 @@ with temp_config(
     pass
 ```
 
+### Multiprocessing Configuration
+
+Configure multiprocessing context for process mode (important for Ray client compatibility):
+
+```python
+with temp_config(
+    global_mp_context="forkserver"  # Default: Safe + fast
+    # Options: "fork" (fast but unsafe with Ray client)
+    #          "spawn" (safest but very slow ~10-20s)
+    #          "forkserver" (recommended: safe + fast ~200ms)
+):
+    # All process workers created here use forkserver
+    worker = MyWorker.options(mode="process").init()
+    worker.stop()
+```
+
+**⚠️ WARNING**: If you use Ray client mode alongside process workers, **DO NOT use `fork`** as the multiprocessing context. It will cause segmentation faults due to forking active gRPC threads. Always use `forkserver` (default) or `spawn`.
+
 ### Execution Configuration
 
 Control blocking behavior and future unwrapping:

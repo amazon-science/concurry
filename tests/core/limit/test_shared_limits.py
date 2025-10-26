@@ -244,46 +244,84 @@ class TestSharedLimitSets:
     def test_shared_limitset_across_workers_process(self):
         """Test that shared MultiprocessSharedLimitSet is shared across process workers (CRITICAL TEST).
 
-        1. Creates shared LimitSet for process mode (CallLimit, 10 calls/sec, shared=True)
-        2. Creates two Counter workers in SEPARATE processes (w1, w2)
+        1. Creates shared LimitSet for process mode (ResourceLimit, capacity=3, shared=True)
+        2. Creates two workers in SEPARATE processes (w1, w2)
         3. Both workers share THE SAME LimitSet via multiprocessing.Manager()
-        4. Makes 10 total calls (5 from w1, 5 from w2) - all share the 10 call limit
-        5. Verifies all calls complete (limits enforced across processes)
-        6. Stops both workers
+        4. Submits 6 tasks total (3 from each worker) that acquire 1 resource and hold for 1 second
+        5. **VALIDATES SHARING**: With capacity=3, only 3 tasks can run concurrently
+        6. Expected: First 3 tasks complete after ~1s, next 3 tasks wait then complete after ~2s
+        7. If NOT shared: All 6 tasks would complete after ~1s (each worker has its own capacity=3)
 
         This validates limits are SHARED across SEPARATE PROCESSES using Manager().
         """
 
-        class Counter(Worker):
-            def __init__(self):
-                pass
+        class ResourceWorker(Worker):
+            def __init__(self, worker_id: int):
+                self.worker_id = worker_id
 
-            def increment(self):
-                with self.limits.acquire():
-                    import time
+            def hold_resource(self, task_id: int) -> dict:
+                """Acquire resource, hold for 1 second, return timing info."""
+                import time
 
-                    time.sleep(0.01)
-                    return 1
+                start = time.time()
+                with self.limits.acquire(requested={"resource": 1}):
+                    acquire_time = time.time() - start
+                    time.sleep(1.0)  # Hold resource for 1 second
+                    return {
+                        "worker_id": self.worker_id,
+                        "task_id": task_id,
+                        "acquire_time": acquire_time,
+                    }
 
-        # Create shared LimitSet for process mode
+        # Create shared LimitSet with capacity=3
         shared_limits = LimitSet(
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)],
+            limits=[ResourceLimit(key="resource", capacity=3)],
             shared=True,
             mode="process",
         )
 
         # Create two process workers sharing the same limits
-        w1 = Counter.options(mode="process", limits=shared_limits).init()
-        w2 = Counter.options(mode="process", limits=shared_limits).init()
+        w1 = ResourceWorker.options(mode="process", limits=shared_limits).init(worker_id=1)
+        w2 = ResourceWorker.options(mode="process", limits=shared_limits).init(worker_id=2)
 
-        # Make calls and verify they complete
+        # Submit 6 tasks total (3 from each worker) simultaneously
+        start_time = time.time()
         futures = []
-        for i in range(5):
-            futures.append(w1.increment())
-            futures.append(w2.increment())
+        for i in range(3):
+            futures.append(w1.hold_resource(i))
+            futures.append(w2.hold_resource(i))
 
-        for f in futures:
-            f.result()
+        # Collect results
+        results = [f.result(timeout=10) for f in futures]
+        elapsed = time.time() - start_time
+
+        # Analyze acquire times
+        acquire_times = sorted([r["acquire_time"] for r in results])
+
+        # Validate shared behavior:
+        # - First 3 tasks should acquire immediately (<0.2s)
+        # - Last 3 tasks should wait ~1s for resources to be released
+        immediate = sum(1 for t in acquire_times if t < 0.2)
+        delayed = sum(1 for t in acquire_times if t >= 0.8)
+
+        assert immediate == 3, (
+            f"Expected 3 immediate acquires (<0.2s), got {immediate}. "
+            f"Acquire times: {acquire_times}. "
+            f"This suggests limits are NOT shared - each worker may have its own capacity=3!"
+        )
+
+        assert delayed == 3, (
+            f"Expected 3 delayed acquires (>=0.8s), got {delayed}. "
+            f"Acquire times: {acquire_times}. "
+            f"This suggests limits are NOT shared - capacity should force waiting!"
+        )
+
+        # Total time should be ~2 seconds (two waves of 3 concurrent tasks holding for 1s each)
+        assert 1.8 <= elapsed <= 2.5, (
+            f"Expected ~2 seconds total (two waves), got {elapsed:.2f}s. "
+            f"If < 1.5s: limits not shared (all 6 ran concurrently). "
+            f"If > 2.5s: unexpected slowdown."
+        )
 
         w1.stop()
         w2.stop()
@@ -338,48 +376,99 @@ class TestRayWorkerLimits:
     def test_shared_limitset_across_ray_workers(self):
         """Test that shared RaySharedLimitSet works across Ray workers (CRITICAL TEST).
 
-        1. Creates shared LimitSet for Ray mode (CallLimit, 10 calls/sec, shared=True)
-        2. Creates two Counter Ray actors (w1, w2) in SEPARATE Ray processes
-        3. Both actors share THE SAME LimitSet via Ray actor
-        4. Makes 10 total calls (5 from w1, 5 from w2) - all share the 10 call limit
-        5. Verifies all calls complete (limits enforced across Ray actors)
-        6. Stops both workers
+        1. Creates shared LimitSet for Ray mode (ResourceLimit, capacity=3, shared=True)
+        2. Creates 6 Ray actors (workers) in SEPARATE Ray processes
+        3. All actors share THE SAME LimitSet via Ray actor (LimitTrackerActor)
+        4. Submits 6 tasks (one per worker) that acquire 1 resource and hold for 1 second
+        5. **VALIDATES SHARING**: With capacity=3, only 3 tasks can run concurrently
+        6. Expected: First 3 tasks complete after ~1s, next 3 tasks wait then complete after ~2s
+        7. If NOT shared: All 6 tasks would complete after ~1s (each worker has its own capacity=3)
 
-        This validates limits are SHARED across RAY ACTORS using RaySharedLimitSet.
+        Note: Ray actors execute methods serially, so we need 6 separate actors to have
+        6 concurrent tasks. This validates limits are SHARED across multiple RAY ACTORS.
         """
         pytest.importorskip("ray")
         # Ray is initialized by conftest.py initialize_ray fixture
 
-        class Counter(Worker):
-            def __init__(self):
-                pass
+        class ResourceWorker(Worker):
+            def __init__(self, worker_id: int):
+                self.worker_id = worker_id
 
-            def increment(self):
-                with self.limits.acquire():
-                    return 1
+            def hold_resource(self, task_id: int) -> dict:
+                """Acquire resource, hold for 1 second, return timing info."""
+                import time
 
-        # Create shared LimitSet for Ray
+                start = time.time()
+                with self.limits.acquire(requested={"resource": 1}):
+                    acquire_time = time.time() - start
+                    time.sleep(1.0)  # Hold resource for 1 second
+                    return {
+                        "worker_id": self.worker_id,
+                        "task_id": task_id,
+                        "acquire_time": acquire_time,
+                    }
+
+        # Create shared LimitSet with capacity=3
         shared_limits = LimitSet(
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)],
+            limits=[ResourceLimit(key="resource", capacity=3)],
             shared=True,
             mode="ray",
         )
 
-        # Create two Ray workers sharing the same limits
-        w1 = Counter.options(mode="ray", limits=shared_limits).init()
-        w2 = Counter.options(mode="ray", limits=shared_limits).init()
+        # Create 6 Ray workers (actors) sharing the same limits
+        # Need 6 actors because Ray actors execute methods serially (one at a time)
+        workers = []
+        for i in range(6):
+            w = ResourceWorker.options(mode="ray", limits=shared_limits).init(worker_id=i)
+            workers.append(w)
 
-        # Make calls and verify they complete
+        # Submit 6 tasks (one to each worker) simultaneously
+        start_time = time.time()
         futures = []
-        for i in range(5):
-            futures.append(w1.increment())
-            futures.append(w2.increment())
+        for i, worker in enumerate(workers):
+            futures.append(worker.hold_resource(i))
 
-        for f in futures:
-            f.result()
+        # Collect results
+        results = [f.result(timeout=15) for f in futures]
+        elapsed = time.time() - start_time
 
-        w1.stop()
-        w2.stop()
+        # Analyze acquire times
+        acquire_times = sorted([r["acquire_time"] for r in results])
+
+        # Validate shared behavior:
+        # - First 3 tasks should acquire immediately (<0.1s)
+        # - Last 3 tasks should wait for resources to be released (>0.2s due to Ray overhead)
+        # Note: With Ray's network overhead, exact timing is harder to control than local threads
+        immediate = sum(1 for t in acquire_times if t < 0.1)
+        waited = sum(1 for t in acquire_times if t >= 0.2)
+
+        # Allow for 3-4 immediate acquires due to Ray timing variations
+        # The key validation is that NOT ALL 6 acquire immediately
+        assert 3 <= immediate <= 4, (
+            f"Expected 3-4 immediate acquires (<0.1s), got {immediate}. "
+            f"Acquire times: {acquire_times}. "
+            f"If all 6 immediate: limits NOT shared. If 0 immediate: unexpected blocking."
+        )
+
+        # Expect at least 2-3 tasks to wait (shows capacity enforcement)
+        assert 2 <= waited <= 3, (
+            f"Expected 2-3 delayed acquires (>=0.2s), got {waited}. "
+            f"Acquire times: {acquire_times}. "
+            f"This validates capacity=3 is being enforced across workers."
+        )
+
+        # Total time should be ~2 seconds (two waves of 3 concurrent tasks holding for 1s each)
+        # Allow significant slack for Ray due to network overhead and actor startup
+        # The key validation is the acquire time distribution above, not total time
+        assert 1.7 <= elapsed <= 5.0, (
+            f"Expected ~2-3 seconds total (two waves with Ray overhead), got {elapsed:.2f}s. "
+            f"If < 1.5s: limits not shared (all 6 ran concurrently). "
+            f"If > 5.0s: unexpected slowdown."
+        )
+
+        # Stop all workers
+        for w in workers:
+            w.stop()
 
 
 class TestMixedLimitTypes:

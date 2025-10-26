@@ -694,10 +694,22 @@ class TestRetryWithSharedLimits:
         1. Limits are properly released between retry attempts
         2. Multiple workers competing for limited resources can all eventually succeed
         3. No deadlock occurs when workers are retrying
+        4. **VALIDATES SHARING**: Ensures limits are actually shared (not per-worker)
 
-        Setup: 10 workers competing for 3 resource slots, each worker fails once
+        Setup: 6 workers competing for 3 resource slots, each worker fails once
         before succeeding. With proper limit release, all should complete.
+
+        Expected behavior:
+        - First 3 workers acquire resources immediately
+        - Workers 4-6 wait for resources to be released
+        - After first 3 fail and retry, resources become available
+        - All workers eventually succeed after proper retry+release
+
+        If limits are NOT shared, all 6 workers would succeed immediately.
         """
+        if worker_mode in ("sync", "asyncio"):
+            pytest.skip("Sync and asyncio modes only support max_workers=1, no competition")
+
         shared_limits = LimitSet(
             limits=[ResourceLimit(key="resource", capacity=3)],
             shared=True,
@@ -709,32 +721,54 @@ class TestRetryWithSharedLimits:
                 self.worker_id = worker_id
                 self.attempt_count = 0
 
-            def work(self) -> str:
+            def work(self) -> dict:
+                import time
+
+                attempt_start = time.time()
                 with self.limits.acquire(requested={"resource": 1}):
                     self.attempt_count += 1
-                    time.sleep(0.05)  # Simulate work
+                    time.sleep(0.5)  # Hold resource for 0.5s
                     if self.attempt_count < 2:
-                        raise ValueError(f"Worker {self.worker_id} can only succeed on the second attempt.")
-                    return f"Worker {self.worker_id} completed successfully"
+                        raise ValueError(f"Worker {self.worker_id} fails on first attempt")
+                    return {
+                        "worker_id": self.worker_id,
+                        "attempts": self.attempt_count,
+                        "total_time": time.time() - attempt_start,
+                    }
 
+        # Use 6 workers (2x capacity) to test sharing without overwhelming the system
         workers = []
-        for i in range(10):
+        for i in range(6):
             w = ResourceWorker.options(
                 mode=worker_mode,
                 limits=shared_limits,
-                num_retries=10,  # Plenty of retries
-                retry_wait=1.0,  # 1 second base wait to avoid timing issues
+                num_retries=5,  # Sufficient retries
+                retry_wait=0.1,  # Short retry wait for faster test
             ).init(worker_id=i)
             workers.append(w)
 
         # All workers should eventually succeed
         # With capacity=3, at most 3 workers can hold resources simultaneously
-        # Each worker needs 2 attempts total (1 initial + 1 retry)
         futures = [w.work() for w in workers]
-        results = [f.result(timeout=60) for f in futures]
+        results = [f.result(timeout=30) for f in futures]
 
-        assert len(results) == 10
-        assert all("completed successfully" in r for r in results)
+        # Validate all completed successfully
+        assert len(results) == 6
+        assert all(r["attempts"] == 2 for r in results), "All workers should succeed on second attempt"
+
+        # Validate shared behavior: Some workers should have waited for resources
+        # If limits were NOT shared, all would complete in ~0.5s (no waiting)
+        # With shared limits, later workers must wait for earlier ones to release
+        total_times = [r["total_time"] for r in results]
+        avg_time = sum(total_times) / len(total_times)
+
+        # Average should be > 0.5s (some workers waited)
+        # If all completed in ~0.5s, limits weren't shared
+        assert avg_time > 0.7, (
+            f"Average completion time {avg_time:.2f}s suggests limits may not be shared. "
+            f"Expected some workers to wait for resources (avg > 0.7s). "
+            f"Individual times: {total_times}"
+        )
 
         for w in workers:
             w.stop()

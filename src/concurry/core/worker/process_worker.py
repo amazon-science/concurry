@@ -37,20 +37,29 @@ def _invoke_function(fn, *args, **kwargs):
 
 
 def _process_worker_main(
-    worker_cls_bytes, init_args, init_kwargs, limits, retry_config, command_queue, result_queue
+    worker_cls_bytes,
+    init_args_bytes,
+    init_kwargs_bytes,
+    limits,
+    retry_config_bytes,
+    command_queue,
+    result_queue,
 ):
     """Main function for the worker process.
 
     Args:
         worker_cls_bytes: Cloudpickle-serialized worker class
-        init_args: Positional arguments for worker initialization
-        init_kwargs: Keyword arguments for worker initialization
+        init_args_bytes: Cloudpickle-serialized positional arguments for worker initialization
+        init_kwargs_bytes: Cloudpickle-serialized keyword arguments for worker initialization
         limits: LimitSet instance (or None)
-        retry_config: RetryConfig instance (or None)
+        retry_config_bytes: Cloudpickle-serialized RetryConfig instance (or None)
         command_queue: Queue for receiving commands
         result_queue: Queue for sending results
     """
     worker_cls = cloudpickle.loads(worker_cls_bytes)
+    init_args = cloudpickle.loads(init_args_bytes)
+    init_kwargs = cloudpickle.loads(init_kwargs_bytes)
+    retry_config = cloudpickle.loads(retry_config_bytes)
     worker = None
 
     while True:
@@ -129,9 +138,33 @@ class ProcessWorkerProxy(WorkerProxy):
 
     **Multiprocessing Context:**
 
-    - `mp_context = "fork"`: Default on Unix-like systems (fastest, but not safe with threads)
-    - `mp_context = "spawn"`: Recommended for cross-platform code
-    - `mp_context = "forkserver"`: Hybrid approach
+    - `mp_context = "forkserver"`: **Default** - Safe with active threads (e.g., gRPC), fast startup (~200ms)
+    - `mp_context = "spawn"`: Safest but slowest (~10-20s startup on Linux, 1-2s on macOS)
+    - `mp_context = "fork"`: Fastest but **UNSAFE with active threads** (causes deadlocks/segfaults with Ray client)
+
+    **⚠️ WARNING - Fork with Ray Client:**
+
+    If you use Ray client mode (common workflow) alongside process workers with `mp_context="fork"`,
+    you WILL experience segmentation faults and deadlocks. This is because `fork()` copies active
+    gRPC threads from Ray client, leaving them in corrupted states.
+
+    **Real error example:**
+    ```
+    [mutex.cc : 2443] RAW: Check w->waitp->cond == nullptr failed
+    Segmentation fault (core dumped)
+    ```
+
+    **Solution:** Use `mp_context="forkserver"` (default) or `mp_context="spawn"`.
+
+    **Why forkserver is the default:**
+
+    Forkserver uses a clean server process that forks workers on demand. This provides:
+    - **Safety**: No active gRPC threads (Ray client), no inherited locks/mutexes
+    - **Speed**: ~200ms startup vs. 10-20s for spawn
+    - **Compatibility**: Works alongside Ray client + process mode (common workflow)
+
+    The server process starts clean before any threads are created, then forks workers
+    as needed. This avoids the corruption issues of fork() while being much faster than spawn().
 
     **Async Function Support:**
 
@@ -149,11 +182,11 @@ class ProcessWorkerProxy(WorkerProxy):
                 await asyncio.sleep(0.01)
                 return x * 2
 
-        # Use default fork context
+        # Use default forkserver context (safe + fast)
         w = MyWorker.options(mode="process").init()
         result = w.async_method(5).result()  # Works correctly, returns 10
 
-        # Use spawn context (cross-platform)
+        # Override to use spawn context (safest, slowest)
         w = MyWorker.options(mode="process", mp_context="spawn").init()
 
         # Exceptions preserve their original type
@@ -171,7 +204,7 @@ class ProcessWorkerProxy(WorkerProxy):
     mode: ClassVar[ExecutionMode] = ExecutionMode.Processes
 
     # Configuration (NO defaults - values passed from WorkerBuilder via global config)
-    mp_context: Literal["fork", "spawn", "forkserver"] = "fork"
+    mp_context: Literal["fork", "spawn", "forkserver"]
     result_queue_timeout: confloat(ge=0)
     result_queue_cleanup_timeout: confloat(ge=0)
 
@@ -198,8 +231,13 @@ class ProcessWorkerProxy(WorkerProxy):
         self._futures = {}
         self._futures_lock = threading.Lock()
 
-        # Serialize the worker class
+        # Serialize the worker class, init args/kwargs, and retry_config with cloudpickle
+        # This allows local functions, lambdas, and other non-standard objects
+        # (e.g., functions defined in Jupyter notebooks, retry filters) to be pickled correctly
         worker_cls_bytes = cloudpickle.dumps(self.worker_cls)
+        init_args_bytes = cloudpickle.dumps(self.init_args)
+        init_kwargs_bytes = cloudpickle.dumps(self.init_kwargs)
+        retry_config_bytes = cloudpickle.dumps(self.retry_config)
 
         # Process limits for worker
         # Limits already processed by WorkerBuilder
@@ -209,10 +247,10 @@ class ProcessWorkerProxy(WorkerProxy):
             target=_process_worker_main,
             args=(
                 worker_cls_bytes,
-                self.init_args,
-                self.init_kwargs,
+                init_args_bytes,
+                init_kwargs_bytes,
                 self.limits,
-                self.retry_config,
+                retry_config_bytes,
                 self._command_queue,
                 self._result_queue,
             ),

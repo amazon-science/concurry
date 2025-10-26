@@ -468,6 +468,119 @@ def _can_acquire_all(self, requested_amounts):
 
 **Performance:** 500-1000 μs per acquisition (network + actor overhead)
 
+##### Ray Actor Serial Execution and Shared Limits
+
+**Critical Gotcha**: Ray actors execute methods **serially** (one at a time) by default.
+
+This has important implications for testing and understanding shared limit behavior:
+
+**Problem Example:**
+
+```python
+# Create shared LimitSet with capacity=3
+shared_limits = LimitSet(
+    limits=[ResourceLimit(key="resource", capacity=3)],
+    shared=True,
+    mode="ray",
+)
+
+# Create 2 Ray workers
+w1 = ResourceWorker.options(mode="ray", limits=shared_limits).init(worker_id=1)
+w2 = ResourceWorker.options(mode="ray", limits=shared_limits).init(worker_id=2)
+
+# Submit 6 tasks total (3 to each worker)
+futures = []
+for i in range(3):
+    futures.append(w1.hold_resource(i))  # Tasks 0, 1, 2
+for i in range(3):
+    futures.append(w2.hold_resource(i))  # Tasks 3, 4, 5
+
+# What's the maximum concurrent task count?
+```
+
+**Expected Answer (WRONG)**: 6 concurrent tasks competing for capacity=3
+
+**Actual Answer (CORRECT)**: **2 concurrent tasks maximum!**
+
+**Why?**
+
+Ray actors (by default) execute methods **one at a time**. When you submit 3 tasks to `w1`:
+1. Task 0 starts executing in w1's actor
+2. Tasks 1 and 2 are **queued** inside w1's actor (not executing yet!)
+3. w1 finishes task 0, then starts task 1 (serial execution)
+
+Same for `w2`. So at most:
+- w1 executing 1 task (tasks 1-2 queued inside actor)
+- w2 executing 1 task (tasks 1-2 queued inside actor)
+- **Total: 2 concurrent tasks**, NOT 6!
+
+**Consequence for Testing:**
+
+If your shared limit has `capacity=3`, you'll NEVER see more than 2 tasks running concurrently with 2 actors. The test will incorrectly pass even if limits aren't shared!
+
+**Solution for Testing:**
+
+Create **6 separate Ray actors** (workers) to have 6 concurrent tasks:
+
+```python
+# Create shared LimitSet with capacity=3
+shared_limits = LimitSet(
+    limits=[ResourceLimit(key="resource", capacity=3)],
+    shared=True,
+    mode="ray",
+)
+
+# Create 6 Ray workers (one task per worker = 6 concurrent tasks)
+workers = []
+for i in range(6):
+    w = ResourceWorker.options(mode="ray", limits=shared_limits).init(worker_id=i)
+    workers.append(w)
+
+# Submit 6 tasks (one to each worker)
+futures = []
+for i, worker in enumerate(workers):
+    futures.append(worker.hold_resource(i))
+
+# Now we have 6 concurrent tasks competing for capacity=3!
+# Expected: First 3 tasks acquire immediately, next 3 tasks wait
+```
+
+**Real-World Implications:**
+
+This serial execution means:
+- **For testing**: Need N actors to test N-way concurrency
+- **For production**: Ray actors are **NOT** like thread pools (one actor ≠ concurrent execution)
+- **For performance**: Deploy many small actors, not few large actors with many methods
+- **For limits**: Shared limits work correctly, but concurrency comes from multiple actors
+
+**Ray Concurrency Options:**
+
+Ray does support concurrent method execution via `max_concurrency`:
+
+```python
+@ray.remote(max_concurrency=10)
+class ConcurrentWorker:
+    # This actor can execute up to 10 methods concurrently
+    pass
+```
+
+However, Concurry doesn't currently expose this option because:
+1. It's rarely needed (deploy more actors instead)
+2. It complicates worker state management
+3. Ray's default (serial) is the most common use case
+4. Users can set it via `actor_options` if needed:
+
+```python
+worker = MyWorker.options(
+    mode="ray",
+    actor_options={"max_concurrency": 10}
+).init()
+```
+
+**Historical Context (October 2025):**
+
+The `test_shared_limitset_across_ray_workers` test initially failed because it used 2 actors with 3 tasks each, expecting 6 concurrent tasks. The test was updated to use 6 separate actors (one task each) to properly validate shared limit enforcement.
+
 ### LimitSetAcquisition
 
 **Purpose**: Track acquisition state and coordinate release.

@@ -215,10 +215,26 @@ def initialize_ray():
 
     Ray Client Mode Testing:
     ------------------------
-    Ray client mode is ENABLED BY DEFAULT to match real-world deployment scenarios.
+    Ray client mode is ENABLED BY DEFAULT to match real-world deployment scenarios
+    where users connect to a remote Ray cluster while also using process mode for
+    local multiprocessing tasks.
 
     To disable client mode (use standard Ray), set DISABLE_RAY_CLIENT_MODE=1:
         DISABLE_RAY_CLIENT_MODE=1 pytest tests/
+
+    **Multiprocessing Compatibility:**
+    Process mode now uses 'forkserver' as the default multiprocessing context instead
+    of 'fork'. This provides:
+    - **Safety**: No corruption from forking active gRPC threads (Ray client mode)
+    - **Speed**: ~200ms startup vs. 10-20s for 'spawn'
+    - **Compatibility**: Safe to use Ray client + process workers concurrently
+
+    Both workers and MultiprocessSharedLimitSet Manager use the same context (forkserver
+    by default). This is required for Manager proxy pickling to work correctly across
+    process boundaries. Together, these changes allow safe concurrent use of:
+    - Ray client for distributed compute
+    - Process mode workers for local multiprocessing
+    - Shared limits across process workers
 
     **Resource Management:**
     To prevent "too many open files" errors when running large test suites,

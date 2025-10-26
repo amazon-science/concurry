@@ -392,21 +392,71 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
         - Semaphore: Provides the blocking/unblocking mechanism (can't be queried for availability)
         - Shared state dict: Provides queryable current usage that all processes can check
         - Both are kept in sync: semaphore for concurrency control, dict for state inspection
+
+    **Pickling Strategy - Manager Proxies:**
+        MultiprocessSharedLimitSet uses `multiprocessing.Manager()` to share state across
+        processes. The Manager creates a server process that hosts shared objects (Lock,
+        Semaphore, dict, list), and returns proxy objects that communicate with the server.
+
+        **Key insight:** Manager proxy objects CAN be pickled (they have custom __reduce__
+        methods), but the Manager object itself cannot. Our pickling strategy:
+
+        1. When creating MultiprocessSharedLimitSet:
+           - Create Manager server process with specified mp_context
+           - Create shared proxy objects (Lock, Semaphore, dicts)
+           - Store proxies as instance attributes
+
+        2. When pickling (sending to worker processes):
+           - __getstate__: Exclude Manager, pickle only the proxy objects
+           - Proxies know how to reconnect to the Manager server
+
+        3. When unpickling (in worker processes):
+           - __setstate__: Restore proxy objects (they auto-reconnect)
+           - No need to recreate Manager - proxies handle it
+
+        This works with ANY mp_context (fork, spawn, forkserver) because we're not
+        pickling the Manager server itself, only the lightweight proxy objects.
+
+        **Why forkserver is the default:**
+        - forkserver avoids forking active gRPC threads (Ray client compatibility)
+        - forkserver is fast (~200ms per worker) vs. spawn (~10-20s) or fork (~10ms but unsafe)
+        - Safe for concurrent use with Ray client + process workers
+
+        **Available contexts:**
+        - fork: Fast but unsafe (inherits gRPC threads, causes deadlocks/segfaults)
+        - spawn: Safest but slowest (~10-20s startup per worker on Linux)
+        - forkserver: Best balance - safe + fast (~200ms startup per worker)
     """
 
-    def __init__(self, limits: List[Limit], shared: bool = True, config: Optional[dict] = None):
+    def __init__(
+        self,
+        limits: List[Limit],
+        shared: bool = True,
+        config: Optional[dict] = None,
+        mp_context: str = "forkserver",
+    ):
         """Initialize multiprocess shared limit set.
 
         Args:
             limits: List of Limit instances
             shared: Whether this is a shared limit set (must be True)
             config: Static configuration dict (metadata)
+            mp_context: Multiprocessing context used by workers ("fork", "spawn", "forkserver").
+                Stored for validation only. Manager always uses spawn internally for safety.
         """
         assert shared is True
         super().__init__(limits, shared=True, config=config)
         import multiprocessing
 
-        self._manager = multiprocessing.Manager()
+        # Store mp_context for validation against worker context
+        self.mp_context = mp_context
+
+        # Create Manager using the specified context
+        # The Manager stays in the parent process, workers get pickled proxies
+        manager_ctx = multiprocessing.get_context(mp_context)
+        self._manager = manager_ctx.Manager()
+
+        # Create Manager-managed objects (proxies)
         self._lock = self._manager.Lock()
         self._resource_semaphores: Dict[str, Any] = {}
 
@@ -654,6 +704,55 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
                 acquisition.acquisitions,
                 {key: acq.requested for key, acq in acquisition.acquisitions.items()},
             )
+
+    def __getstate__(self) -> Dict[str, Any]:
+        """Custom pickle support - pickle Manager proxies, not Manager itself.
+
+        Manager proxy objects (Lock, Semaphore, dict, list) CAN be pickled because
+        they have custom __reduce__ methods. The Manager object itself can't be pickled.
+        We exclude the Manager and only pickle the proxies and configuration.
+
+        Returns:
+            Dict with Manager proxies and limit configurations
+        """
+        state = {
+            "limits": self.limits,
+            "shared": self.shared,
+            "config": self.config,
+            "mp_context": self.mp_context,
+            "_limits_by_key": self._limits_by_key,
+            # Pickle the proxy objects (these CAN be pickled)
+            "_lock": self._lock,
+            "_resource_semaphores": self._resource_semaphores,
+            "_resource_state": self._resource_state,
+            "_rate_limit_state": self._rate_limit_state,
+        }
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        """Custom unpickle support - restore Manager proxies.
+
+        Manager proxy objects are unpickled automatically because they have custom
+        __reduce__ methods. We just need to restore all attributes.
+
+        Args:
+            state: Pickled state with Manager proxies
+        """
+        # Restore all attributes
+        self.limits = state["limits"]
+        self.shared = state["shared"]
+        self.config = state["config"]
+        self.mp_context = state["mp_context"]
+        self._limits_by_key = state["_limits_by_key"]
+
+        # Restore Manager proxies (already unpickled)
+        self._lock = state["_lock"]
+        self._resource_semaphores = state["_resource_semaphores"]
+        self._resource_state = state["_resource_state"]
+        self._rate_limit_state = state["_rate_limit_state"]
+
+        # Note: We don't restore _manager itself because we don't need it
+        # All operations use the proxy objects directly
 
 
 # Ray actor for centralized limit tracking
@@ -1033,6 +1132,7 @@ def LimitSet(
     shared: bool = False,
     mode: ExecutionMode = ExecutionMode.Sync,
     config: Optional[dict] = None,
+    mp_context: Optional[str] = None,
 ) -> Union[InMemorySharedLimitSet, MultiprocessSharedLimitSet, RaySharedLimitSet]:
     """Factory function to create appropriate LimitSet implementation.
 
@@ -1044,6 +1144,10 @@ def LimitSet(
         mode: Execution mode (ExecutionMode enum or string like "sync", "thread", "asyncio", "process", "ray")
         config: Static configuration dict (metadata) accessible via acquisition.config.
                 Empty dict by default. Useful for multi-account/multi-region scenarios.
+        mp_context: Multiprocessing context for process mode ("fork", "spawn", "forkserver").
+                If None, uses value from global_config.defaults.mp_context.
+                Only used when mode="process" and shared=True.
+                MUST match the mp_context used by workers to avoid pickling errors.
 
     Returns:
         Appropriate LimitSet implementation based on shared and mode
@@ -1108,13 +1212,20 @@ def LimitSet(
     # Convert string to ExecutionMode if needed
     mode: ExecutionMode = ExecutionMode(mode)
 
+    # Get mp_context from global config if not provided
+    if mp_context is None and mode == ExecutionMode.Processes:
+        from ...config import global_config
+
+        local_config = global_config.clone()
+        mp_context = local_config.defaults.mp_context
+
     # Select appropriate implementation
     if mode in (ExecutionMode.Sync, ExecutionMode.Asyncio, ExecutionMode.Threads):
         return InMemorySharedLimitSet(limits=limits, shared=shared, config=config)
     elif mode == ExecutionMode.Processes:
         if shared is False:
             raise ValueError("Non-shared LimitSets cannot use mode='process'")
-        return MultiprocessSharedLimitSet(limits=limits, shared=True, config=config)
+        return MultiprocessSharedLimitSet(limits=limits, shared=True, config=config, mp_context=mp_context)
     elif mode == ExecutionMode.Ray:
         if shared is False:
             raise ValueError("Non-shared LimitSets cannot use mode='ray'")

@@ -384,9 +384,10 @@ For comprehensive architecture details, see [docs/architecture/limits.md](../../
 
 **Process**:
 - Two queues (command + result) + worker process + result thread
-- Worker class serialized with `cloudpickle`
+- Worker class, init args/kwargs, retry config serialized with `cloudpickle`
 - Async functions via `asyncio.run()` in worker process (no concurrency)
 - Exception types preserved across process boundary
+- **CRITICAL**: Use `forkserver` context (safe with gRPC threads), NOT `fork` (causes segfaults with Ray client)
 
 **Asyncio**:
 - Event loop thread (async methods) + sync thread (sync methods)
@@ -401,6 +402,44 @@ For comprehensive architecture details, see [docs/architecture/limits.md](../../
 - Native async support (Ray handles automatically)
 - Retry logic pre-applied at class level (bypasses `__getattribute__`)
 - Incompatible with Typed/BaseModel workers
+- **CRITICAL**: Actors execute methods serially by default (one at a time)
+- For N concurrent tasks, need N separate actors (not N tasks on 1 actor)
+
+### Process Mode Serialization Rules
+
+**RULE**: Use `cloudpickle` for ALL user-provided objects, standard pickle for infrastructure.
+
+**Why Cloudpickle:**
+- Users define functions/classes in Jupyter notebooks (local scope)
+- Standard `pickle` cannot serialize local functions, lambdas, or `__main__` modules
+- Common workflow: define worker/function in notebook, use process mode for CPU tasks
+- ✅ **DO**: Use `cloudpickle` for: worker_cls, init_args, init_kwargs, retry_config
+- ❌ **DON'T**: Use cloudpickle for: Queues, Locks, Manager proxies (breaks multiprocessing)
+
+**RULE**: Manager and workers MUST use same multiprocessing context.
+
+**Why Same Context:**
+- Manager proxies use custom `__reduce__` for pickling
+- Proxy pickling requires same context (fork/spawn/forkserver) on both ends
+- Mixing contexts causes `TypeError: cannot pickle 'weakref.ReferenceType' object`
+- ✅ **DO**: Create Manager with same context as workers (both use forkserver by default)
+- ❌ **DON'T**: Create Manager with spawn, workers with forkserver (FAILS)
+
+**RULE**: Default to `forkserver` context, NOT `fork` or `spawn`.
+
+**Why Forkserver:**
+- `fork` (default on Unix): UNSAFE with active threads (Ray client gRPC), causes segfaults
+- `spawn`: SAFE but SLOW (~10-20s per worker startup on Linux)
+- `forkserver`: SAFE and FAST (~200ms startup), best balance
+- ✅ **DO**: Use `forkserver` from `global_config.defaults.mp_context`
+- ✅ **DO**: Allow override via `Worker.options(mp_context="spawn")` if needed
+- ❌ **DON'T**: Use `fork` when Ray client may be active (common workflow)
+
+**Historical Context (October 2025):**
+1. **Attempt 1**: Use `fork` - FAILED (segfaults with Ray client mode)
+2. **Attempt 2**: Use `spawn` for everything - FAILED (10-20s startup, unusable)
+3. **Attempt 3**: Use `spawn` for Manager, `forkserver` for workers - FAILED (pickling errors)
+4. **Final Solution**: Use `forkserver` for both + cloudpickle for user objects - SUCCESS
 
 ### Adding New Worker Types
 
@@ -427,6 +466,10 @@ For comprehensive architecture details, see [docs/architecture/limits.md](../../
 8. **Stop timeout**: Per-operation, not total (N workers × timeout)
 9. **Cloudpickle closures**: Capture outer scope, can serialize unexpected objects
 10. **Load balancer reset**: State lost on pool restart
+11. **Process mode + fork + Ray client**: UNSAFE - causes segfaults/deadlocks (use forkserver)
+12. **Multiprocessing context mixing**: Manager and workers MUST use same context
+13. **Standard pickle for local functions**: FAILS - use cloudpickle for all user objects
+14. **Ray actor serial execution**: One method at a time by default (N actors needed for N concurrent tasks)
 
 ## Limit System Architecture and Rules
 
@@ -632,6 +675,33 @@ When adding new backend:
 - ✅ **DO**: Test error paths (missing update, timeout, invalid usage)
 - ✅ **DO**: Test acquisition rollback on partial failure
 - ❌ **DON'T**: Only test happy paths
+
+**RULE**: Ray shared limits tests must use N actors for N concurrent tasks.
+
+**Why:**
+- Ray actors execute methods serially (one at a time) by default
+- 2 actors with 3 tasks each = max 2 concurrent tasks (NOT 6!)
+- Tasks 2-3 are queued inside each actor, not executing
+- To test capacity=3 limit, need at least 4+ separate actors
+
+**Testing Pattern:**
+```python
+# ❌ WRONG: 2 actors, 6 tasks total = only 2 concurrent tasks
+w1, w2 = [create_ray_worker() for _ in range(2)]
+futures = []
+for _ in range(3):
+    futures.append(w1.task())  # Tasks queued in w1
+    futures.append(w2.task())  # Tasks queued in w2
+# Only 2 tasks run concurrently!
+
+# ✅ CORRECT: 6 actors, 6 tasks total = 6 concurrent tasks
+workers = [create_ray_worker() for _ in range(6)]
+futures = [w.task() for w in workers]  # 6 concurrent tasks
+```
+
+- ✅ **DO**: Create N actors to test N-way concurrency
+- ✅ **DO**: Submit one task per actor for concurrent execution
+- ❌ **DON'T**: Submit multiple tasks to one actor (they're queued, not concurrent)
 
 ## Retry Architecture and Rules
 

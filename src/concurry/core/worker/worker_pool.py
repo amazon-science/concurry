@@ -684,6 +684,7 @@ class MultiprocessWorkerProxyPool(WorkerProxyPool):
             "max_queued_tasks": worker_queue_length,
             "result_queue_timeout": mode_defaults.worker_result_queue_timeout,
             "result_queue_cleanup_timeout": mode_defaults.worker_result_queue_cleanup_timeout,
+            "mp_context": mode_defaults.mp_context,
         }
 
         # Create worker instance

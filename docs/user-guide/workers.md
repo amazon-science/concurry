@@ -112,14 +112,26 @@ worker.stop()
 Executes in a separate process (good for CPU-bound tasks):
 
 ```python
-worker = DataProcessor.options(
-    mode="process",
-    mp_context="fork"  # or "spawn", "forkserver"
-).init(2)
+# Default: Uses forkserver context (safe + fast)
+worker = DataProcessor.options(mode="process").init(2)
 future = worker.process(10)
 result = future.result()
 worker.stop()
+
+# Override context if needed
+worker = DataProcessor.options(
+    mode="process",
+    mp_context="spawn"  # or "fork" (not recommended), "forkserver" (default)
+).init(2)
 ```
+
+**Multiprocessing Context:**
+
+- **`forkserver` (default)**: Safe with Ray client, fast startup (~200ms) - **recommended**
+- **`spawn`**: Safest but slow (~10-20s startup on Linux, ~1-2s on macOS)
+- **`fork`**: Fastest startup (~10ms) but **UNSAFE with Ray client** (causes segfaults)
+
+**⚠️ WARNING**: If you use Ray client mode alongside process workers with `mp_context="fork"`, you will experience segmentation faults. Always use `forkserver` (default) or `spawn` when using Ray client.
 
 ### Asyncio Mode
 

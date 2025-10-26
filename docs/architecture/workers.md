@@ -799,6 +799,172 @@ Main Process                Worker Process         Result Thread
 - RetryConfig serialized and passed to worker process
 - Args/kwargs serialized per method call
 
+##### Process Mode: Cloudpickle and Multiprocessing Context
+
+**Critical Design Decision**: Process workers use `cloudpickle` for all user-provided objects and `forkserver` as the default multiprocessing context.
+
+**Problem Context**:
+
+Users frequently define functions, classes, and retry filters in Jupyter notebooks or test files:
+```python
+# Common user workflow in Jupyter notebook
+def my_function(x):  # Local function - NOT picklable by standard pickle
+    return x * 2
+
+def should_retry(exception, **context):  # Local retry filter
+    return isinstance(exception, ValueError)
+
+worker = TaskWorker.options(
+    mode="process",
+    retry_on=[should_retry]  # Needs cloudpickle!
+).init(fn=my_function)  # Needs cloudpickle!
+```
+
+Standard `pickle` **cannot** serialize:
+- Local functions (defined in function scope)
+- Lambda functions
+- Functions/classes defined in `__main__` (Jupyter notebooks, test files)
+- Closures with local variable capture
+
+This would break a core user workflow, forcing users to define all functions at module level.
+
+**Solution: Cloudpickle for User-Provided Objects**
+
+`ProcessWorkerProxy` uses `cloudpickle` (not standard `pickle`) for:
+
+1. **Worker class** (`worker_cls`): Allows local Worker classes in notebooks/tests
+2. **Init arguments** (`init_args`, `init_kwargs`): Allows local functions as parameters
+3. **Retry configuration** (`retry_config`): Allows local retry filters
+4. **Task functions** (TaskWorker): Allows local functions, lambdas
+
+```python
+# In ProcessWorkerProxy.post_initialize()
+worker_cls_bytes = cloudpickle.dumps(self.worker_cls)
+init_args_bytes = cloudpickle.dumps(self.init_args)
+init_kwargs_bytes = cloudpickle.dumps(self.init_kwargs)
+retry_config_bytes = cloudpickle.dumps(self.retry_config)
+
+# Later unpickled in worker process
+worker_cls = cloudpickle.loads(worker_cls_bytes)
+init_args = cloudpickle.loads(init_args_bytes)
+init_kwargs = cloudpickle.loads(init_kwargs_bytes)
+retry_config = cloudpickle.loads(retry_config_bytes)
+```
+
+**What Does NOT Use Cloudpickle:**
+
+- **Multiprocessing primitives** (Queues, Locks, Semaphores): Standard `multiprocessing` serialization
+- **Manager proxies** (`MultiprocessSharedLimitSet`): Custom `__getstate__`/`__setstate__`
+- **Internal state** (futures dict, threads): Not serialized
+
+**Multiprocessing Context: Fork vs Spawn vs Forkserver**
+
+Python's `multiprocessing` supports three start methods:
+
+| Context | Startup Time | Memory | Thread Safety | Ray Client Compatible |
+|---------|-------------|---------|---------------|----------------------|
+| `fork` | ~10ms | Shared (copy-on-write) | ❌ **UNSAFE** | ❌ **BREAKS** |
+| `spawn` | ~10-20s on Linux, ~1-2s on macOS | Independent | ✅ Safe | ✅ Works |
+| `forkserver` | ~200ms | Independent | ✅ Safe | ✅ Works |
+
+**Why Fork is UNSAFE:**
+
+`fork()` copies the entire process memory, including:
+- Active threads (which continue running in child!)
+- Open file descriptors
+- gRPC connections (Ray client mode)
+- Mutexes and condition variables (can be in inconsistent state)
+
+**The Ray Client Problem:**
+
+Ray client mode (common user workflow) uses gRPC for communication with remote cluster. gRPC spawns background threads. If you `fork()` while gRPC threads are active:
+
+```
+Parent Process              Forked Child Process
+gRPC Thread 1 ──fork()──>  gRPC Thread 1 (CORRUPTED - mid-operation)
+gRPC Thread 2 ──fork()──>  gRPC Thread 2 (CORRUPTED - holding mutex)
+Main Thread   ──fork()──>  Main Thread (tries to use gRPC -> DEADLOCK/SEGFAULT)
+```
+
+**Real Error (before fix):**
+```
+[mutex.cc : 2443] RAW: Check w->waitp->cond == nullptr failed
+Check failed: next_worker->state == KICKED
+Segmentation fault (core dumped)
+```
+
+**Why Spawn is TOO SLOW:**
+
+`spawn` starts a fresh Python interpreter, which must:
+1. Initialize Python runtime
+2. Import all modules
+3. Load dependencies
+4. Reconstruct worker state
+
+**Benchmarks:**
+- Process mode with `fork`: ~10ms per worker startup
+- Process mode with `spawn`: ~10-20s per worker startup on Linux (1000x slower!)
+- Process mode with `forkserver`: ~200ms per worker startup (20x slower than fork, 50x faster than spawn)
+
+**Why Forkserver is the Best Balance:**
+
+`forkserver` works by:
+1. Starting a clean server process early (before any threads)
+2. Server process forks worker processes on demand
+3. Forked workers inherit minimal state (no gRPC threads!)
+
+**Benefits:**
+- ✅ **Safe**: No active threads in server process when forking
+- ✅ **Fast**: ~200ms startup vs 10-20s for spawn
+- ✅ **Compatible**: Works with Ray client + process workers concurrently
+- ✅ **Common workflow**: Users can have Ray client connected 24/7 and use process workers
+
+**Configuration:**
+
+```python
+from concurry.config import global_config
+
+# Default (recommended)
+assert global_config.defaults.mp_context == "forkserver"
+
+# Override if needed (not recommended)
+with global_config.temp_config(mp_context="spawn"):
+    worker = MyWorker.options(mode="process").init()
+```
+
+**Historical Approaches (Failed):**
+
+1. **Attempt 1**: Use `fork` with `Manager()` - **FAILED** (segfaults with Ray client)
+2. **Attempt 2**: Use `spawn` for everything - **FAILED** (10-20s startup, unusable)
+3. **Attempt 3**: Use `spawn` for Manager, `forkserver` for workers - **FAILED** (Manager proxy pickling issues)
+4. **Final Solution**: Use `forkserver` for both Manager and workers + cloudpickle for user objects - **SUCCESS**
+
+**Current Architecture (October 2025):**
+
+```python
+# ProcessWorkerProxy creates worker process:
+ctx = multiprocessing.get_context("forkserver")  # From global_config
+process = ctx.Process(
+    target=_process_worker_main,
+    args=(
+        cloudpickle.dumps(worker_cls),      # ← cloudpickle
+        cloudpickle.dumps(init_args),        # ← cloudpickle
+        cloudpickle.dumps(init_kwargs),      # ← cloudpickle
+        limits,                               # ← Manager proxies (standard pickle)
+        cloudpickle.dumps(retry_config),     # ← cloudpickle
+        command_queue,                        # ← multiprocessing.Queue
+        result_queue,                         # ← multiprocessing.Queue
+    )
+)
+
+# MultiprocessSharedLimitSet creates Manager:
+manager_ctx = multiprocessing.get_context("forkserver")  # Same context!
+manager = manager_ctx.Manager()
+# Manager proxies are pickled using their custom __reduce__ methods
+```
+
+**Key Insight**: Manager proxies have custom `__reduce__` methods that handle their own serialization. When workers are created, the Manager proxies are pickled (using their custom methods) and unpickled in the worker process, automatically reconnecting to the Manager server. This works with any `mp_context` as long as **both Manager and workers use the same context**.
+
 #### AsyncioWorkerProxy
 
 **Execution Model**: Event loop thread + dedicated sync thread for sync methods

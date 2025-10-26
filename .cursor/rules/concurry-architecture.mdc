@@ -1,5 +1,5 @@
 ---
-description: Thrse architecture details are useful when designing, integrating or refactoring major components of concurry, when debugging challenging errors and race conditions, and when testing cross-feature functionality. Also refer to the respective files in docs/architecture/ for comprehensive details.
+description: These architecture details are useful when designing, integrating or refactoring major components of concurry, when debugging challenging errors and race conditions, and when testing cross-feature functionality. Also refer to the respective files in docs/architecture/ for comprehensive details.
 alwaysApply: false
 ---
 # Cursor Rules: Concurry Architecture
@@ -1035,32 +1035,15 @@ def ray_retry_wrapper(*args, **kwargs):
 
 Then apply Full Jitter: `random.uniform(0, calculated_wait)`
 
-## Testing Rules
-
-**RULE**: Test across all execution modes using `worker_mode` fixture.
-
-- Test regular workers AND TaskWorker
-- Test sync and async methods/functions
-- Test serialization for process/ray modes
-- ✅ **DO**: Parametrize with `worker_mode` fixture
-- ✅ **DO**: Test both method wrapping and TaskWorker integration
-- ❌ **DON'T**: Test only one mode or worker type
-
-**RULE**: Test all retry features in isolation AND integration.
-
-- Unit tests in `test_retry.py`: RetryConfig, algorithms, filters, validators
-- Integration tests in `test_worker_retry.py`: Retry + workers, retry + limits, retry + pools
-- ✅ **DO**: Test edge cases: zero retries, exhausted retries, validation failures
-- ✅ **DO**: Test interaction with limits, pools, Pydantic validation
-- ❌ **DON'T**: Only test happy path
-
 ## Common Pitfalls to Avoid
 
-❌ **DON'T**: Apply retry in `submit()` method (causes double-wrapping)
-❌ **DON'T**: Use closure capture for retry logic in process/ray modes
-❌ **DON'T**: Forget to set `num_retries > 0` in RetryConfig
-❌ **DON'T**: Set future timeout too short for retry delays
-❌ **DON'T**: Use `__getattribute__` for Ray workers (breaks signature)
-❌ **DON'T**: Forget `__reduce__` for RetryValidationError
-❌ **DON'T**: Hold limits across retry sleep periods
-❌ **DON'T**: Apply retry client-side
+❌ Apply retry in `submit()` method (causes double-wrapping)
+❌ Use closure capture for retry logic in process/ray modes
+❌ Forget to set `num_retries > 0` in RetryConfig
+❌ Set future timeout too short for retry delays
+❌ Use `__getattribute__` for Ray workers (breaks signature)
+❌ Forget `__reduce__` for RetryValidationError
+❌ Hold limits across retry sleep periods
+❌ Apply retry client-side
+
+**See [testing-practices.mdc](mdc:.cursor/rules/testing-practices.mdc) for comprehensive testing rules.**

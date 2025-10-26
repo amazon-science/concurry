@@ -77,11 +77,17 @@ if value is not None:
 - Use descriptive test names that explain what is being tested
 
 ### Documentation
-- Update user guides immediately when APIs change
-- Include practical examples in documentation
-- Explain the "why" behind design decisions
-- Keep documentation (user-guide and docstrings) in sync with code changes
-- DO NOT ADD SEPARATE DEMO SCRIPTS OR DEMO MARKDOWN FILES. Add these examples to the testcases or documentation (user-guide and docstrings). Prefer to add edge-cases to testcases and typical use-case to documentation.
+
+**CRITICAL**: See [documentation-practices.mdc](mdc:.cursor/rules/documentation-practices.mdc) for comprehensive documentation rules.
+
+**Key principles**:
+- ❌ **NEVER create summary .md files** documenting completed work
+- ✅ **Provide structured chat summaries** at end of each session
+- ✅ **Update architecture docs** for design decisions and historical context
+- ✅ **Update user guides** ONLY when user-facing behavior changes
+- ✅ **Update API docstrings** to reference config keys for defaults
+- ✅ **Add testcases** for novel edge cases with detailed docstrings
+- ❌ **DO NOT ADD DEMO SCRIPTS OR DEMO MARKDOWN FILES**
 
 ## Configuration System
 
@@ -219,20 +225,11 @@ grep -rn "=\s*PollingAlgorithm\." src/concurry/
 grep -rn "time.sleep(" src/concurry/core/
 ```
 
-## Testcases
+## Testing
 
-### Testcases with Ray
-When writing testcases that use a Ray cluster, always use ray.init like this:
-```python
-import morphic
-import concurry
-ray.init(
-    ignore_reinit_error=True,
-    num_cpus=4,
-    runtime_env={"py_modules": [concurry, morphic]},
-)
-```
-If you do not have this, the test will NOT run, since the necessary dependencies are not passed to it.
+**CRITICAL**: See [testing-practices.mdc](mdc:.cursor/rules/testing-practices.mdc) for comprehensive testing rules.
 
-### Executing testcases
-Whenever you run testcases for concurry, set a timeout of 5 minutes (300 seconds).
+**Key principles**:
+- Test across all execution modes using `worker_mode` or `pool_mode` fixtures
+- Fix failing tests by fixing implementation, never skip tests to hide bugs
+- Include Ray runtime_env when initializing: `runtime_env={"py_modules": [concurry, morphic]}`

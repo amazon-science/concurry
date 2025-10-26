@@ -159,67 +159,25 @@ def test_feature(self, worker_mode):
 ### Example: Basic Test Structure
 
 ```python
-import pytest
-from concurry import Worker
-
-class ComputeWorker(Worker):
-    def __init__(self, multiplier: int = 1):
-        self.multiplier = multiplier
-    
-    def compute(self, x: int) -> int:
-        return x * self.multiplier
-
-class TestComputeWorker:
-    """Test ComputeWorker across all modes."""
-    
-    def test_basic_computation(self, worker_mode):
-        """Test basic computation across all execution modes."""
-        w = ComputeWorker.options(mode=worker_mode).init(multiplier=2)
-        
-        future = w.compute(5)
-        result = future.result(timeout=5.0)
-        
-        assert result == 10
-        
-        w.stop()
-    
-    def test_multiple_calls(self, worker_mode):
-        """Test multiple method calls across all execution modes."""
-        w = ComputeWorker.options(mode=worker_mode).init(multiplier=3)
-        
-        futures = [w.compute(i) for i in range(5)]
-        results = [f.result(timeout=5.0) for f in futures]
-        
-        assert results == [0, 3, 6, 9, 12]
-        
-        w.stop()
+def test_basic_computation(self, worker_mode):
+    """Test basic computation across all execution modes."""
+    w = ComputeWorker.options(mode=worker_mode).init(multiplier=2)
+    result = w.compute(5).result(timeout=5.0)
+    assert result == 10
+    w.stop()
 ```
 
-### Example: Pool-Specific Tests
+### Example: Pool-Specific Test
 
 ```python
-class TestWorkerPool:
-    """Test worker pool features."""
+def test_pool_feature(self, pool_mode):
+    """Test feature requiring multiple workers."""
+    if pool_mode in ("sync", "asyncio"):
+        pytest.skip("Sync and asyncio only support max_workers=1")
     
-    def test_round_robin_dispatch(self, pool_mode):
-        """Test round-robin load balancing across pool modes."""
-        w = ComputeWorker.options(
-            mode=pool_mode,
-            max_workers=3,
-            load_balancing="round_robin"
-        ).init(multiplier=2)
-        
-        # Submit 9 tasks
-        futures = [w.compute(i) for i in range(9)]
-        results = [f.result(timeout=5.0) for f in futures]
-        
-        assert results == [i * 2 for i in range(9)]
-        
-        # Check pool stats
-        stats = w.get_pool_stats()
-        assert stats["total_workers"] == 3
-        
-        w.stop()
+    w = MyWorker.options(mode=pool_mode, max_workers=3).init()
+    # Test pool-specific functionality
+    w.stop()
 ```
 
 ---
@@ -259,58 +217,26 @@ def test_feature(self, worker_mode):
 
 ### Valid Reasons to Skip Tests
 
-**Only skip tests when a feature is fundamentally not supported by a mode:**
-
-#### Example 1: Pool Features (Not Supported by Sync/Asyncio)
+**Only skip when a feature is fundamentally not supported by a mode:**
 
 ```python
+# Pool features not supported by sync/asyncio
 def test_multiple_workers(self, worker_mode):
-    """Test feature requiring multiple workers."""
     if worker_mode in ("sync", "asyncio"):
-        pytest.skip("Sync and asyncio modes only support max_workers=1")
-    
-    # This feature genuinely requires multiple workers
-    w = MyWorker.options(mode=worker_mode, max_workers=4).init()
-    # ... test logic requiring parallelism
-    w.stop()
-```
+        pytest.skip("Sync and asyncio only support max_workers=1")
+    # Feature genuinely requires multiple workers
 
-#### Example 2: Timeout Behavior in Sync Mode
-
-```python
-def test_timeout_behavior(self, worker_mode):
-    """Test timeout handling across modes."""
+# Timeout not testable in sync mode
+def test_timeout(self, worker_mode):
     if worker_mode == "sync":
-        pytest.skip("Sync mode completes immediately, cannot timeout")
-    
-    w = MyWorker.options(mode=worker_mode).init()
-    
-    # Test that long-running task times out
-    future = w.slow_task(duration=10.0)
-    with pytest.raises(TimeoutError):
-        future.result(timeout=0.1)
-    
-    w.stop()
-```
+        pytest.skip("Sync mode completes immediately")
+    # Test timeout behavior
 
-#### Example 3: Mode-Specific Features
-
-```python
-def test_ray_specific_feature(self, worker_mode):
-    """Test Ray-specific actor options."""
+# Mode-specific features
+def test_ray_actor_options(self, worker_mode):
     if worker_mode != "ray":
         pytest.skip("Ray-specific feature")
-    
-    w = MyWorker.options(
-        mode="ray",
-        actor_options={"num_cpus": 2, "num_gpus": 0}
-    ).init()
-    
-    # Test Ray-specific functionality
-    result = w.method().result()
-    assert result == expected
-    
-    w.stop()
+    # Test Ray-only functionality
 ```
 
 ### Handling Mode-Specific Exceptions
@@ -318,17 +244,14 @@ def test_ray_specific_feature(self, worker_mode):
 When different modes raise different exceptions, test all variants:
 
 ```python
-def test_nonexistent_method(self, worker_mode):
-    """Test calling non-existent method across modes."""
+def test_error_handling(self, worker_mode):
     w = MyWorker.options(mode=worker_mode).init()
     
     if worker_mode in ("sync", "ray"):
-        # Sync and Ray fail immediately
         with pytest.raises(AttributeError):
-            w.nonexistent_method()
+            w.nonexistent_method()  # Fails immediately
     else:
-        # Thread, asyncio, process return future with error
-        future = w.nonexistent_method()
+        future = w.nonexistent_method()  # Returns future
         with pytest.raises(AttributeError):
             future.result(timeout=5.0)
     
@@ -344,340 +267,91 @@ def test_nonexistent_method(self, worker_mode):
 ```python
 class TestBasicFeatures:
     """Test basic worker functionality."""
-    
-    def test_initialization(self, worker_mode):
-        """Test worker initialization."""
-        # ...
-    
-    def test_method_call(self, worker_mode):
-        """Test basic method calls."""
-        # ...
-
-class TestExceptionHandling:
-    """Test exception handling."""
-    
-    def test_method_raises_exception(self, worker_mode):
-        """Test exception propagation."""
-        # ...
-    
-    def test_return_exceptions(self, worker_mode):
-        """Test exception capture."""
-        # ...
+    def test_initialization(self, worker_mode): ...
+    def test_method_call(self, worker_mode): ...
 
 class TestPoolFeatures:
     """Test worker pool features."""
-    
-    def test_load_balancing(self, pool_mode):
-        """Test load balancing strategies."""
-        # ...
+    def test_load_balancing(self, pool_mode): ...
 ```
 
 ### 2. Use Descriptive Test Names
 
 ```python
 # ✅ Good: Clear what is being tested
-def test_wait_returns_done_and_not_done_sets(self, worker_mode):
-    """Test that wait() returns correct done and not_done sets."""
-    # ...
+def test_wait_returns_done_and_not_done_sets(self, worker_mode): ...
+def test_gather_preserves_input_order(self, worker_mode): ...
 
-def test_gather_preserves_input_order(self, worker_mode):
-    """Test that gather() returns results in same order as input."""
-    # ...
-
-def test_worker_maintains_state_across_calls(self, worker_mode):
-    """Test that worker state persists between method calls."""
-    # ...
-
-# ❌ Bad: Unclear what is tested
-def test_wait(self, worker_mode):
-    # ...
-
-def test_gather_works(self, worker_mode):
-    # ...
+# ❌ Bad: Unclear
+def test_wait(self, worker_mode): ...
+def test_gather_works(self, worker_mode): ...
 ```
 
 ### 3. Always Clean Up Resources
 
 ```python
 def test_feature(self, worker_mode):
-    """Test feature with proper cleanup."""
     w = MyWorker.options(mode=worker_mode).init()
-    
-    try:
-        # Test logic
-        result = w.method().result()
-        assert result == expected
-    finally:
-        # Always stop worker, even if test fails
-        w.stop()
-```
-
-Or use the simpler pattern:
-
-```python
-def test_feature(self, worker_mode):
-    """Test feature with proper cleanup."""
-    w = MyWorker.options(mode=worker_mode).init()
-    
-    # Test logic
     result = w.method().result()
     assert result == expected
-    
-    w.stop()  # pytest will still call this even if assertion fails
+    w.stop()  # Pytest calls this even if assertion fails
 ```
 
 ---
 
 ## Common Testing Patterns
 
-### Pattern 1: Testing Synchronization Primitives
-
 ```python
-from concurry import wait, gather, ReturnWhen
-
-class TestSynchronization:
-    """Test wait() and gather() across all modes."""
-    
-    def test_wait_all_completed(self, worker_mode):
-        """Test wait with ALL_COMPLETED across all modes."""
-        w = ComputeWorker.options(mode=worker_mode).init(multiplier=1)
-        
-        futures = [w.compute(i) for i in range(10)]
-        done, not_done = wait(futures, timeout=5.0)
-        
-        assert len(done) == 10
-        assert len(not_done) == 0
-        
-        w.stop()
-    
-    def test_gather_basic(self, worker_mode):
-        """Test gather() basic functionality across all modes."""
-        w = ComputeWorker.options(mode=worker_mode).init(multiplier=2)
-        
-        futures = [w.compute(i) for i in range(5)]
-        results = gather(futures, timeout=5.0)
-        
-        assert results == [0, 2, 4, 6, 8]
-        
-        w.stop()
-    
-    def test_gather_with_dict(self, worker_mode):
-        """Test gather() with dict input across all modes."""
-        w = ComputeWorker.options(mode=worker_mode).init(multiplier=1)
-        
-        tasks = {
-            "task1": w.compute(10),
-            "task2": w.compute(20),
-            "task3": w.compute(30),
-        }
-        
-        results = gather(tasks, timeout=5.0)
-        
-        assert isinstance(results, dict)
-        assert results == {"task1": 10, "task2": 20, "task3": 30}
-        
-        w.stop()
-```
-
-### Pattern 2: Testing Exception Handling
-
-```python
-class TestExceptions:
-    """Test exception handling across all modes."""
-    
-    def test_exception_propagation(self, worker_mode):
-        """Test that exceptions are properly propagated."""
-        w = ComputeWorker.options(mode=worker_mode).init()
-        
-        future = w.failing_method()
-        
-        with pytest.raises(ValueError, match="expected error"):
-            future.result(timeout=5.0)
-        
-        w.stop()
-    
-    def test_gather_return_exceptions(self, worker_mode):
-        """Test gather with return_exceptions=True."""
-        w = ComputeWorker.options(mode=worker_mode).init()
-        
-        futures = [
-            w.compute(1),
-            w.failing_method(),
-            w.compute(3),
-        ]
-        
-        results = gather(futures, return_exceptions=True, timeout=5.0)
-        
-        assert results[0] == 1
-        assert isinstance(results[1], ValueError)
-        assert results[2] == 3
-        
-        w.stop()
-```
-
-### Pattern 3: Testing Timeouts
-
-```python
-class TestTimeouts:
-    """Test timeout behavior across modes."""
-    
-    def test_timeout_raises_error(self, worker_mode):
-        """Test that timeout raises TimeoutError."""
-        if worker_mode == "sync":
-            pytest.skip("Sync mode completes immediately")
-        
-        w = ComputeWorker.options(mode=worker_mode).init()
-        
-        future = w.slow_task(duration=5.0)
-        
-        with pytest.raises(TimeoutError):
-            future.result(timeout=0.1)
-        
-        w.stop()
-```
-
-### Pattern 4: Testing Large Batches
-
-```python
-class TestPerformance:
-    """Test performance with large batches."""
-    
-    def test_large_batch_processing(self, worker_mode):
-        """Test processing large batch of tasks."""
-        w = ComputeWorker.options(mode=worker_mode).init(multiplier=1)
-        
-        # Test with 100 tasks
-        futures = [w.compute(i) for i in range(100)]
-        results = gather(futures, timeout=30.0)
-        
-        assert len(results) == 100
-        assert results == list(range(100))
-        
-        w.stop()
-```
-
----
-
-## Edge Cases to Test
-
-### 1. Empty Collections
-
-```python
-def test_wait_empty_list(self, worker_mode):
-    """Test wait() with empty list."""
-    done, not_done = wait([])
-    
-    assert len(done) == 0
-    assert len(not_done) == 0
-
-def test_gather_empty_dict(self, worker_mode):
-    """Test gather() with empty dict."""
-    results = gather({})
-    
-    assert isinstance(results, dict)
-    assert len(results) == 0
-```
-
-### 2. Single Items
-
-```python
-def test_wait_single_future(self, worker_mode):
-    """Test wait() with single future."""
-    w = ComputeWorker.options(mode=worker_mode).init()
-    
-    future = w.compute(42)
-    done, not_done = wait(future, timeout=5.0)
-    
-    assert len(done) == 1
-    assert len(not_done) == 0
-    
+# Pattern 1: Synchronization primitives
+def test_wait_and_gather(self, worker_mode):
+    w = MyWorker.options(mode=worker_mode).init()
+    futures = [w.compute(i) for i in range(10)]
+    done, not_done = wait(futures, timeout=5.0)
+    results = gather(futures, timeout=5.0)
     w.stop()
-```
 
-### 3. Mixed Types
-
-```python
-def test_gather_mixed_futures_and_values(self, worker_mode):
-    """Test gather() with mix of futures and values."""
-    w = ComputeWorker.options(mode=worker_mode).init()
-    
-    mixed = [w.compute(1), 42, w.compute(2)]
-    results = gather(mixed, timeout=5.0)
-    
-    assert results == [1, 42, 2]
-    
+# Pattern 2: Exception handling
+def test_gather_with_exceptions(self, worker_mode):
+    w = MyWorker.options(mode=worker_mode).init()
+    futures = [w.compute(1), w.failing_method(), w.compute(3)]
+    results = gather(futures, return_exceptions=True, timeout=5.0)
+    assert isinstance(results[1], ValueError)
     w.stop()
+
+# Pattern 3: Timeouts
+def test_timeout(self, worker_mode):
+    if worker_mode == "sync":
+        pytest.skip("Sync mode completes immediately")
+    w = MyWorker.options(mode=worker_mode).init()
+    with pytest.raises(TimeoutError):
+        w.slow_task(duration=5.0).result(timeout=0.1)
+    w.stop()
+
+# Pattern 4: Edge cases - empty, single, mixed types
+def test_edge_cases(self, worker_mode):
+    assert len(wait([])[0]) == 0  # Empty
+    assert len(wait(single_future)[0]) == 1  # Single
+    assert gather([future, 42, future2]) == [r1, 42, r2]  # Mixed
 ```
-
-### 4. All Polling Algorithms
-
-```python
-from concurry import PollingAlgorithm
-
-def test_wait_with_all_polling_algorithms(self, worker_mode):
-    """Test wait() with all polling strategies."""
-    for algorithm in [PollingAlgorithm.Fixed, PollingAlgorithm.Adaptive,
-                     PollingAlgorithm.Exponential, PollingAlgorithm.Progressive]:
-        w = ComputeWorker.options(mode=worker_mode).init()
-        
-        futures = [w.compute(i) for i in range(5)]
-        done, not_done = wait(futures, polling=algorithm, timeout=5.0)
-        
-        assert len(done) == 5
-        assert len(not_done) == 0
-        
-        w.stop()
-```
-
----
 
 ## Ray-Specific Testing
 
-### Ray Actor Options
-
 ```python
-import pytest
-from concurry.utils import _IS_RAY_INSTALLED
+# Always include runtime_env when manually initializing
+import ray, morphic, concurry
+ray.init(
+    ignore_reinit_error=True,
+    num_cpus=4,
+    runtime_env={"py_modules": [concurry, morphic]}
+)
 
+# Test Ray-specific features
 @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
-class TestRayFeatures:
-    """Test Ray-specific features."""
-    
-    def test_ray_actor_options(self):
-        """Test Ray worker with custom actor options."""
-        w = MyWorker.options(
-            mode="ray",
-            actor_options={"num_cpus": 1, "num_gpus": 0}
-        ).init()
-        
-        result = w.method().result(timeout=5.0)
-        assert result == expected
-        
-        w.stop()
-```
-
-### Ray Initialization in Tests
-
-When manually initializing Ray (not relying on conftest.py):
-
-```python
-def test_custom_ray_init(self):
-    """Test with custom Ray initialization."""
-    import ray
-    import morphic
-    import concurry
-    
-    # Always include runtime_env
-    ray.init(
-        ignore_reinit_error=True,
-        num_cpus=4,
-        runtime_env={"py_modules": [concurry, morphic]},
-    )
-    
-    # Your test logic
-    w = MyWorker.options(mode="ray").init()
-    result = w.method().result()
-    assert result == expected
+def test_ray_actor_options(self):
+    w = MyWorker.options(
+        mode="ray",
+        actor_options={"num_cpus": 1}
+    ).init()
     w.stop()
 ```
 
@@ -685,373 +359,82 @@ def test_custom_ray_init(self):
 
 ## Fixing Failing Tests: NEVER Skip, Always Fix
 
-### Critical Rule: Fix the Root Cause, Don't Skip Tests
+### Critical Rule: Fix Implementation, Don't Skip Tests
 
-**When an existing test fails, the problem is most likely with the implementation, NOT the test. Unless the test was added in the current session, it would have been a passing testcase earlier.**
-Your responsibility is to:
-1. **Identify the root cause** of the test failure
-2. **Fix the implementation** to make the test pass
-3. **NEVER skip or comment out failing tests** unless explicitly instructed by the user
+When an existing test fails, the problem is usually the implementation, not the test. Your responsibility:
+1. Identify the root cause
+2. Fix the implementation to make the test pass
+3. NEVER skip or comment out failing tests
 
 ### Decision Tree for Failing Tests
-When you encounter a failing test, follow this decision tree:
+
 ```
 Test fails
-   ├── Is the test itself wrong/outdated?
-   │   ├── YES → Ask user before modifying test
-   │   └── NO → Continue to next question
-   │
-   ├── Is this a NEW test you just wrote?
-   │   ├── YES → Fix your test or implementation
-   │   └── NO → This is an EXISTING test, continue
-   │
-   ├── Is the fix small/localized (< 50 lines, single file)?
-   │   ├── YES → Fix it autonomously
-   │   │        - Debug the root cause
-   │   │        - Implement the fix
-   │   │        - Verify the test passes
-   │   │        - Check for regressions
-   │   └── NO → This is a large change, continue
-   │
-   └── Is the fix large/complex (multiple files, architectural change)?
-       ├── YES → STOP and ask the user
-       │        - Explain the root cause
-       │        - Describe the required fix
-       │        - Estimate the scope of changes
-       │        - Wait for user's decision
-       └── NO → Re-evaluate, this should be YES or covered above
+   ├── Test wrong/outdated? → Ask user before modifying
+   ├── NEW test you wrote? → Fix your test or implementation
+   ├── Small fix (<50 lines, single file)? → Fix autonomously
+   └── Large fix (multiple files, architectural)? → STOP and ask user
 ```
 
-### Examples: Correct Behavior
+### When to Fix Autonomously vs. Ask User
 
-#### ✅ Example 1: Small Fix - Autonomous Correction
+**Small Fix (Do it)**: Off-by-one errors, missing checks, wrong operators, typos, missing imports, wrong exception types
 
-```
-Scenario: Test test_retry_with_max_attempts is failing
-Error: AssertionError: assert 2 == 3
+**Large Fix (Ask user)**: New classes, API changes, 3+ files affected, architectural decisions, unclear behavior, 100+ lines of new logic
 
-AI Response:
-"I see the test is failing because the retry logic is only attempting 2 times 
-instead of 3. Looking at the code, the issue is in retry.py line 145 - the 
-loop counter is off by one. I'll fix this now."
+**Test Might Be Wrong (Ask user)**: Test expects value X, implementation returns Y, unclear which is correct
 
-[AI fixes the implementation in retry.py]
-[AI reruns the test to verify it passes]
-[AI checks for regressions in related tests]
+### Examples
 
-"Fixed! The retry logic now correctly attempts 3 times as expected."
-```
+✅ **Autonomous Fix**: "Test expects 3 retries but gets 2. Fixed off-by-one error in retry.py line 145."
 
-#### ✅ Example 2: Large Change - Stop and Ask
+✅ **Stop and Ask**: "Test fails due to unpicklable Lock in LimitPool. Fix requires refactoring to use multiprocessing.Manager() across 5 files. Proceed?"
 
-```
-Scenario: Test test_multiprocess_shared_limit fails
-Error: RuntimeError: Cannot pickle LimitPool across processes
+✅ **Ask About Test**: "Test expects timeout=5.0 but config has 10.0. Which is correct?"
 
-AI Response:
-"This test is failing because LimitPool cannot be shared across processes due 
-to pickling issues. The root cause is that we're using threading primitives 
-(Lock, Semaphore) that don't work across processes.
+❌ **NEVER Skip**: `pytest.skip("Test fails for process mode")` - This hides bugs!
 
-To fix this properly, we need to:
-1. Refactor LimitPool to use multiprocessing.Manager() for shared state
-2. Create separate ThreadLimitPool and ProcessLimitPool classes
-3. Update the factory logic to choose the right implementation
-4. This affects ~5 files and changes the architecture
+❌ **NEVER Comment Out**: `# def test_feature():` - This breaks functionality silently!
 
-This is a significant change. Would you like me to:
-A) Implement this refactoring now
-B) Create a temporary workaround for this test
-C) File this as a known issue and skip this specific test
-
-How would you like to proceed?"
-```
-
-#### ✅ Example 3: Test Might Be Wrong - Ask First
-
-```
-Scenario: Test test_worker_timeout_default fails
-Error: AssertionError: assert 10.0 == 5.0
-
-AI Response:
-"This test is asserting that the default timeout is 5.0 seconds, but the 
-implementation is returning 10.0 seconds. Before I change anything, I need 
-to clarify:
-
-Is 10.0 the correct default (test is wrong), or is 5.0 the correct default 
-(implementation is wrong)?
-
-Looking at the configuration in global_config.py, the default is set to 10.0, 
-which suggests the test may be outdated. Should I update the test to expect 
-10.0, or should I change the configuration default to 5.0?"
-```
-
-### ❌ Examples: WRONG Behavior
-
-#### ❌ Example 1: Skipping Without Fixing
-
-```python
-# WRONG - NEVER DO THIS
-def test_retry_with_max_attempts(self, worker_mode):
-    if worker_mode in ("process", "ray"):
-        pytest.skip("Test fails for process and ray modes")  # ❌ BAD
-    
-    # test logic...
-```
-
-**Why this is wrong**: You're hiding a real bug. Process and Ray modes should 
-work correctly. The failure indicates a bug that needs to be fixed.
-
-#### ❌ Example 2: Commenting Out Failing Tests
-
-```python
-# WRONG - NEVER DO THIS
-# def test_shared_limit_pool(self, pool_mode):  # ❌ Commented out because failing
-#     """Test shared limit pool across workers."""
-#     # ... test logic
-```
-
-**Why this is wrong**: This test was written for a reason. Commenting it out 
-means the functionality is broken and you're hiding it.
-
-#### ❌ Example 3: Changing Test to Match Wrong Behavior
-
-```python
-# WRONG - NEVER DO THIS without asking
-def test_retry_attempts(self, worker_mode):
-    # Original test expected 3 attempts
-    # assert num_attempts == 3  # ❌ Changed without understanding why
-    assert num_attempts == 2  # AI changed this to make test pass
-```
-
-**Why this is wrong**: You changed the test without understanding if the 
-implementation is wrong or if the test expectations changed. Ask first.
+❌ **NEVER Change Test Without Understanding**: Changing assertions to match wrong behavior hides bugs!
 
 ### Acceptable Reasons to Skip Tests
 
-Only skip tests in these specific scenarios:
-
-#### 1. Feature Not Supported by Mode
-
-```python
-def test_parallel_execution(self, worker_mode):
-    """Test parallel execution across multiple workers."""
-    if worker_mode in ("sync", "asyncio"):
-        pytest.skip("Sync and asyncio modes don't support multiple workers")
-    
-    # This feature genuinely requires multiple workers
-    # ...
-```
-
-**Valid because**: Sync and asyncio modes fundamentally don't support 
-`max_workers > 1`. This is by design, not a bug.
-
-#### 2. External Dependency Missing
-
-```python
-@pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
-def test_ray_specific_feature(self):
-    """Test Ray-specific functionality."""
-    # ...
-```
-
-**Valid because**: Can't test Ray features if Ray isn't installed.
-
-#### 3. Platform-Specific Limitation
-
-```python
-@pytest.mark.skipif(sys.platform == "win32", reason="fork() not available on Windows")
-def test_fork_behavior(self):
-    """Test fork-specific behavior."""
-    # ...
-```
-
-**Valid because**: Some OS features genuinely aren't available on all platforms.
-
-#### 4. User Explicitly Requested Skip
-
-```python
-def test_expensive_computation(self):
-    """Test with 1M iterations - takes 5 minutes."""
-    pytest.skip("User requested to skip expensive tests for now")
-    # ...
-```
-
-**Valid because**: User made an explicit decision to skip this temporarily.
+1. **Feature not supported by mode**: `max_workers > 1` not supported by sync/asyncio
+2. **External dependency missing**: Ray not installed, OS feature unavailable
+3. **User explicitly requested**: Expensive/long-running tests temporarily disabled
 
 ### Debugging Strategy
 
-When a test fails, follow this systematic approach:
-
-1. **Read the error message carefully**
-   - What assertion failed?
-   - What was expected vs. actual?
-   - Where did the failure occur?
-
-2. **Understand the test's intent**
-   - What feature is being tested?
-   - What behavior should happen?
-   - Is this test still relevant?
-
-3. **Trace the execution path**
-   - Step through the code mentally or with a debugger
-   - Identify where the actual behavior diverges from expected
-   - Look for edge cases or race conditions
-
-4. **Identify the root cause**
-   - Is it a logic error?
-   - Is it a configuration issue?
-   - Is it a race condition?
-   - Is it a missing feature?
-
-5. **Determine fix complexity**
-   - Small fix: < 50 lines, single file, no architectural changes → Fix autonomously
-   - Large fix: Multiple files, architectural changes, unclear scope → Stop and ask user
-
-6. **Implement and verify**
-   - Make the fix
-   - Run the failing test to verify it passes
-   - Run related tests to check for regressions
-   - Run the full test suite if making significant changes
+1. Read error message: What failed? Expected vs. actual?
+2. Understand test intent: What feature? What behavior?
+3. Trace execution: Where does it diverge?
+4. Identify root cause: Logic error? Config? Race condition?
+5. Determine complexity: Small fix (do it) or large fix (ask)?
+6. Implement and verify: Fix, test, check regressions
 
 ### Common Test Failure Patterns
 
-#### Pattern 1: Timing/Race Conditions
-
-```
-Symptom: Test passes sometimes, fails other times
-Root Cause: Race condition or insufficient timeout
-Fix: Add proper synchronization or increase timeout
-```
-
-#### Pattern 2: Mode-Specific Behavior
-
-```
-Symptom: Test passes for some modes, fails for others
-Root Cause: Mode-specific edge case not handled
-Fix: Add mode-specific handling in implementation (NOT in test)
-```
-
-#### Pattern 3: Configuration Changes
-
-```
-Symptom: Test expects old default value
-Root Cause: Default configuration was changed
-Fix: Ask user if test or config is correct
-```
-
-#### Pattern 4: Missing Feature
-
-```
-Symptom: Test calls a method that doesn't exist or isn't fully implemented
-Root Cause: Feature was designed but not implemented
-Fix: Implement the missing feature or ask user about priority
-```
-
-### Examples of Small vs. Large Fixes
-
-#### Small Fixes (Fix Autonomously)
-- Off-by-one errors in loops
-- Missing null checks
-- Incorrect operator (e.g., `>` vs `>=`)
-- Missing import statement
-- Typo in variable name
-- Wrong exception type raised
-- Missing attribute initialization
-- Incorrect default value
-
-#### Large Fixes (Stop and Ask)
-- Requires new class or major refactoring
-- Changes public API
-- Affects multiple modules (3+ files)
-- Requires architectural decision
-- May break backward compatibility
-- Needs new external dependency
-- Unclear what correct behavior should be
-- Requires significant new logic (100+ lines)
-
-### Communication with User
-
-When stopping to ask the user about a large fix:
-
-1. **Clearly explain the problem**
-   - What test is failing
-   - What the root cause is
-   - Why it's not a simple fix
-
-2. **Describe the required fix**
-   - What needs to change
-   - How many files affected
-   - What architectural decisions are needed
-
-3. **Provide options**
-   - Option A: Full proper fix (describe scope)
-   - Option B: Temporary workaround (if reasonable)
-   - Option C: Skip for now and file as known issue
-
-4. **Wait for user decision**
-   - Don't proceed without explicit approval for large changes
+**Timing/Race**: Test flaky → Add synchronization or increase timeout
+**Mode-Specific**: Fails some modes → Fix implementation, not test
+**Config Changes**: Expects old default → Ask user which is correct
+**Missing Feature**: Method doesn't exist → Implement or ask about priority
 
 ---
 
 ## Summary Checklist
 
-When writing tests for Concurry:
-
-- ✅ Use `worker_mode` fixture for all worker tests
-- ✅ Use `pool_mode` fixture for pool-specific tests
-- ✅ Test across ALL execution modes (sync, thread, process, asyncio, ray)
-- ✅ NEVER skip tests due to failures - handle edge cases explicitly
-- ✅ Only skip when feature is fundamentally not supported
-- ✅ **Fix failing tests by fixing the implementation, not by skipping**
-- ✅ **For small fixes (< 50 lines, single file): fix autonomously**
-- ✅ **For large fixes (multiple files, architectural): stop and ask user**
-- ✅ **If test might be wrong: ask user before changing test**
-- ✅ Use descriptive test names
-- ✅ Always clean up resources (call `.stop()`)
-- ✅ Test edge cases (empty, single, mixed types)
-- ✅ Test exception handling with `return_exceptions`
-- ✅ Test timeout behavior (skip for sync mode)
-- ✅ Include Ray runtime_env when manually initializing
-- ✅ Group tests by feature in classes
-- ✅ Test all polling algorithms
-- ✅ Test large batches (100+ items)
-
----
+✅ Use `worker_mode` or `pool_mode` fixtures to test all execution modes
+✅ Fix failing tests by fixing implementation, never skip to hide bugs
+✅ Small fixes (<50 lines): do autonomously; large fixes: ask user
+✅ Always clean up with `w.stop()`; use descriptive test names
+✅ Test edge cases (empty, single, mixed), exceptions, timeouts
+✅ Include Ray runtime_env: `runtime_env={"py_modules": [concurry, morphic]}`
 
 ## Anti-Patterns to Avoid
 
-❌ **Hard-coding execution mode:**
-```python
-def test_feature(self):
-    w = MyWorker.options(mode="thread").init()  # ❌ Only tests thread mode
-```
-
-❌ **Skipping failing tests:**
-```python
-def test_feature(self, worker_mode):
-    if worker_mode == "ray":
-        pytest.skip("Fails on Ray")  # ❌ Handle the edge case instead
-```
-
-❌ **Not cleaning up:**
-```python
-def test_feature(self, worker_mode):
-    w = MyWorker.options(mode=worker_mode).init()
-    # ... test logic ...
-    # ❌ Missing w.stop()
-```
-
-❌ **Unclear test names:**
-```python
-def test_1(self, worker_mode):  # ❌ What does this test?
-    # ...
-```
-
-❌ **Testing only happy path:**
-```python
-def test_feature(self, worker_mode):
-    # ❌ Only tests success case, no exception handling
-    result = w.method().result()
-    assert result == expected
-```
+❌ Hardcoding mode: `mode="thread"` (use `worker_mode` fixture)
+❌ Skipping failing tests to hide bugs
+❌ Not cleaning up: missing `w.stop()`
+❌ Unclear test names: `test_1()` instead of `test_feature_behavior()`
+❌ Testing only happy path without exception handling

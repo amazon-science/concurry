@@ -208,24 +208,36 @@ For comprehensive architecture details, see [docs/architecture/workers.md](../..
 **RULE**: Worker class does NOT inherit from Typed (allows flexible `__init__` signatures).
 
 - User-defined workers have complete freedom in `__init__` signature
-- Supports cooperative multiple inheritance with Typed/BaseModel (NOT with Ray)
-- Validation decorators (`@validate`, `@validate_call`) work with ALL modes including Ray
-- ✅ **DO**: Use plain Python classes or decorators for validation
-- ✅ **DO**: Use composition instead of inheritance for Ray mode
-- ❌ **DON'T**: Inherit from Typed/BaseModel if you need Ray mode
+- ✅ Supports cooperative multiple inheritance with Typed/BaseModel (ALL modes including Ray)
+- ✅ Validation decorators (`@validate`, `@validate_call`) work with ALL modes including Ray
+- ✅ **DO**: Use Typed/BaseModel inheritance - automatic composition wrapper enables Ray compatibility
+- ✅ **DO**: Use decorators (@validate, @validate_call) for validation without inheritance
+- ✅ **DO**: Use plain Python classes when validation not needed
 
-**Ray + Pydantic Limitation**:
+**Automatic Ray Compatibility**:
+
+Typed/BaseModel workers are automatically wrapped with composition pattern for Ray mode:
+
 ```python
-# ❌ WRONG - Won't work with Ray
+# ✅ WORKS - Automatic composition wrapper for Ray
 class MyWorker(Worker, Typed):
     name: str
+    
+    def process(self) -> str:
+        return f"Processing {self.name}"
 
-# ✅ CORRECT - Ray-compatible
+# This now works seamlessly with Ray mode - no code changes needed!
+worker = MyWorker.options(mode="ray").init(name="test")
+result = worker.process().result()  # "Processing test"
+
+# ✅ Also works - Validation decorators
 class MyWorker(Worker):
     @validate
     def __init__(self, name: str):
         self.name = name
 ```
+
+The composition wrapper is applied transparently - you don't need to do anything special!
 
 ### WorkerProxy Hierarchy
 
@@ -278,11 +290,11 @@ class MyWorker(Worker):
 - Applies defaults from global config
 - Processes limits parameter (creates LimitPool)
 - Creates retry config if num_retries > 0
-- Checks Ray + Pydantic incompatibility
+- Applies composition wrapper for Typed/BaseModel workers (all modes)
 - Decides single worker vs pool via `_should_create_pool()`
 - ✅ **DO**: Process limits with `_transform_worker_limits()`
 - ✅ **DO**: Create retry config from builder params
-- ✅ **DO**: Check Pydantic incompatibility for Ray
+- ✅ **DO**: Apply composition wrapper for Typed/BaseModel workers
 - ❌ **DON'T**: Create proxy directly (always use builder)
 
 ### Worker Wrapping
@@ -401,7 +413,7 @@ For comprehensive architecture details, see [docs/architecture/limits.md](../../
 - Zero-copy: RayFuture → ObjectRef passed directly
 - Native async support (Ray handles automatically)
 - Retry logic pre-applied at class level (bypasses `__getattribute__`)
-- Incompatible with Typed/BaseModel workers
+- ✅ Compatible with Typed/BaseModel via automatic composition wrapper
 - **CRITICAL**: Actors execute methods serially by default (one at a time)
 - For N concurrent tasks, need N separate actors (not N tasks on 1 actor)
 
@@ -456,7 +468,7 @@ For comprehensive architecture details, see [docs/architecture/limits.md](../../
 
 ### Critical Gotchas
 
-1. **Ray + Pydantic**: Incompatible, use composition or decorators
+1. **Ray + Pydantic/Typed**: ✅ Fully supported via automatic composition wrapper (no code changes needed)
 2. **Async in non-Asyncio**: Works but no concurrency (sequential via `asyncio.run()`)
 3. **Submission queue vs limits**: Two separate mechanisms (client-side vs worker-side)
 4. **On-demand + limits**: Limits NOT shared (each worker gets own copy)

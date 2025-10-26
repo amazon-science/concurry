@@ -48,16 +48,16 @@ class WorkerProxyPool(Typed, ABC):
         WorkerProxyPool is thread-safe and can be used concurrently from
         multiple threads. Uses appropriate synchronization primitives.
 
-    **Model Inheritance & Ray Limitations:**
+    **Model Inheritance & Ray Support:**
 
     Worker pools support the same model inheritance as single workers:
-    - ✅ morphic.Typed workers (all modes EXCEPT Ray)
-    - ✅ pydantic.BaseModel workers (all modes EXCEPT Ray)
+    - ✅ morphic.Typed workers (ALL modes including Ray via automatic composition wrapper)
+    - ✅ pydantic.BaseModel workers (ALL modes including Ray via automatic composition wrapper)
     - ✅ @validate/@validate_call decorators (ALL modes including Ray)
-    - ❌ Typed/BaseModel workers with Ray mode (raises ValueError)
+    - ✅ Typed/BaseModel workers with Ray mode (fully supported via automatic composition wrapper)
 
-    For Ray pools with validation, use @validate or @validate_call decorators
-    instead of inheriting from Typed/BaseModel. See Worker docstring for details.
+    All validation approaches now work seamlessly with Ray pools thanks to the automatic
+    composition wrapper. No code changes required! See Worker docstring for details.
 
     Example:
         Basic Usage:

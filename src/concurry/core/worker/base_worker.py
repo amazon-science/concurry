@@ -1040,15 +1040,15 @@ class WorkerBuilder(Typed):
     def _create_single_worker(self, args: tuple, kwargs: dict) -> "WorkerProxy":
         """Create a single worker instance.
 
+        Typed/BaseModel workers are automatically wrapped with composition pattern
+        for seamless Ray compatibility.
+
         Args:
             args: Positional arguments for worker __init__
             kwargs: Keyword arguments for worker __init__
 
         Returns:
             WorkerProxy instance
-
-        Raises:
-            ValueError: If trying to create Ray worker with Pydantic-based class
         """
         # Import here to avoid circular imports
         from ...config import global_config
@@ -1145,15 +1145,15 @@ class WorkerBuilder(Typed):
     def _create_pool(self, args: tuple, kwargs: dict) -> Any:
         """Create a worker pool.
 
+        Typed/BaseModel workers are automatically wrapped with composition pattern
+        for seamless Ray compatibility across all pool types.
+
         Args:
             args: Positional arguments for worker __init__
             kwargs: Keyword arguments for worker __init__
 
         Returns:
             WorkerProxyPool instance
-
-        Raises:
-            ValueError: If trying to create Ray pool with Pydantic-based class
         """
         # Import here to avoid circular imports
         from ...config import global_config
@@ -1263,22 +1263,31 @@ class Worker:
     Worker supports cooperative multiple inheritance, allowing you to combine Worker with
     model classes for automatic field validation and serialization:
 
-    - ✅ **morphic.Typed**: Full support (sync, thread, process, asyncio)
-    - ✅ **pydantic.BaseModel**: Full support (sync, thread, process, asyncio)
-    - ❌ **Ray mode limitation**: Ray mode is NOT compatible with Typed/BaseModel workers
+    - ✅ **morphic.Typed**: Full support (ALL modes including Ray via automatic composition wrapper)
+    - ✅ **pydantic.BaseModel**: Full support (ALL modes including Ray via automatic composition wrapper)
+    - ✅ **Ray mode**: Fully compatible with Typed/BaseModel workers (automatic composition wrapper)
 
     **Validation Decorators (Works with ALL modes including Ray):**
 
     - ✅ **@morphic.validate**: Works on methods and __init__ (all modes including Ray)
     - ✅ **@pydantic.validate_call**: Works on methods and __init__ (all modes including Ray)
 
-    These decorators provide runtime validation without class inheritance, making them
-    compatible with Ray mode.
+    These decorators provide runtime validation without class inheritance.
+
+    **Automatic Composition Wrapper:**
+
+    When you use Worker + Typed or Worker + BaseModel, concurry automatically applies a
+    composition wrapper that makes them work seamlessly with Ray mode. This happens
+    transparently - no code changes needed! The wrapper:
+    - Isolates infrastructure methods from user methods
+    - Avoids Ray's serialization conflicts with Pydantic's __setattr__
+    - Maintains full validation and type checking
+    - Has zero performance overhead (optimized delegation)
 
     This means you can use:
     - Plain Python classes (all modes including Ray)
-    - Worker + morphic.Typed for validation and hooks (all modes EXCEPT Ray)
-    - Worker + pydantic.BaseModel for Pydantic validation (all modes EXCEPT Ray)
+    - Worker + morphic.Typed for validation and hooks (all modes including Ray ✅)
+    - Worker + pydantic.BaseModel for Pydantic validation (all modes including Ray ✅)
     - @validate or @validate_call decorators on methods (all modes including Ray)
     - Dataclasses, Attrs, or any other class structure (all modes)
 
@@ -1424,34 +1433,35 @@ class Worker:
         worker.stop()
         ```
 
-    Ray Mode Limitations and Workarounds:
+    Ray Mode Support with Typed/BaseModel (Automatic Composition Wrapper):
         ```python
-        # ❌ BAD: Typed/BaseModel workers don't work with Ray
+        # ✅ WORKS: Typed/BaseModel workers fully supported in Ray mode!
+        from morphic import Typed
+        from pydantic import BaseModel, Field
+
         class TypedWorker(Worker, Typed):
             name: str
             value: int = 0
 
-        # This will raise ValueError with Ray mode
-        try:
-            worker = TypedWorker.options(mode="ray").init(name="test", value=10)
-        except ValueError as e:
-            print(e)  # "Cannot create Ray worker with Pydantic-based class..."
+        # Works with Ray mode via automatic composition wrapper!
+        worker = TypedWorker.options(mode="ray").init(name="test", value=10)
+        result = worker.compute(5).result()  # 50
+        worker.stop()
 
-        # ✅ GOOD: Use composition instead of inheritance for Ray
-        class RayCompatibleWorker(Worker):
-            def __init__(self, name: str, value: int = 0):
-                self.name = name
-                self.value = value
+        # ✅ Pydantic BaseModel also works with Ray
+        class PydanticWorker(Worker, BaseModel):
+            name: str = Field(..., min_length=1)
+            value: int = Field(default=0, ge=0)
 
             def compute(self, x: int) -> int:
                 return self.value * x
 
-        # This works with Ray!
-        worker = RayCompatibleWorker.options(mode="ray").init(name="test", value=10)
+        # Fully supported in Ray mode!
+        worker = PydanticWorker.options(mode="ray").init(name="test", value=10)
         result = worker.compute(5).result()  # 50
         worker.stop()
 
-        # ✅ EVEN BETTER: Use validation decorators for type checking
+        # ✅ Validation decorators also work with Ray
         class ValidatedRayWorker(Worker):
             @validate
             def __init__(self, name: str, value: int = 0):
@@ -1468,21 +1478,20 @@ class Worker:
         worker.stop()
         ```
 
-        **Why Ray + Typed/BaseModel doesn't work:**
+        **How Composition Wrapper Enables Ray Compatibility:**
 
-        Ray's `ray.remote()` wraps classes as actors and modifies their `__setattr__`
-        behavior, which conflicts with Pydantic's frozen model implementation. When you
-        try to create a Ray actor from a Pydantic-based class, Ray attempts to set
-        internal attributes that trigger Pydantic's validation, causing AttributeError.
+        When you use Worker + Typed or Worker + BaseModel, concurry automatically applies
+        a composition wrapper that solves the historical Ray serialization conflict.
 
-        **Automatic Error Detection:**
+        The wrapper:
+        - Creates a plain Python class that holds the Typed/BaseModel instance internally
+        - Only exposes user-defined methods (infrastructure methods excluded)
+        - Delegates method calls to the wrapped instance
+        - Maintains full validation, type checking, and field constraints
+        - Has zero performance overhead (optimized delegation)
 
-        Concurry automatically detects this incompatibility and raises a clear error:
-        - **ValueError**: When attempting to create a Ray worker/pool with Typed/BaseModel
-        - **UserWarning**: When creating non-Ray workers (if Ray is installed)
-
-        The warning helps you know that your worker won't be compatible with Ray mode
-        if you later decide to switch execution modes.
+        This happens transparently - no code changes needed! Your Typed/BaseModel workers
+        just work with Ray mode out of the box.
 
     Different Execution Modes:
         ```python

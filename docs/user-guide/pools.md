@@ -1148,7 +1148,7 @@ pool.stop()
 
 Worker pools support the same model inheritance and validation features as single workers. All the patterns from the Workers guide apply to pools as well.
 
-### Typed/BaseModel Pools (Not Ray-Compatible)
+### Typed/BaseModel Pools (Universal Support)
 
 ```python
 from concurry import Worker
@@ -1164,7 +1164,7 @@ class TypedWorker(Worker, Typed):
     def process(self, x: int) -> int:
         return x * self.multiplier
 
-# ✅ Works with thread, process, asyncio
+# ✅ Works with ALL modes including Ray!
 pool = TypedWorker.options(
     mode="thread",
     max_workers=5
@@ -1176,20 +1176,23 @@ results = [f.result() for f in futures]
 print(results)  # [0, 3, 6, 9, 12, 15, 18, 21, 24, 27]
 pool.stop()
 
-# ❌ Does NOT work with Ray
-try:
-    pool = TypedWorker.options(
-        mode="ray",
-        max_workers=5
-    ).init(name="processor", multiplier=3)
-except ValueError as e:
-    print("Ray mode not supported with Typed workers")
-    # ValueError: Cannot create Ray worker with Pydantic-based class
+# ✅ Also works with Ray mode (automatic composition wrapper)
+pool_ray = TypedWorker.options(
+    mode="ray",
+    max_workers=5
+).init(name="processor", multiplier=3)
+
+futures_ray = [pool_ray.process(i) for i in range(10)]
+results_ray = [f.result() for f in futures_ray]
+print(results_ray)  # [0, 3, 6, 9, 12, 15, 18, 21, 24, 27]
+pool_ray.stop()
 ```
 
-### Validation Decorators with Ray Pools
+**Note:** Typed and BaseModel workers now work seamlessly with Ray pools thanks to the automatic composition wrapper. No code changes required!
 
-Use `@validate` or `@validate_call` decorators for Ray-compatible validation:
+### Validation Decorators with Pools
+
+You can also use `@validate` or `@validate_call` decorators (all work with Ray):
 
 ```python
 from concurry import Worker
@@ -1322,15 +1325,17 @@ pool.stop()
 | Worker Type | Thread Pool | Process Pool | Asyncio Pool | Ray Pool |
 |-------------|-------------|--------------|--------------|----------|
 | Plain Worker | ✅ | ✅ | ✅ | ✅ |
-| Worker + Typed | ✅ | ✅ | ✅ | ❌ |
-| Worker + BaseModel | ✅ | ✅ | ✅ | ❌ |
+| Worker + Typed | ✅ | ✅ | ✅ | ✅ |
+| Worker + BaseModel | ✅ | ✅ | ✅ | ✅ |
 | Worker + @validate | ✅ | ✅ | ✅ | ✅ |
 | Worker + @validate_call | ✅ | ✅ | ✅ | ✅ |
 
-**For Ray pools:**
-- ✅ Use plain Worker classes
-- ✅ Use @validate or @validate_call decorators for validation
-- ❌ Don't inherit from Typed or BaseModel
+**All approaches now work with Ray pools!**
+- ✅ Plain Worker classes
+- ✅ Worker + Typed or BaseModel (automatic composition wrapper)
+- ✅ @validate or @validate_call decorators
+
+**Note**: Typed and BaseModel workers use an automatic composition wrapper in Ray mode for seamless compatibility.
 
 **Example: Ray Pool with Validation**
 
@@ -1375,33 +1380,32 @@ ray.shutdown()
 
 ### When to Use Each Approach
 
-**For Non-Ray Pools (thread, process, asyncio):**
+**All approaches work with all pool types (thread, process, asyncio, ray)!**
 
 Use **Typed/BaseModel** when:
 - You want full model validation and lifecycle hooks
-- You need immutable configuration
+- You need immutable configuration with Field constraints
 - You want the richest feature set
-
-Use **@validate/@validate_call** when:
-- You want flexibility to switch to Ray later
-- You only need validation on specific methods
-- You prefer decorator-based validation
-
-**For Ray Pools:**
+- ✅ Works with ALL pool types including Ray
 
 Use **@validate decorator** when:
 - You want morphic's validation style
 - You need type coercion (strings → numbers)
+- You only need validation on specific methods
 - You want minimal overhead
+- ✅ Works with ALL pool types including Ray
 
 Use **@validate_call decorator** when:
 - You want Pydantic's validation features
-- You need Field constraints
-- You prefer strict validation
+- You need Field constraints with Annotated
+- You prefer Pydantic's validation style
+- ✅ Works with ALL pool types including Ray
 
-Use **plain Worker** when:
+Use **Plain Worker** when:
 - You don't need validation
-- You want maximum performance
+- You want absolute maximum performance
+- You handle validation elsewhere
+- ✅ Works with ALL pool types including Ray
 
 ## Retry Mechanisms with Pools
 

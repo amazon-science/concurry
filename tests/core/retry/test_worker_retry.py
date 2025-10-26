@@ -808,10 +808,10 @@ class TestRetryWithPydantic:
         worker.stop()
 
     def test_retry_with_basemodel_inheritance(self, worker_mode):
-        """Test retry on workers inheriting from BaseModel."""
-        if worker_mode == "ray":
-            pytest.skip("Ray mode not supported with Pydantic BaseModel")
+        """Test retry on workers inheriting from BaseModel.
 
+        Now works in ALL modes including Ray thanks to auto-composition wrapper!
+        """
         worker = ConfiguredPydanticWorker.options(
             mode=worker_mode,
             num_retries=5,
@@ -824,10 +824,10 @@ class TestRetryWithPydantic:
         worker.stop()
 
     def test_retry_with_typed_inheritance(self, worker_mode):
-        """Test retry on workers inheriting from morphic.Typed."""
-        if worker_mode == "ray":
-            pytest.skip("Ray mode not supported with morphic.Typed")
+        """Test retry on workers inheriting from morphic.Typed.
 
+        Now works in ALL modes including Ray thanks to auto-composition wrapper!
+        """
         worker = TypedWorkerWithRetry.options(
             mode=worker_mode,
             num_retries=3,

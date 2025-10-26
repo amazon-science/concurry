@@ -709,8 +709,8 @@ Workers support powerful validation and type checking through both model inherit
 
 | Feature | Sync | Thread | Process | Asyncio | Ray | Notes |
 |---------|------|--------|---------|---------|-----|-------|
-| **morphic.Typed** | ✅ | ✅ | ✅ | ✅ | ❌ | Full model with validation & hooks |
-| **pydantic.BaseModel** | ✅ | ✅ | ✅ | ✅ | ❌ | Pydantic validation & serialization |
+| **morphic.Typed** | ✅ | ✅ | ✅ | ✅ | ✅ | Full model with validation & hooks (auto-composition wrapper) |
+| **pydantic.BaseModel** | ✅ | ✅ | ✅ | ✅ | ✅ | Pydantic validation & serialization (auto-composition wrapper) |
 | **@morphic.validate** | ✅ | ✅ | ✅ | ✅ | ✅ | Decorator for methods/__init__ |
 | **@pydantic.validate_call** | ✅ | ✅ | ✅ | ✅ | ✅ | Pydantic decorator for validation |
 
@@ -744,7 +744,7 @@ class TypedWorker(Worker, Typed):
     def compute(self, x: int) -> int:
         return self.value * x
 
-# ✅ Works with thread, process, asyncio
+# ✅ Works with ALL modes including Ray!
 worker = TypedWorker.options(mode="thread").init(
     name="  data processor  ",  # Will be normalized to "Data Processor"
     value=10,
@@ -755,24 +755,24 @@ result = worker.compute(5).result()  # 50
 print(worker.name)  # "Data Processor"
 worker.stop()
 
-# ❌ Does NOT work with Ray
-try:
-    worker = TypedWorker.options(mode="ray").init(name="test", value=10)
-except ValueError as e:
-    print(f"Expected error: {e}")
-    # ValueError: Cannot create Ray worker with Pydantic-based class
+# ✅ Also works with Ray mode (automatic composition wrapper)
+worker_ray = TypedWorker.options(mode="ray").init(name="test", value=10)
+result_ray = worker_ray.compute(5).result()  # 50
+print(result_ray)
+worker_ray.stop()
 ```
 
 **Benefits:**
+- ✅ **Works with ALL execution modes including Ray** (via automatic composition wrapper)
 - Automatic field validation with Field constraints
 - Type coercion (strings → numbers, etc.)
 - Lifecycle hooks (`pre_initialize`, `post_initialize`, etc.)
 - Immutable by default (frozen=True)
 - Excellent error messages
+- Zero-overhead composition wrapper (performance optimized)
 
-**Limitations:**
-- Not compatible with Ray mode (use decorators instead)
-- Adds small overhead from Pydantic validation
+**Note:**
+- Ray support is automatic via composition wrapper (no code changes needed)
 
 ### Worker + pydantic.BaseModel
 
@@ -805,7 +805,7 @@ class PydanticWorker(Worker, BaseModel):
             "email": self.email
         }
 
-# ✅ Works with thread, process, asyncio
+# ✅ Works with ALL modes including Ray!
 worker = PydanticWorker.options(mode="process").init(
     name="Alice",
     age=30,
@@ -826,23 +826,24 @@ try:
 except Exception as e:
     print(f"Validation error: {e}")
 
-# ❌ Does NOT work with Ray
-try:
-    worker = PydanticWorker.options(mode="ray").init(name="test", age=25)
-except ValueError as e:
-    print("Ray mode not supported with BaseModel")
+# ✅ Also works with Ray mode (automatic composition wrapper)
+worker_ray = PydanticWorker.options(mode="ray").init(name="test", age=25)
+info_ray = worker_ray.get_info().result()
+print(info_ray)  # {'name': 'test', 'age': 25, 'email': None}
+worker_ray.stop()
 ```
 
 **Benefits:**
+- ✅ **Works with ALL execution modes including Ray** (via automatic composition wrapper)
 - Full Pydantic validation capabilities
 - Custom validators with `@field_validator`
 - JSON serialization/deserialization
 - Excellent IDE support
 - Rich error messages
+- Zero-overhead composition wrapper (performance optimized)
 
-**Limitations:**
-- Not compatible with Ray mode
-- Slightly more overhead than Typed
+**Note:**
+- Ray support is automatic via composition wrapper (no code changes needed)
 
 ### @morphic.validate Decorator (Ray Compatible!)
 
@@ -977,47 +978,38 @@ worker.stop()
 - API-like workers that need robust input validation
 - Workers interfacing with external systems
 
-### Ray Mode: What Works and What Doesn't
+### Ray Mode: Universal Support with Automatic Composition Wrapper
 
-**❌ Does NOT Work with Ray:**
+**✅ ALL Validation Approaches Work with Ray:**
+
+Concurry automatically applies a **composition wrapper** to workers that inherit from `morphic.Typed` or `pydantic.BaseModel`, making them fully compatible with Ray mode without any code changes required.
 
 ```python
-# These will raise ValueError
+from concurry import Worker
+from morphic import Typed, validate
+from pydantic import BaseModel, Field, validate_call
+
+# Option 1: Worker + Typed (fully supported)
 class TypedWorker(Worker, Typed):
     name: str
     value: int
 
+worker1 = TypedWorker.options(mode="ray").init(name="test", value=10)
+result1 = worker1.compute(5).result()
+worker1.stop()
+# ✅ Works! (automatic composition wrapper)
+
+# Option 2: Worker + BaseModel (fully supported)
 class PydanticWorker(Worker, BaseModel):
     name: str
     value: int
 
-# Both raise: ValueError: Cannot create Ray worker with Pydantic-based class
-try:
-    worker = TypedWorker.options(mode="ray").init(name="test", value=10)
-except ValueError:
-    pass  # Expected
+worker2 = PydanticWorker.options(mode="ray").init(name="test", value=10)
+result2 = worker2.compute(5).result()
+worker2.stop()
+# ✅ Works! (automatic composition wrapper)
 
-try:
-    worker = PydanticWorker.options(mode="ray").init(name="test", value=10)
-except ValueError:
-    pass  # Expected
-```
-
-**✅ Works with Ray:**
-
-```python
-# Option 1: Plain Worker (no validation)
-class PlainWorker(Worker):
-    def __init__(self, name: str, value: int):
-        self.name = name
-        self.value = value
-
-worker = PlainWorker.options(mode="ray").init(name="test", value=10)
-# ✅ Works
-
-# Option 2: Use @validate decorator
-from morphic import validate
-
+# Option 3: @validate decorator
 class ValidatedWorker(Worker):
     @validate
     def __init__(self, name: str, value: int):
@@ -1028,12 +1020,10 @@ class ValidatedWorker(Worker):
     def compute(self, x: int) -> int:
         return self.value * x
 
-worker = ValidatedWorker.options(mode="ray").init(name="test", value="10")
+worker3 = ValidatedWorker.options(mode="ray").init(name="test", value="10")
 # ✅ Works with validation and type coercion!
 
-# Option 3: Use @validate_call decorator
-from pydantic import validate_call
-
+# Option 4: @validate_call decorator
 class PydanticDecoratedWorker(Worker):
     @validate_call
     def __init__(self, name: str, value: int):
@@ -1044,71 +1034,83 @@ class PydanticDecoratedWorker(Worker):
     def compute(self, x: int) -> int:
         return self.value * x
 
-worker = PydanticDecoratedWorker.options(mode="ray").init(name="test", value=10)
+worker4 = PydanticDecoratedWorker.options(mode="ray").init(name="test", value=10)
 # ✅ Works with Pydantic validation!
+
+# Option 5: Plain Worker (no validation)
+class PlainWorker(Worker):
+    def __init__(self, name: str, value: int):
+        self.name = name
+        self.value = value
+
+worker5 = PlainWorker.options(mode="ray").init(name="test", value=10)
+# ✅ Works!
 ```
 
-**Why the Limitation?**
+**How the Composition Wrapper Works:**
 
-Ray's `ray.remote()` wraps classes as actors and modifies their `__setattr__` behavior, which conflicts with Pydantic's frozen model implementation. When Ray tries to set internal attributes, it triggers Pydantic's validation, causing `AttributeError`.
+When you use a Typed/BaseModel worker with Ray mode, concurry automatically:
 
-Decorators like `@validate` and `@validate_call` don't have this problem because they only wrap individual methods, not the entire class.
+1. **Detects** the worker inherits from Typed or BaseModel
+2. **Creates** a plain Python wrapper class using composition
+3. **Delegates** user-defined methods to the wrapped Typed/BaseModel instance
+4. **Excludes** infrastructure methods (model_dump, model_validate, etc.) from the wrapper
+5. **Maintains** full validation, type checking, and field constraints
 
-**Automatic Detection:**
+**Benefits:**
 
-Concurry automatically detects this incompatibility:
+- ✅ **Zero code changes** - your existing Typed/BaseModel workers just work
+- ✅ **Full validation** - all Pydantic features preserved
+- ✅ **Zero overhead** - performance-optimized method delegation
+- ✅ **Transparent** - behaves identically to non-Ray modes
+- ✅ **Universal** - same wrapper used for all modes (consistent behavior)
 
-```python
-# ValueError raised immediately
-worker = TypedWorker.options(mode="ray").init(name="test", value=10)
-# ValueError: Cannot create Ray worker with Pydantic-based class 'TypedWorker'.
-# Ray's actor wrapping mechanism conflicts with Pydantic's __setattr__ implementation.
-# 
-# Workaround: Use composition instead of inheritance:
-#   class TypedWorker(Worker):
-#       def __init__(self, ...):
-#           self.config = YourPydanticModel(...)
+**Technical Details:**
 
-# UserWarning issued for non-Ray modes (if Ray is installed)
-worker = TypedWorker.options(mode="thread").init(name="test", value=10)
-# UserWarning: Worker class 'TypedWorker' inherits from Pydantic BaseModel.
-# This worker will NOT be compatible with Ray mode...
-```
+The composition wrapper solves the historical Ray + Pydantic incompatibility by:
+- Avoiding Ray's `__setattr__` conflicts with Pydantic's frozen models
+- Preventing retry logic from wrapping infrastructure methods
+- Providing a clean separation between user code and framework code
+
+For architecture details, see [Universal Composition Wrapper](../architecture/workers.md#universal-composition-wrapper-for-typedbasemodel-workers)
 
 ### Choosing the Right Approach
+
+**All approaches now work with Ray mode thanks to the automatic composition wrapper!**
 
 **Use morphic.Typed when:**
 - You need lifecycle hooks (`pre_initialize`, `post_initialize`, etc.)
 - You want immutable workers by default
-- You're NOT using Ray mode
-- You want the most seamless integration
+- You want the most seamless model integration
+- ✅ Works with ALL modes including Ray
 
 **Use pydantic.BaseModel when:**
 - You need Pydantic's full validation capabilities
 - You want JSON serialization/deserialization
-- You're NOT using Ray mode
-- You need custom validators
+- You need custom validators with `@field_validator`
+- ✅ Works with ALL modes including Ray
 
 **Use @validate decorator when:**
-- You need Ray compatibility ✅
 - You only need validation on specific methods
 - You want minimal overhead
 - You prefer morphic's validation style
+- ✅ Works with ALL modes including Ray
 
 **Use @validate_call decorator when:**
-- You need Ray compatibility ✅
 - You want Pydantic's validation features
-- You need Field constraints
+- You need Field constraints with `Annotated`
 - You prefer Pydantic's validation style
+- ✅ Works with ALL modes including Ray
 
 **Use plain Worker when:**
 - You don't need validation
-- You want maximum performance
+- You want absolute maximum performance
 - You're handling validation elsewhere
+- ✅ Works with ALL modes including Ray
 
 ### Mixing Approaches
 
-You can mix validation decorators with model inheritance (for non-Ray modes):
+You can mix validation decorators with model inheritance across all execution modes:
 
 ```python
 from concurry import Worker
@@ -1130,7 +1132,7 @@ class HybridWorker(Worker, Typed):
         """No extra validation."""
         return self.base_value * x
 
-# Works with thread, process, asyncio (not Ray)
+# Works with ALL modes including Ray
 worker = HybridWorker.options(mode="thread").init(
     name="hybrid",
     base_value=5

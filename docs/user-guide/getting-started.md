@@ -40,14 +40,14 @@ With Concurry, make all calls concurrently with just **3 lines of code changed**
 
 ```python
 from concurry import Worker
+from pydantic import BaseModel
 from tqdm import tqdm
 import litellm
 
-# 1. Wrap your logic in a Worker class
-class LLM(Worker):
-    def __init__(self, model: str, temperature: float):
-        self.model = model
-        self.temperature = temperature
+# 1. Wrap your logic in a Worker class with Pydantic validation
+class LLM(Worker, BaseModel):
+    model: str
+    temperature: float
     
     def call_llm(self, prompt: str) -> str:
         """Call LLM API with a prompt."""
@@ -76,6 +76,52 @@ responses = [f.result() for f in tqdm(futures, desc="Collecting")]
 - Called `.result()` on futures → Waits for each task to complete
 - That's it! 50x speedup with minimal code changes.
 
+### Why Use Pydantic BaseModel?
+
+While you *can* use plain Python classes, we **strongly recommend** using `pydantic.BaseModel` (or `morphic.Typed`):
+
+```python
+# ✅ RECOMMENDED: Pydantic BaseModel catches errors early
+from pydantic import BaseModel
+
+class LLM(Worker, BaseModel):
+    model: str              # Type validation at initialization
+    temperature: float
+    
+    def call_llm(self, prompt: str) -> str:
+        return litellm.completion(...)
+
+# ❌ ERROR CAUGHT IMMEDIATELY: Wrong type for temperature
+llm = LLM.options(mode='thread').init(
+    model="gpt-4o-mini", 
+    temperature="not-a-number"  # Pydantic raises ValidationError immediately!
+)
+
+# ⚠️ PLAIN CLASSES: Errors happen later, in worker threads/processes
+class PlainLLM(Worker):
+    def __init__(self, model: str, temperature: float):
+        self.model = model
+        self.temperature = temperature  # No validation!
+    
+    def call_llm(self, prompt: str) -> str:
+        return litellm.completion(...)
+
+# ❌ ERROR HAPPENS LATER: Fails inside worker thread when API call is made
+llm = PlainLLM.options(mode='thread').init(
+    model="gpt-4o-mini",
+    temperature="not-a-number"  # Silently accepted, fails later!
+)
+```
+
+**Why this matters:**
+- ✅ **Early error detection**: Pydantic validates types during `.init()`, before any work starts
+- ✅ **Better error messages**: Get clear validation errors with field names, not cryptic API failures
+- ✅ **Easier debugging**: Errors at initialization are much easier to debug than errors in remote workers
+- ✅ **Data integrity**: Ensures all workers have valid configuration before executing tasks
+- ✅ **Works everywhere**: Fully compatible with all execution modes including Ray (automatic composition wrapper)
+
+**Concurrent/distributed errors are nightmare to debug**. A type error in a remote thread, process, or Ray actor is much harder to trace than a validation error at initialization. Pydantic's upfront validation saves hours of debugging time!
+
 ## Installation
 
 First, install Concurry:
@@ -99,10 +145,11 @@ Let's break down the key concepts:
 A **Worker** is a class that runs concurrently in the background. Think of it as a dedicated assistant that handles tasks for you:
 
 ```python
-class LLM(Worker):
-    def __init__(self, model: str, temperature: float):
-        self.model = model          # Worker state
-        self.temperature = temperature
+from pydantic import BaseModel
+
+class LLM(Worker, BaseModel):
+    model: str              # Worker state with validation
+    temperature: float
     
     def call_llm(self, prompt: str) -> str:
         # This method runs in the background
@@ -110,9 +157,10 @@ class LLM(Worker):
 ```
 
 **Key points:**
-- Workers maintain state (e.g., `self.model`, `self.temperature`)
+- Workers maintain validated state (e.g., `self.model`, `self.temperature`)
 - Each method call runs in the background
 - Workers are isolated - one worker's state doesn't affect another
+- Pydantic validates all fields during initialization
 
 ### 2. Worker Pools: Parallel Execution
 
@@ -203,21 +251,36 @@ Rich, color-coded progress bars with success/failure states that work in termina
 ### 1. Choose the Right Execution Mode
 
 ```python
+from pydantic import BaseModel
+
 # I/O-bound (API calls, database queries, file I/O)
 # → Use 'thread' mode with many workers
-llm = LLM.options(mode='thread', max_workers=100).init(...)
+class LLM(Worker, BaseModel):
+    model: str
+    temperature: float
+
+llm = LLM.options(mode='thread', max_workers=100).init(model="gpt-4o-mini", temperature=0.1)
 
 # CPU-bound (data processing, ML inference)
 # → Use 'process' mode with workers ≈ CPU cores
-processor = DataProcessor.options(mode='process', max_workers=8).init(...)
+class DataProcessor(Worker, BaseModel):
+    batch_size: int
+
+processor = DataProcessor.options(mode='process', max_workers=8).init(batch_size=1000)
 
 # Heavy I/O with async libraries (aiohttp, httpx)
 # → Use 'asyncio' mode for even better performance
-api = AsyncAPI.options(mode='asyncio').init(...)
+class AsyncAPI(Worker, BaseModel):
+    api_key: str
+
+api = AsyncAPI.options(mode='asyncio').init(api_key="sk-...")
 
 # Distributed across machines
-# → Use 'ray' mode for cluster computing
-model = LargeModel.options(mode='ray', max_workers=1000).init(...)
+# → Use 'ray' mode for cluster computing (Pydantic workers fully supported!)
+class LargeModel(Worker, BaseModel):
+    model_path: str
+
+model = LargeModel.options(mode='ray', max_workers=1000).init(model_path="/path/to/model")
 ```
 
 ### 2. Always Clean Up Workers
@@ -262,12 +325,13 @@ print(f"Success: {len(results)}, Failed: {len(errors)}")
 ### 4. Use Worker State for Configuration
 
 ```python
-# ✅ Good: Store configuration in worker state
-class LLM(Worker):
-    def __init__(self, model: str, temperature: float, max_tokens: int):
-        self.model = model
-        self.temperature = temperature
-        self.max_tokens = max_tokens  # Reused across all calls
+from pydantic import BaseModel, Field
+
+# ✅ Good: Store validated configuration in worker state
+class LLM(Worker, BaseModel):
+    model: str
+    temperature: float = Field(ge=0.0, le=2.0)  # Validated constraints
+    max_tokens: int = Field(gt=0)  # Reused across all calls
     
     def call_llm(self, prompt: str) -> str:
         return litellm.completion(
@@ -280,6 +344,7 @@ class LLM(Worker):
 class BadLLM(Worker):
     def call_llm(self, prompt: str, model: str, temperature: float) -> str:
         # Wasteful - passing same values repeatedly
+        # No validation - errors happen during API call
         return litellm.completion(...)
 ```
 
@@ -308,11 +373,11 @@ Protect your API from rate limit errors by enforcing limits across all workers:
 
 ```python
 from concurry import Worker, RateLimit, CallLimit
+from pydantic import BaseModel
 
-class LLM(Worker):
-    def __init__(self, model: str, temperature: float):
-        self.model = model
-        self.temperature = temperature
+class LLM(Worker, BaseModel):
+    model: str
+    temperature: float
     
     def call_llm(self, prompt: str) -> str:
         # Rate limits automatically enforced
@@ -393,13 +458,13 @@ Combine all features for a robust production system:
 ```python
 from concurry import Worker, RateLimit, CallLimit
 from concurry.utils.progress import ProgressBar
+from pydantic import BaseModel, Field
 import openai
 import litellm
 
-class ProductionLLM(Worker):
-    def __init__(self, model: str, temperature: float):
-        self.model = model
-        self.temperature = temperature
+class ProductionLLM(Worker, BaseModel):
+    model: str
+    temperature: float = Field(ge=0.0, le=2.0)  # Validated temperature range
     
     def call_llm(self, prompt: str) -> dict:
         """Call LLM with rate limiting and error handling."""
@@ -449,6 +514,7 @@ print(f"Total tokens: {sum(r['tokens'] for r in responses)}")
 
 **What you get:**
 - 🚀 **50x faster** than sequential code
+- ✅ **Type validation** catches errors before they reach workers
 - 🚦 **Rate limiting** prevents API errors
 - 🔁 **Automatic retries** on transient failures
 - 📊 **Progress tracking** for visibility

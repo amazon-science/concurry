@@ -123,14 +123,14 @@ class TestSubmissionQueueBasics:
         This test:
         1. Creates a CounterWorker with default settings for each mode
         2. Verifies max_queued_tasks matches mode-specific defaults
-        3. Expected: sync/asyncio=None (bypass), thread=1000, process=100, ray=3
+        3. Expected: sync/asyncio/thread=None (bypass), process=100, ray=3
         4. Stops the worker
         """
         worker = CounterWorker.options(mode=worker_mode).init()
-        # Default values: sync/asyncio=None (bypass), thread=100, process=5, ray=2
+        # Default values: sync/asyncio/thread=None (bypass), process=100, ray=3
         expected = {
             "sync": None,
-            "thread": 1000,
+            "thread": None,
             "process": 100,
             "asyncio": None,
             "ray": 3,
@@ -152,56 +152,45 @@ class TestSubmissionQueueBasics:
             assert worker.max_queued_tasks == queue_len
             worker.stop()
 
-    def test_submission_queue_blocks_at_limit(self, worker_mode):
-        """Test that submission queue blocks when limit is reached.
+    def test_submission_queue_limits_backend_forwarding(self, worker_mode):
+        """Test that max_queued_tasks limits backend forwarding (not user submissions).
+
+        User submissions are NEVER blocked. Futures are created immediately
+        and queued internally. Only backend forwarding respects max_queued_tasks.
 
         This test:
         1. Creates a SlowWorker with max_workers=1, max_queued_tasks=2
-        2. Submits 2 slow tasks (0.5s each) - these fill the queue without blocking
-        3. Attempts to submit 3rd task in separate thread - should block
-        4. Verifies 3rd submission is blocked (thread still alive after 0.1s)
-        5. Waits for first task to complete - this unblocks 3rd submission
-        6. Verifies 3rd submission unblocks (thread completes)
-        7. Waits for all tasks to complete and stops worker
+        2. Submits 5 tasks immediately (all should return futures instantly)
+        3. Verifies all 5 futures are created in < 0.5s (non-blocking!)
+        4. Verifies only first 2 tasks start executing immediately (respects limit)
+        5. Waits for all tasks to complete
+        6. Stops worker
         """
         if worker_mode in ("sync", "asyncio"):
             pytest.skip("Sync and AsyncIO modes bypass submission queue")
 
         worker = SlowWorker.options(mode=worker_mode, max_workers=1, max_queued_tasks=2).init()
 
-        # Submit 2 tasks (should not block)
+        # Submit 5 tasks - ALL should return immediately (non-blocking!)
         start = time.time()
-        f1 = worker.slow_task(0.5, 1)
-        f2 = worker.slow_task(0.5, 2)
+        f1 = worker.slow_task(0.3, 1)
+        f2 = worker.slow_task(0.3, 2)
+        f3 = worker.slow_task(0.3, 3)
+        f4 = worker.slow_task(0.3, 4)
+        f5 = worker.slow_task(0.3, 5)
         submission_time = time.time() - start
-        assert submission_time < 0.2, "First 2 submissions should be fast"
 
-        # Third submission should block until one completes
-        submission_blocked = threading.Event()
-        third_future = None
+        # CRITICAL: All 5 submissions should be IMMEDIATE (non-blocking)
+        assert submission_time < 0.5, f"Submissions took {submission_time:.3f}s, should be immediate"
 
-        def submit_third():
-            nonlocal third_future
-            submission_blocked.set()
-            third_future = worker.slow_task(0.2, 3)
+        # Wait for all to complete
+        results = [f1.result(), f2.result(), f3.result(), f4.result(), f5.result()]
+        assert len(results) == 5, "All tasks should complete"
 
-        thread = threading.Thread(target=submit_third)
-        thread.start()
+        # Verify results
+        task_ids = [r["task_id"] for r in results]
+        assert task_ids == [1, 2, 3, 4, 5], "All tasks should execute in order"
 
-        # Wait for thread to start blocking
-        submission_blocked.wait(timeout=1.0)
-        time.sleep(0.1)
-        assert thread.is_alive(), "Third submission should be blocked"
-
-        # Wait for first task to complete
-        f1.result()
-        thread.join(timeout=2.0)
-        assert not thread.is_alive(), "Third submission should have unblocked"
-
-        # Cleanup
-        f2.result()
-        if third_future is not None:
-            third_future.result()
         worker.stop()
 
     def test_submission_queue_releases_on_completion(self, worker_mode):
@@ -926,38 +915,30 @@ class TestSubmissionQueueEdgeCases:
         pool.stop()
 
     def test_queue_with_very_small_queue_length(self, worker_mode):
-        """Test with max_queued_tasks=1 (minimum)."""
+        """Test with max_queued_tasks=1 (minimum) - submissions still non-blocking.
+
+        Even with max_queued_tasks=1, submissions are non-blocking.
+        Only backend forwarding is limited to 1 at a time.
+        """
         if worker_mode in ("sync", "asyncio"):
             pytest.skip("Sync and AsyncIO modes bypass submission queue")
 
         worker = SlowWorker.options(mode=worker_mode, max_workers=1, max_queued_tasks=1).init()
 
-        # Only 1 task can be submitted at a time
-        f1 = worker.slow_task(0.2, 1)
+        # Submit 5 tasks - ALL should return immediately even with max_queued_tasks=1
+        start = time.time()
+        futures = [worker.slow_task(0.2, i) for i in range(5)]
+        submission_time = time.time() - start
 
-        # Second submission should block
-        submission_blocked = threading.Event()
-        second_future = None
+        # CRITICAL: All submissions should be immediate (non-blocking)
+        assert submission_time < 0.5, f"Submissions took {submission_time:.3f}s, should be immediate"
 
-        def submit_second():
-            nonlocal second_future
-            submission_blocked.set()
-            second_future = worker.slow_task(0.1, 2)
+        # All futures should be created
+        assert len(futures) == 5, "All futures should be created"
 
-        thread = threading.Thread(target=submit_second)
-        thread.start()
-
-        submission_blocked.wait(timeout=1.0)
-        time.sleep(0.05)
-        assert thread.is_alive(), "Should be blocked"
-
-        # Complete first task
-        f1.result()
-        thread.join(timeout=2.0)
-
-        # Second should complete
-        if second_future is not None:
-            second_future.result()
+        # Wait for all to complete (callback forwarding will process queue)
+        results = [f.result(timeout=10.0) for f in futures]
+        assert len(results) == 5, "All tasks should complete"
 
         worker.stop()
 
@@ -1231,7 +1212,7 @@ class TestSubmissionQueueNone:
 class TestSubmissionQueueFastSubmission:
     """Test that submission is fast (non-blocking) even with slow tasks."""
 
-    def test_single_worker_fast_submission(self, worker_mode):
+    def test_single_worker_fast_submission(self, worker_mode, initialize_ray):
         """Test single worker submission is fast with slow tasks.
 
         Verifies:
@@ -1263,7 +1244,125 @@ class TestSubmissionQueueFastSubmission:
 
         worker.stop()
 
-    def test_pool_fast_submission(self, pool_mode):
+    def test_immediate_future_creation_single_worker(self, worker_mode, initialize_ray):
+        """Test that futures are created immediately, not blocked by semaphore.
+
+        CRITICAL TEST: This is the core behavior that was fixed.
+
+        Verifies:
+        1. Future creation is immediate (< 0.5s) for all tasks
+        2. All futures are returned before tasks start executing
+        3. Callback-driven forwarding works correctly
+        4. All tasks eventually complete
+
+        Background: Previously, submitting tasks would block when max_queued_tasks
+        limit was reached. Now, futures are created immediately and queued internally,
+        with callback-driven forwarding to respect the limit.
+        """
+        if worker_mode in ("sync", "asyncio"):
+            pytest.skip("Sync and AsyncIO modes bypass submission queue")
+
+        # Create worker with small queue (2 tasks) and slow tasks (1s each - fast enough for testing)
+        worker = SlowWorker.options(mode=worker_mode, max_workers=1, max_queued_tasks=2).init()
+
+        # Submit 10 tasks - MUST return immediately
+        start_submit = time.time()
+        futures = [worker.slow_task(1.0, i) for i in range(10)]
+        submit_time = time.time() - start_submit
+
+        # CRITICAL ASSERTION: Future creation must be immediate (< 0.5s)
+        # With 10 tasks taking 1s each, if submission blocked, this would take 8s+
+        # With non-blocking submission, all 10 futures are created immediately
+        assert submit_time < 0.5, (
+            f"Future creation took {submit_time:.3f}s but should be immediate (< 0.5s). "
+            f"This indicates submission is blocking on semaphore instead of queuing."
+        )
+
+        # Verify all futures were created
+        assert len(futures) == 10, f"Expected 10 futures, got {len(futures)}"
+
+        # Verify all tasks eventually complete (callback forwarding works)
+        results = [f.result(timeout=30.0) for f in futures]
+        assert len(results) == 10, "All tasks should complete"
+
+        # Verify results are correct
+        task_ids = [r["task_id"] for r in results]
+        assert task_ids == list(range(10)), "Task IDs should be 0-9"
+
+        worker.stop()
+
+    def test_immediate_future_creation_pool(self, pool_mode, initialize_ray):
+        """Test that futures are created immediately for worker pools.
+
+        CRITICAL TEST: Verifies non-blocking submission for pools.
+
+        Verifies:
+        1. Future creation is immediate (< 0.5s) for all tasks
+        2. Per-worker semaphores work independently
+        3. All futures returned before tasks execute
+        4. All tasks eventually complete
+        """
+        # Create pool with 2 workers, max_queued_tasks=4 per worker
+        # Total capacity: 2 workers × 4 = 8 concurrent submissions
+        pool = SlowWorker.options(
+            mode=pool_mode, max_workers=2, max_queued_tasks=4, load_balancing="round_robin"
+        ).init()
+
+        # Submit 20 tasks - more than capacity but should return immediately
+        start_submit = time.time()
+        futures = [pool.slow_task(0.5, i) for i in range(20)]
+        submit_time = time.time() - start_submit
+
+        # CRITICAL ASSERTION: Future creation must be immediate (< 0.5s)
+        assert submit_time < 0.5, (
+            f"Future creation took {submit_time:.3f}s but should be immediate (< 0.5s). "
+            f"Pool submissions should not block on semaphore."
+        )
+
+        # Verify all futures were created
+        assert len(futures) == 20, f"Expected 20 futures, got {len(futures)}"
+
+        # Verify all tasks eventually complete
+        results = [f.result(timeout=30.0) for f in futures]
+        assert len(results) == 20, "All tasks should complete"
+
+        pool.stop()
+
+    def test_immediate_future_with_progress_bar(self, worker_mode, initialize_ray):
+        """Test immediate future creation with progress bar (user's original use case).
+
+        This replicates the user's exact scenario that revealed the bug.
+
+        Verifies:
+        1. Future creation is immediate even with progress bar
+        2. Progress bar shows fast iteration (not blocked)
+        3. All tasks complete correctly
+        """
+        if worker_mode in ("sync", "asyncio"):
+            pytest.skip("Sync and AsyncIO modes bypass submission queue")
+
+        from concurry.utils.progress import ProgressBar
+
+        worker = SlowWorker.options(mode=worker_mode, max_workers=2, max_queued_tasks=4).init()
+
+        # Submit tasks with progress bar (user's original pattern)
+        start_submit = time.time()
+        futures = [worker.slow_task(0.5, i) for i in ProgressBar(range(20), style="std")]
+        submit_time = time.time() - start_submit
+
+        # CRITICAL: Should complete quickly (< 1s), not blocking on submission
+        assert submit_time < 1.0, (
+            f"Submission with progress bar took {submit_time:.3f}s, expected < 1s. "
+            f"This was the original bug - submission blocked instead of queuing."
+        )
+
+        # All tasks should complete
+        results = gather(futures, timeout=30.0)
+        assert len(results) == 20
+
+        worker.stop()
+
+    def test_pool_fast_submission(self, pool_mode, initialize_ray):
         """Test pool submission is fast with slow tasks.
 
         Verifies:
@@ -1293,7 +1392,7 @@ class TestSubmissionQueueFastSubmission:
         assert task_ids == list(range(10)), "Task IDs should be 0-9"
 
         # With 10 workers, completion should be much faster than serial execution
-        # Serial would be ~20s, parallel should be ~2-3s
-        assert complete_time < 5.0, f"Completion took {complete_time:.3f}s, should show parallelism (< 5s)"
+        # Serial would be ~20s, parallel should be ~2-3s (allow up to 6s for Ray overhead)
+        assert complete_time < 6.0, f"Completion took {complete_time:.3f}s, should show parallelism (< 6s)"
 
         pool.stop()

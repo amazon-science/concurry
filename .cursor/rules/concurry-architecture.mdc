@@ -132,6 +132,73 @@ class CustomStrategy(BasePollingStrategy):
 4. Add configuration defaults to `GlobalDefaults`
 5. Update strategy creation in `wait()` and `gather()`
 
+## Core Design Principle: No Silent Fallbacks
+
+**CRITICAL**: Concurry must **fail noisily** rather than silently degrade performance.
+
+### The Rule
+
+❌ **NEVER** auto-fallback to slower implementations when configured implementation fails
+✅ **ALWAYS** fail loudly with actionable error messages
+✅ **DO** have multiple implementations (flexibility is good)
+✅ **DO** select implementation via explicit configuration
+❌ **DON'T** downgrade silently (causes mysterious slowdowns)
+
+### Why This Matters
+
+Silent fallbacks are the **bane of concurrency frameworks**. They cause:
+- **Mysterious slowdowns** that are hard to diagnose
+- **Production surprises** when code suddenly runs 10-100x slower
+- **False confidence** in development that breaks in production
+- **Debugging nightmares** trying to find why "the same code" performs differently
+
+### Real-World Example
+
+```python
+# ❌ WRONG: Silent fallback
+try:
+    return RaySharedLimitSet(...)
+except RayNotAvailableError:
+    # Silently use slower implementation
+    return InMemorySharedLimitSet(...)  # User thinks they have distributed limits!
+
+# ✅ RIGHT: Noisy failure
+if mode == "ray" and not ray.is_initialized():
+    raise RuntimeError(
+        "Ray mode selected but Ray is not initialized. "
+        "Call ray.init() before creating workers, or use mode='thread'."
+    )
+```
+
+### Implementation Guidelines
+
+1. **Configuration is a contract** - If user specifies `mode="ray"`, they expect Ray
+2. **Fail at initialization** - Check requirements during `.init()`, not during execution
+3. **Clear error messages** - Tell user exactly what's wrong and how to fix it
+4. **No implicit downgrades** - Don't automatically use slower implementation
+5. **Document requirements** - Each mode's dependencies must be clear
+
+### When to Apply This
+
+- ✅ Execution mode selection (thread vs process vs ray)
+- ✅ Limit backend selection (InMemory vs Multiprocess vs Ray)
+- ✅ Feature availability checks (Ray not installed, dependencies missing)
+- ✅ Resource requirements (not enough CPU cores, memory constraints)
+
+### Exception: Performance-Neutral Edge Cases
+
+The ONLY acceptable "fallback" is when it's **semantically equivalent and performance-neutral**:
+
+```python
+# OK: Not really a fallback, just edge case handling
+if len(my_list) == 0:
+    return default_value
+```
+
+This is fine because there's **no performance implication** - it's just handling an edge case.
+
+---
+
 ## Worker and Worker Pool Architecture and Rules
 
 For comprehensive architecture details, see [docs/architecture/workers.md](../../docs/architecture/workers.md)

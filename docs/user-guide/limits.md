@@ -1853,53 +1853,63 @@ In addition to rate limiting and resource limits, Concurry provides **submission
 
 ### Overview
 
-The `max_queued_tasks` parameter controls how many tasks can be submitted to a worker's backend before blocking on the client side. This prevents issues like:
+The `max_queued_tasks` parameter controls how many tasks are forwarded to a worker's backend at once. This prevents issues like:
 
-- **Memory exhaustion** from thousands of pending futures
+- **Memory exhaustion** from thousands of pending futures in the backend
 - **Backend overload** from too many queued tasks (especially Ray actors)
 - **Network saturation** when submitting large batches to distributed workers
 - **Resource contention** from excessive concurrent task submissions
 
 **Key Characteristics:**
-- **Client-side queuing**: Tasks block during submission, not execution
+- **Non-blocking submissions**: All `worker.method()` calls return futures **immediately** (< 1ms)
+- **Internal rate limiting**: Only `max_queued_tasks` are forwarded to the backend at once
+- **Callback-driven**: Completed tasks automatically forward the next queued task
 - **Per-worker limit**: Each worker (or worker in a pool) has its own independent queue
 - **Transparent to users**: Your submission loops don't need modification
 - **Compatible with all features**: Works seamlessly with limits, retries, polling, and load balancing
-- **Automatic release**: Queue slots released automatically when tasks complete (via future callbacks)
 
 ### How It Works
 
+**IMPORTANT:** All submissions return futures immediately—they **never block** your code. The `max_queued_tasks` limit controls internal forwarding to the backend, not user-facing submission.
+
 ```python
 from concurry import Worker
+import time
 
 class DataProcessor(Worker):
     def process(self, data: str) -> str:
+        time.sleep(0.1)  # Simulate slow processing
         return data.upper()
 
 # Create worker with submission queue
 worker = DataProcessor.options(
     mode="thread",
-    max_queued_tasks=5  # Max 5 tasks "in-flight" at once
+    max_queued_tasks=5  # Max 5 tasks "in-flight" to backend at once
 ).init()
 
-# Submit 100 tasks
-# - First 5 submit immediately
-# - 6th submission blocks until one of the first 5 completes
-# - As tasks complete, new submissions proceed
+# Submit 100 tasks - ALL return INSTANTLY (non-blocking!)
+start = time.time()
 futures = [worker.process(f"data-{i}") for i in range(100)]
+print(f"Created 100 futures in {time.time() - start:.3f}s")  # ~0.001s!
 
-# Gather results (submission queue prevents overload)
+# Gather results (submission queue prevents backend overload)
 results = [f.result() for f in futures]
 
 worker.stop()
 ```
 
-**What Happens:**
-1. First 5 submissions succeed immediately (queue has capacity=5)
-2. 6th submission blocks on `worker.process()` call
-3. When 1st task completes, its future callback releases a queue slot
-4. 6th submission proceeds
-5. This continues until all 100 tasks are submitted and completed
+**What Happens (Callback-Driven Forwarding):**
+1. **All 100 calls return immediately** - each creates a future instantly
+2. **First 5 tasks forwarded to backend** (semaphore has capacity=5)
+3. **Tasks 6-100 queued internally** (not yet sent to backend)
+4. **When task 1 completes**, its callback:
+   - Releases semaphore slot
+   - Automatically forwards task 6 from internal queue to backend
+5. **Callback chain continues** until all 100 tasks are forwarded and complete
+
+**Key Difference:**
+- **User-facing:** All 100 submissions return instantly (non-blocking)
+- **Internal:** Only 5 tasks sent to backend at once (prevents overload)
 
 ### Default Values by Mode
 
@@ -1907,11 +1917,11 @@ worker.stop()
 |------|----------------------------------|-----------|
 | `sync` | `None` (bypassed) | Immediate execution, no queuing needed |
 | `asyncio` | `None` (bypassed) | Event loop handles concurrency |
-| `thread` | `100` | High concurrency, large queue OK |
-| `process` | `5` | Limited by CPU cores, smaller queue |
-| `ray` | `2` | Distributed, minimize in-flight tasks |
+| `thread` | `None` (no limit) | Thread pools handle concurrency efficiently |
+| `process` | `100` | Limit serialization overhead to backend processes |
+| `ray` | `3` | Distributed, minimize network overhead |
 
-**Blocking Mode:** Automatically bypassed (max_queued_tasks has no effect)
+**Note:** `None` means unlimited - all tasks are forwarded immediately with no rate limiting.
 
 ### Basic Usage
 
@@ -1919,27 +1929,26 @@ worker.stop()
 
 ```python
 from concurry import Worker
+import time
 
 class SlowWorker(Worker):
     def slow_task(self, x: int) -> int:
         time.sleep(0.1)
         return x * 2
 
-# Limit in-flight tasks to prevent overload
+# Limit in-flight tasks to prevent backend overload
 worker = SlowWorker.options(
     mode="process",
-    max_queued_tasks=3  # Max 3 tasks at once
+    max_queued_tasks=3  # Max 3 tasks forwarded to backend at once
 ).init()
 
-# Submit 50 tasks - submission loop blocks as needed
-futures = []
-for i in range(50):
-    # This blocks when queue is full (3 tasks pending)
-    # Automatically unblocks when a task completes
-    f = worker.slow_task(i)
-    futures.append(f)
+# Submit 50 tasks - ALL return immediately (non-blocking!)
+start = time.time()
+futures = [worker.slow_task(i) for i in range(50)]
+print(f"Created 50 futures in {time.time() - start:.3f}s")  # ~0.001s
 
-# All tasks complete successfully
+# Only 3 tasks are forwarded to backend at once
+# As each completes, the next is automatically forwarded
 results = [f.result() for f in futures]
 worker.stop()
 ```
@@ -1948,6 +1957,7 @@ worker.stop()
 
 ```python
 from concurry import Worker
+import time
 
 class APIWorker(Worker):
     def call_api(self, url: str) -> dict:
@@ -1957,25 +1967,29 @@ class APIWorker(Worker):
 pool = APIWorker.options(
     mode="thread",
     max_workers=10,  # 10 workers
-    max_queued_tasks=5,  # 5 in-flight per worker
+    max_queued_tasks=5,  # 5 in-flight per worker to backend
     load_balancing="round_robin"
 ).init()
 
-# Total capacity: 10 workers × 5 queue = 50 concurrent tasks
-# Submissions beyond 50 block until slots free up
+# Submit 500 tasks - ALL return immediately (non-blocking!)
+start = time.time()
 futures = [pool.call_api(f"https://api.example.com/{i}") for i in range(500)]
+print(f"Created 500 futures in {time.time() - start:.3f}s")  # ~0.005s
 
+# Internally: 10 workers × 5 capacity = 50 tasks forwarded at once
+# As tasks complete, more are automatically forwarded from internal queue
 results = [f.result() for f in futures]
 pool.stop()
 ```
 
 **Per-Worker Queues:**
-- Each worker in the pool has its own independent queue
-- Worker 0: Can have 5 tasks in-flight
-- Worker 1: Can have 5 tasks in-flight
+- Each worker in the pool has its own independent internal queue
+- Worker 0: Forwards up to 5 tasks to backend at once
+- Worker 1: Forwards up to 5 tasks to backend at once
 - ...and so on
-- Load balancing distributes tasks across all workers
-- Total capacity = `max_workers × max_queued_tasks`
+- Load balancing distributes submissions across all workers
+- Total forwarding capacity = `max_workers × max_queued_tasks`
+- All user submissions are non-blocking regardless of capacity
 
 ### Integration with Synchronization Primitives
 
@@ -2061,10 +2075,10 @@ worker = DatabaseWorker.options(
     limits=limits  # Max 5 executing concurrently (worker-side)
 ).init()
 
-# Submit 100 queries
-# - Submission queue limits to 10 in-flight tasks
-# - Resource limit ensures only 5 execute concurrently
-# - Rate limit ensures no more than 100 queries/minute
+# Submit 100 queries - returns immediately (non-blocking!)
+# - Submission queue: 10 forwarded to backend at once
+# - Resource limit: Only 5 execute concurrently within worker
+# - Rate limit: No more than 100 queries/minute
 futures = [worker.query(f"SELECT * FROM table_{i}") for i in range(100)]
 results = [f.result() for f in futures]
 
@@ -2072,11 +2086,13 @@ worker.stop()
 ```
 
 **Flow:**
-1. **Submission Queue (Client)**: Task waits here if 10+ tasks already submitted
-2. **Worker Queue (Backend)**: Task enters worker's execution queue
-3. **Resource Limits (Worker)**: Task waits here if 5+ queries already executing
-4. **Execution**: Task runs
-5. **Completion**: Releases resource limit, frees submission queue slot
+1. **User Submission**: All 100 calls return futures immediately (non-blocking)
+2. **Internal Queue**: Tasks 11-100 wait in client-side `_pending_submissions` queue
+3. **Backend Forwarding**: Only 10 tasks forwarded to worker backend at once
+4. **Worker Queue**: Tasks wait in worker's execution queue
+5. **Resource Limits**: Task waits if 5+ queries already executing
+6. **Execution**: Task runs
+7. **Completion**: Releases resource limit, callback forwards next task from internal queue
 
 ### Integration with Retries
 
@@ -2159,10 +2175,13 @@ pool = LLMWorker.options(
     limits=limits
 ).init()
 
-# Process 10,000 prompts without memory issues
-# Submission queue prevents creating 10,000 futures at once
+# Process 10,000 prompts without backend overload
+# All 10,000 futures created immediately (non-blocking!)
+# Only 500 tasks forwarded to backends at once (50 workers × 10 each)
 prompts = [f"Prompt {i}" for i in range(10_000)]
+start = time.time()
 futures = [pool.generate(prompt) for prompt in prompts]
+print(f"Created 10,000 futures in {time.time() - start:.3f}s")  # ~0.01s
 
 # Gather results in batches to keep memory under control
 batch_size = 1000

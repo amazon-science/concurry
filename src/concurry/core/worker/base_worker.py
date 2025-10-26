@@ -1,5 +1,6 @@
 """Worker implementation for concurry."""
 
+import queue
 import threading
 import warnings
 from abc import ABC
@@ -2113,6 +2114,7 @@ class WorkerProxy(Typed, ABC):
     _stopped: bool = PrivateAttr(default=False)
     _method_cache: dict[str, Any] = PrivateAttr(default_factory=dict)
     _submission_semaphore: Optional[Any] = PrivateAttr(default=None)
+    _pending_submissions: Any = PrivateAttr(default=None)
 
     def post_initialize(self) -> None:
         """Initialize private attributes after Typed validation."""
@@ -2132,6 +2134,9 @@ class WorkerProxy(Typed, ABC):
 
         # Initialize method cache for performance
         self._method_cache = {}
+
+        # Initialize pending submissions queue (holds futures waiting for semaphore)
+        self._pending_submissions = queue.Queue()
 
     def __getattr__(self, name: str) -> Callable:
         """Intercept method calls and dispatch them appropriately.
@@ -2159,26 +2164,28 @@ class WorkerProxy(Typed, ABC):
             # Access private attributes using Pydantic's mechanism
             # Pydantic automatically handles __pydantic_private__ lookup
 
-            # Acquire submission semaphore first (blocks if queue full)
-            # This must happen BEFORE the stopped check to avoid race condition:
-            # Without this order, a thread could check _stopped (False), then block
-            # on semaphore acquisition, then stop() is called, then thread wakes up
-            # and executes the method even though worker is stopped.
-            if self._submission_semaphore is not None:
-                self._submission_semaphore.acquire()
-
-            # Now check if stopped - this is atomic with execution because we
-            # already hold the semaphore. If stopped, release semaphore and raise.
+            # Check if stopped first
             if self._stopped:
-                if self._submission_semaphore is not None:
-                    self._submission_semaphore.release()
                 raise RuntimeError("Worker is stopped")
 
-            future = self._execute_method(name, *args, **kwargs)
+            # Try to forward immediately (non-blocking semaphore check)
+            if self._submission_semaphore is None:
+                # No rate limiting - forward immediately
+                future = self._execute_method(name, *args, **kwargs)
+            elif self._submission_semaphore.acquire(blocking=False):
+                # Got semaphore - forward to backend now
+                future = self._execute_method(name, *args, **kwargs)
+                # Add callback to release semaphore and forward next pending
+                future = self._wrap_future_with_submission_tracking(future)
+            else:
+                # Semaphore unavailable - create shell future and queue for later
+                from concurrent.futures import Future as PyFuture
 
-            # Wrap future to release semaphore on completion
-            if self._submission_semaphore is not None:
-                future = self._wrap_future_with_semaphore_release(future)
+                from ..future import ConcurrentFuture
+
+                py_future = PyFuture()
+                future = ConcurrentFuture(future=py_future)
+                self._pending_submissions.put((future, py_future, name, args, kwargs))
 
             if self.blocking:
                 # Return result directly (blocking)
@@ -2193,31 +2200,62 @@ class WorkerProxy(Typed, ABC):
 
         return method_wrapper
 
-    def _wrap_future_with_semaphore_release(self, future: BaseFuture) -> BaseFuture:
-        """Wrap a future to release submission semaphore when complete.
+    def _wrap_future_with_submission_tracking(self, future: BaseFuture) -> BaseFuture:
+        """Wrap future to release semaphore and forward next pending submission on completion.
 
-        This ensures the semaphore is released regardless of whether the task
-        succeeded, failed, or was cancelled.
+        This callback-driven approach forwards queued submissions without needing a thread.
+        When a task completes, it releases the semaphore and immediately forwards the next
+        pending submission (if any) to the backend.
 
         Args:
-            future: The future to wrap
+            future: The backend future to track
 
         Returns:
-            The same future (modified in-place with callback)
+            The same future (modified with callback)
         """
         if self._submission_semaphore is None:
-            return future  # No semaphore to release
+            return future
 
-        semaphore = self._submission_semaphore
-
-        # Use add_done_callback to release semaphore when complete
-        def release_semaphore(f):
+        def on_submission_complete(f):
             try:
-                semaphore.release()
+                # Release semaphore first
+                self._submission_semaphore.release()
             except Exception:
-                pass  # Ignore release errors (shouldn't happen)
+                pass
 
-        future.add_done_callback(release_semaphore)
+            # Don't forward new tasks if worker is stopped
+            if self._stopped:
+                return
+
+            # Try to forward next pending submission (if any)
+            try:
+                shell_future, py_future, method_name, args, kwargs = self._pending_submissions.get_nowait()
+
+                # Try to acquire semaphore (should succeed since we just released)
+                if self._submission_semaphore.acquire(blocking=False):
+                    # Forward to backend
+                    backend_future = self._execute_method(method_name, *args, **kwargs)
+
+                    # Chain backend future to shell future (propagate result/exception)
+                    def chain_result(bf):
+                        try:
+                            result = bf.result()
+                            py_future.set_result(result)
+                        except Exception as e:
+                            py_future.set_exception(e)
+
+                    backend_future.add_done_callback(chain_result)
+                    # Recursively track this forwarded submission
+                    backend_future.add_done_callback(on_submission_complete)
+                else:
+                    # Race condition: another thread got semaphore
+                    # Put back in queue for next opportunity
+                    self._pending_submissions.put((shell_future, py_future, method_name, args, kwargs))
+            except queue.Empty:
+                # No pending submissions - done
+                pass
+
+        future.add_done_callback(on_submission_complete)
         return future
 
     def _execute_method(self, method_name: str, *args: Any, **kwargs: Any):
@@ -2242,6 +2280,22 @@ class WorkerProxy(Typed, ABC):
         """
         # Pydantic allows setting private attributes even on frozen models
         self._stopped = True
+
+        # Cancel all pending futures in the submission queue
+        # These futures were created but never forwarded to the backend
+        if self._pending_submissions is not None:
+            while True:
+                try:
+                    shell_future, py_future, method_name, args, kwargs = (
+                        self._pending_submissions.get_nowait()
+                    )
+                    # Cancel the future - it will never be executed
+                    try:
+                        py_future.cancel()
+                    except Exception:
+                        pass  # Ignore errors during cleanup
+                except queue.Empty:
+                    break  # No more pending submissions
 
     def __enter__(self) -> "WorkerProxy":
         """Enter context manager.

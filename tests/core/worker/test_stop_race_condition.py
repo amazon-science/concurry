@@ -299,7 +299,7 @@ class TestStopRaceCondition:
             time.sleep(0.5)
             for f in futures:
                 # Future should be in a terminal state
-                assert f._future.done()
+                assert f.done()
 
                 # Try to get result - should either work or raise
                 try:
@@ -346,7 +346,7 @@ class TestStopRaceCondition:
             # Verify all futures are resolved
             time.sleep(0.5)
             for f in futures:
-                assert f._future.done()
+                assert f.done()
                 try:
                     f.result(timeout=0.1)
                 except Exception:
@@ -389,7 +389,7 @@ class TestStopRaceCondition:
             # Verify all futures are resolved
             time.sleep(0.5)
             for f in futures:
-                assert f._future.done()
+                assert f.done()
                 try:
                     f.result(timeout=0.1)
                 except Exception:
@@ -465,14 +465,16 @@ class TestStopRaceConditionInPool:
 
         This can trigger race conditions in load balancer state, worker semaphores, and future cleanup.
 
+        Submissions are non-blocking, so they return futures immediately.
+        When stop() is called, pending futures in the submission queue are cancelled.
+
         This test:
         1. Creates a pool with 3 workers, max_queued_tasks=2, round-robin balancing
         2. Submits 6 tasks to fill all worker queues (3 workers × 2 queue = 6 tasks)
         3. Waits briefly for tasks to start
-        4. Starts a background thread to submit 3 more tasks (will block on full queues)
-        5. Waits for submissions to block
-        6. Calls stop() on the pool while submissions are blocked
-        7. Verifies blocked submissions either failed with RuntimeError or futures error on result()
+        4. Submits 3 more tasks (returns immediately with futures)
+        5. Calls stop() on the pool while tasks are in flight
+        6. Verifies that pending futures are cancelled or completed
         """
         pool = SlowWorker.options(
             mode=pool_mode, max_workers=3, max_queued_tasks=2, load_balancing="round_robin"
@@ -487,34 +489,26 @@ class TestStopRaceConditionInPool:
 
             time.sleep(0.1)
 
-            # Try to submit more (will block)
-            blocked_futures = []
+            # Submit more tasks - these return immediately (non-blocking!)
+            more_futures = []
+            for i in range(10, 13):
+                f = pool.slow_task(i, duration=0.1)
+                more_futures.append(f)
 
-            def submit_more():
-                try:
-                    for i in range(10, 13):
-                        f = pool.slow_task(i, duration=0.1)
-                        blocked_futures.append((f, None))
-                except Exception as e:
-                    blocked_futures.append((None, e))
-
-            submit_thread = threading.Thread(target=submit_more, daemon=True)
-            submit_thread.start()
-
-            time.sleep(0.2)
-
-            # Stop pool while submissions blocked
+            # Stop pool while tasks are in flight
             pool.stop(timeout=2.0)
 
-            submit_thread.join(timeout=1.0)
+            # Verify all futures are in a terminal state (done, cancelled, or errored)
+            time.sleep(0.2)
+            for f in futures + more_futures:
+                # Future should be done (either completed, cancelled, or errored)
+                assert f.done(), "Future should be in a terminal state after stop()"
 
-            # Verify blocked submissions failed appropriately
-            for future, exception in blocked_futures:
-                if future is not None:
-                    with pytest.raises((RuntimeError, Exception)):
-                        future.result(timeout=0.5)
-                elif exception is not None:
-                    assert isinstance(exception, RuntimeError)
+                # Try to get result - should either succeed (task completed) or fail (cancelled/errored)
+                try:
+                    f.result(timeout=0.1)
+                except Exception:
+                    pass  # Expected - future was cancelled or errored
 
         finally:
             try:

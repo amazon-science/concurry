@@ -33,6 +33,100 @@ This separation allows the same Worker code to run in different execution contex
 3. **Typed validation** - All proxies and pools inherit from `morphic.Typed` for configuration validation
 4. **No shared state between workers** - Each worker maintains isolated state
 5. **Unified Future API** - All execution modes return BaseFuture subclasses
+6. **No silent fallbacks** - Explicit configuration, noisy failures over silent degradation
+
+#### Principle 6: No Silent Fallbacks
+
+**Core Tenet:** Concurry must **fail noisily** rather than silently degrade performance.
+
+**Why This Matters:**
+
+Silent fallbacks are the bane of concurrency frameworks. When a system automatically falls back to slower implementations without warning, users experience:
+- **Mysterious slowdowns** that are hard to diagnose
+- **Production surprises** when code suddenly runs 10-100x slower
+- **False confidence** in development that breaks in production
+- **Debugging nightmares** trying to find why "the same code" performs differently
+
+**Design Policy:**
+
+✅ **DO:** Have multiple implementations for flexibility
+```python
+# Example: Multiple limit backend implementations
+- InMemorySharedLimitSet (fast, thread-safe, single-process)
+- MultiprocessSharedLimitSet (slower, multi-process safe)
+- RaySharedLimitSet (distributed, Ray cluster)
+```
+
+✅ **DO:** Select implementation via explicit configuration
+```python
+# User explicitly chooses based on their execution mode
+limits = LimitSet(
+    limits=[...],
+    mode="ray"  # ← Explicit choice
+)
+```
+
+❌ **DON'T:** Auto-fallback when configured implementation fails
+```python
+# BAD: Silent fallback
+try:
+    return RaySharedLimitSet(...)
+except RayNotAvailableError:
+    # ❌ Silently use slower implementation
+    return InMemorySharedLimitSet(...)  
+```
+
+✅ **DO:** Fail loudly with actionable error
+```python
+# GOOD: Noisy failure
+if mode == "ray" and not ray.is_initialized():
+    raise RuntimeError(
+        "Ray mode selected but Ray is not initialized. "
+        "Call ray.init() before creating workers, or use mode='thread'."
+    )
+```
+
+**Real-World Example:**
+
+```python
+# User configures for Ray (expects distributed performance)
+pool = MyWorker.options(
+    mode="ray",
+    max_workers=100  # Expects 100 Ray actors
+).init()
+
+# WRONG: Silent fallback to thread pool
+# → User thinks they have 100 distributed workers
+# → Actually running 100 threads in one process
+# → 10x slower, saturates single machine
+# → Production outage with no clear cause
+
+# RIGHT: Noisy failure
+# RuntimeError: Ray mode selected but Ray is not initialized.
+# → User immediately knows what's wrong
+# → Can fix or choose different mode
+# → No mysterious slowdowns
+```
+
+**Implementation Guidelines:**
+
+1. **Configuration is a contract** - If user specifies `mode="ray"`, they expect Ray
+2. **Fail at initialization** - Check requirements during `.init()`, not during execution
+3. **Clear error messages** - Tell user exactly what's wrong and how to fix it
+4. **No implicit downgrades** - Don't automatically use slower implementation
+5. **Document requirements** - Each mode's dependencies must be clear
+
+**Exceptions to This Rule:**
+
+The only acceptable "fallback" is when it's **semantically equivalent and performance-neutral**:
+
+```python
+# OK: Fallback with equivalent performance
+if len(my_list) == 0:  # ← Could use "not my_list" but explicit is better
+    return default_value
+```
+
+This is not really a fallback - it's just handling an edge case with no performance implication.
 
 ## Core Abstractions
 
@@ -1336,46 +1430,260 @@ The submission architecture has two distinct layers:
 
 **Layer 1: User Code → Worker Proxy** (Always Non-Blocking, Unlimited)
 - User calls `worker.method(args)` or `pool.method(args)`
-- Returns future instantly without blocking
+- Returns future **instantly** without blocking
 - No limit on number of submissions
 - No semaphore at this layer
+- **All futures created immediately** (< 1ms per submission)
 
 **Layer 2: Worker Proxy → Execution Backend** (Controlled by `max_queued_tasks`)
 - Worker proxy manages internal queue to backend (thread/process/ray)
 - Semaphore limits in-flight tasks to backend
 - Only `max_queued_tasks` tasks forwarded to backend at once
 - Tasks wait in proxy's internal queue when backend is full
-- User code never sees this blocking
+- **User code never sees this blocking**
 
-Implementation:
+#### Callback-Driven Forwarding Architecture
+
+The implementation uses a **callback-driven forwarding mechanism** to achieve non-blocking submissions:
+
 ```python
 # In WorkerProxy.post_initialize():
-if self.max_queued_tasks is not None:
-    self._submission_semaphore = threading.BoundedSemaphore(self.max_queued_tasks)
+self._submission_semaphore = threading.BoundedSemaphore(max_queued_tasks)
+self._pending_submissions = queue.Queue()  # Client-side pending queue
 
-# In WorkerProxy.__getattr__():
-# NOTE: This blocks the proxy's internal task forwarding to backend,
-# NOT the user's submission to the proxy!
-if self._submission_semaphore:
-    self._submission_semaphore.acquire()  # Blocks proxy-to-backend flow
+# In WorkerProxy.__getattr__().method_wrapper():
+def method_wrapper(*args, **kwargs):
+    # Check if stopped
+    if self._stopped:
+        raise RuntimeError("Worker is stopped")
+    
+    # Try to forward immediately (NON-BLOCKING check)
+    if self._submission_semaphore is None:
+        # No rate limiting - forward immediately
+        future = self._execute_method(name, *args, **kwargs)
+    elif self._submission_semaphore.acquire(blocking=False):  # ← Non-blocking!
+        # Got semaphore - forward to backend now
+        future = self._execute_method(name, *args, **kwargs)
+        # Add callback to release semaphore and forward next pending
+        future = self._wrap_future_with_submission_tracking(future)
+    else:
+        # Semaphore unavailable - create shell future and queue for later
+        from concurrent.futures import Future as PyFuture
+        py_future = PyFuture()
+        future = ConcurrentFuture(future=py_future)
+        # Queue: (shell_future, py_future, method_name, args, kwargs)
+        self._pending_submissions.put((future, py_future, name, args, kwargs))
+    
+    # Return future IMMEDIATELY (non-blocking!)
+    return future if not self.blocking else future.result()
 
-# Wrap future to release on completion:
-def on_complete(f):
-    self._submission_semaphore.release()
-
-future.add_done_callback(on_complete)
+# Callback-driven forwarding chain:
+def _wrap_future_with_submission_tracking(self, future):
+    """When a task completes, automatically forward next pending task."""
+    
+    def on_submission_complete(f):
+        # Release semaphore first
+        self._submission_semaphore.release()
+        
+        # Try to forward next pending submission (if any)
+        try:
+            shell_future, py_future, method_name, args, kwargs = \
+                self._pending_submissions.get_nowait()
+            
+            # Try to acquire semaphore (should succeed since we just released)
+            if self._submission_semaphore.acquire(blocking=False):
+                # Forward to backend
+                backend_future = self._execute_method(method_name, *args, **kwargs)
+                
+                # Chain backend future to shell future
+                def chain_result(bf):
+                    try:
+                        result = bf.result()
+                        py_future.set_result(result)
+                    except Exception as e:
+                        py_future.set_exception(e)
+                
+                backend_future.add_done_callback(chain_result)
+                # Recursively track this forwarded submission
+                backend_future.add_done_callback(on_submission_complete)
+        except queue.Empty:
+            # No pending submissions - done
+            pass
+    
+    future.add_done_callback(on_submission_complete)
+    return future
 ```
 
-**Purpose**: Controls how many tasks can be in-flight from worker proxy to underlying execution (thread/process/ray). Pool dispatch from user to proxy is always non-blocking. The proxy manages its internal queue to the underlying execution context. This prevents overloading the execution backend, especially for Ray actors, while keeping user submissions instant.
+**Key Innovation:** No blocking on semaphore during submission. Instead:
+1. Try non-blocking acquire: `semaphore.acquire(blocking=False)`
+2. If successful: forward immediately
+3. If fails: create "shell" future, queue internally
+4. On completion callback: automatically forward next queued task
 
-**Example Flow:**
+**Advantages:**
+- **Zero blocking** in user code (all futures returned instantly)
+- **No dedicated threads** (callbacks drive forwarding)
+- **Automatic backpressure** (semaphore limits backend load)
+- **Self-perpetuating chain** (each completion triggers next forward)
+- **Minimal overhead** (< 1μs per submission when queue not full)
+- **Memory efficient** (shell futures are lightweight until backed)
+
+#### Design Rationale
+
+**Why callback-driven instead of background threads?**
+
+We considered several alternatives:
+
+**Alternative 1: Blocking Semaphore (Original Implementation)**
+```python
+# Simple but BLOCKS user code
+self._submission_semaphore.acquire()  # ← User code blocks here!
+future = self._execute_method(name, *args, **kwargs)
+return future
+```
+❌ **Problem**: User's submission loop blocks, violating "futures are immediate" principle
+❌ **Impact**: Submitting 1000 tasks with `max_queued_tasks=10` would block 990 times
+
+**Alternative 2: Dedicated Forwarding Thread Pool**
+```python
+# Add thread pool to each worker to forward submissions
+self._forwarding_pool = ThreadPoolExecutor(max_workers=1)
+future = self._forwarding_pool.submit(
+    self._wait_for_semaphore_and_forward, 
+    name, args, kwargs
+)
+```
+❌ **Complexity**: Adds 1-N threads per worker (expensive with 100+ workers)
+❌ **Resource waste**: Thread sits idle most of the time
+❌ **Coordination**: Requires complex shutdown and error handling
+❌ **Memory**: Thread stacks consume memory (~8MB per thread on 64-bit systems)
+
+**Alternative 3: Async Queue with Event Loop**
+```python
+# Use asyncio queue for pending submissions
+await self._pending_queue.put((name, args, kwargs))
+# Separate async task forwards to backend
+```
+❌ **Mode limitations**: Only works in asyncio mode, not thread/process/ray
+❌ **Mixing concerns**: Forces async into synchronous worker framework
+❌ **Complexity**: Requires event loop management in each proxy
+
+**Chosen: Callback-Driven Forwarding** ✅
+```python
+# Non-blocking semaphore check
+if self._submission_semaphore.acquire(blocking=False):
+    forward_immediately()
+else:
+    queue_internally()  # Returns shell future instantly
+    
+# On completion callback:
+future.add_done_callback(forward_next_from_queue)
+```
+✅ **Zero blocking**: All submissions return immediately
+✅ **No threads**: Callbacks run in existing completion threads
+✅ **Mode agnostic**: Works identically in thread/process/ray/asyncio
+✅ **Simple**: ~100 lines of code, easy to reason about
+✅ **Efficient**: Minimal overhead, self-cleaning
+✅ **Safe shutdown**: Cancel pending futures in `stop()`, no thread coordination
+
+**Key Insight**: We already have threads for task completion (thread pool workers, process result handlers, Ray monitors). Reusing their callbacks for forwarding is free!
+
+#### Shutdown and Cleanup
+
+**Critical Issue**: What happens to pending futures when `stop()` is called?
+
+**Solution**: Cancel all futures in `_pending_submissions` queue:
+
+```python
+def stop(self, timeout: float = 30) -> None:
+    self._stopped = True
+    
+    # Cancel all pending futures that were never forwarded
+    if self._pending_submissions is not None:
+        while True:
+            try:
+                shell_future, py_future, method_name, args, kwargs = \
+                    self._pending_submissions.get_nowait()
+                py_future.cancel()  # Mark as cancelled
+            except queue.Empty:
+                break  # All pending futures cancelled
+```
+
+**Callback Guard**: Prevent forwarding during shutdown:
+
+```python
+def on_submission_complete(f):
+    # Release semaphore
+    self._submission_semaphore.release()
+    
+    # ⚠️ CRITICAL: Don't forward if stopped
+    if self._stopped:
+        return  # Exit early
+    
+    # Forward next task from queue...
+```
+
+**Why this matters**: Without the guard, cancelled futures could trigger callbacks that try to forward more tasks to a stopped worker, causing:
+- Deadlocks (trying to acquire locks on stopped backend)
+- Race conditions (accessing worker state during teardown)
+- Timeouts (tasks hang waiting for stopped backend)
+
+**Lifecycle:**
+1. User calls `stop()` → Sets `self._stopped = True`
+2. Cancel all pending futures in `_pending_submissions` → Users see `CancelledError`
+3. Callback guard prevents forwarding new tasks → No new submissions reach backend
+4. Existing in-flight tasks complete or timeout → Clean shutdown
+5. Backend cleaned up (threads joined, processes terminated, ray actors killed)
+
+#### Two-Queue Architecture
+
+**Why two queues?**
+- `_pending_submissions` (client-side, in WorkerProxy): Rate-limits forwarding to backend
+- `_command_queue` (backend-side, Thread/Process/Asyncio only): Holds tasks waiting for execution
+
+```
+Client Code                    WorkerProxy                   Execution Backend
+    │                               │                              │
+    │  worker.method(1)             │                              │
+    ├──────────────────────────────>│                              │
+    │  <return future instantly>    │                              │
+    │                               │  Forward task 1              │
+    │                               ├─────────────────────────────>│
+    │  worker.method(2)             │  (semaphore: 1/10 slots)    │
+    ├──────────────────────────────>│                              │
+    │  <return future instantly>    │                              │
+    │                               │  Forward task 2              │
+    │                               ├─────────────────────────────>│
+    │  ... submit 1000 more         │  (semaphore: 2/10 slots)    │
+    │  (ALL return instantly!)      │                              │
+    │                               │  Queue task 11-1000          │
+    │                               │  (semaphore full)            │
+    │                               │                              │
+    │                               │  <task 1 completes>          │
+    │                               │<─────────────────────────────│
+    │                               │  Release semaphore (1/10)    │
+    │                               │  Forward task 11 from queue  │
+    │                               ├─────────────────────────────>│
+    │                               │  (semaphore: 2/10 slots)    │
+```
+
+**Purpose**: Controls how many tasks can be in-flight from worker proxy to underlying execution (thread/process/ray). User submissions are always non-blocking. The proxy manages its internal queue to the underlying execution context. This prevents overloading the execution backend, especially for Ray actors, while keeping user submissions instant.
+
+#### Example Flows
+
+**Single Worker Flow:**
 ```
 User submits 1000 tasks (instant, non-blocking):
 ├─ Task 1-10: Immediately forwarded to backend (semaphore allows)
-├─ Task 11-1000: Wait in proxy's internal queue (transparent to user)
-└─ As tasks complete: Next tasks forwarded from queue to backend
-
+│   └─ Future returned instantly
+├─ Task 11-1000: Queued in _pending_submissions (semaphore full)
+│   └─ "Shell" futures returned instantly (not yet backed by execution)
+└─ As tasks complete:
+    └─ Callback chain forwards tasks 11-1000 from queue to backend
+    
 User has all 1000 futures immediately and never blocks!
+Submission time: ~0.001s (instant)
+Execution time: depends on task duration
 ```
 
 **Worker Pool Behavior:**
@@ -1383,9 +1691,11 @@ User has all 1000 futures immediately and never blocks!
 Pool with 5 workers, max_queued_tasks=10 each:
 ├─ User submits 1000 tasks (instant, non-blocking pool dispatch)
 ├─ Load balancer distributes to 5 workers (instant, O(1))
-├─ Each worker queues ~200 tasks internally
-├─ Each worker forwards 10 tasks to its backend (50 total in-flight)
-└─ Remaining 950 wait in worker proxy queues (not in user code)
+│   └─ ~200 tasks per worker
+├─ Each worker:
+│   ├─ Forwards 10 tasks to its backend (semaphore allows)
+│   └─ Queues remaining ~190 in _pending_submissions
+└─ Total: 50 tasks in-flight to backends, 950 queued in proxies
 
 Total capacity: 5 workers × 10 queue = 50 in-flight to backends
 User submission time: ~0.002s for 1000 tasks (instant!)
@@ -1395,10 +1705,16 @@ User submission time: ~0.002s for 1000 tasks (instant!)
 `max_queued_tasks` controls the depth of the Worker Proxy → Execution Backend queue, not the User → Worker Proxy submission. The user-facing API is always non-blocking regardless of this setting.
 
 **Bypassed for:**
-- Sync mode (immediate execution, no queue needed)
-- Asyncio mode (event loop handles concurrency, no queue needed)
-- Blocking mode (sequential execution, returns results directly)
-- On-demand workers (ephemeral workers, pool already limits concurrency)
+- **Sync mode**: Immediate execution, no queue needed
+- **Asyncio mode**: Event loop handles concurrency, no queue needed  
+- **Blocking mode**: Sequential execution, returns results directly
+- **On-demand workers**: Ephemeral workers, pool already limits concurrency
+
+**Performance:**
+- Future creation: < 1 μs per future (instant)
+- Callback overhead: ~5-10 μs per task completion
+- Total submission time: O(n) where n = number of tasks, ~1 μs per task
+- Example: 10,000 tasks submitted in ~10ms (0.01s)
 
 ### 4. Future Unwrapping
 

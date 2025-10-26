@@ -62,14 +62,14 @@ class TestGlobalConfig:
         global_config.reset_to_defaults()
 
         # Verify reset
-        assert global_config.thread.max_queued_tasks == 1000
+        assert global_config.thread.max_queued_tasks == None
         assert global_config.ray.max_queued_tasks == 3
 
     def test_config_get_defaults_method(self):
         """Test get_defaults() method."""
         thread_defaults = global_config.get_defaults(ExecutionMode.Threads)
         assert thread_defaults.max_workers == 30
-        assert thread_defaults.max_queued_tasks == 1000
+        assert thread_defaults.max_queued_tasks == None
         assert thread_defaults.load_balancing == LoadBalancingAlgorithm.RoundRobin
         assert thread_defaults.load_balancing_on_demand == LoadBalancingAlgorithm.Random
 

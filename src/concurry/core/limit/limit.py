@@ -36,6 +36,7 @@ Example:
             acq.update(usage={"api_tokens": result.actual_tokens})
 """
 
+import logging
 from abc import ABC
 from typing import ClassVar, Dict, NoReturn, Union
 
@@ -45,6 +46,8 @@ from pydantic import confloat, conint
 from ...utils import _NO_ARG, _NO_ARG_TYPE
 from ..algorithms.rate_limiting import RateLimiter
 from ..constants import RateLimitAlgorithm
+
+logger = logging.getLogger(__name__)
 
 
 class Limit(Typed, ABC):
@@ -233,10 +236,29 @@ class RateLimit(Limit):
         return self._impl.can_acquire(tokens=requested)
 
     def validate_usage(self, requested: int, used: int) -> None:
-        """Validate that usage doesn't exceed requested."""
+        """Validate usage and warn if it exceeds requested.
+
+        Args:
+            requested: Amount originally requested
+            used: Actual amount used
+
+        Behavior:
+            If usage exceeds requested, logs a warning but allows it since the
+            spend has already occurred and cannot be undone. The excess will be
+            naturally constrained by the limit's capacity.
+
+        Warning vs Error:
+            This used to raise ValueError, but that was changed to a warning because:
+            - The tokens/resources were already consumed and cannot be undone
+            - Raising an error would mask the original API response/result
+            - The warning helps identify incorrect usage tracking
+            - Excess usage is naturally limited by capacity constraints
+        """
         if used > requested:
-            raise ValueError(
-                f"Usage ({used}) cannot exceed requested amount ({requested}) for limit '{self.key}'"
+            logger.warning(
+                f"Usage ({used}) exceeds requested amount ({requested}) for limit '{self.key}'. "
+                f"This may indicate incorrect usage tracking or unexpected token consumption. "
+                f"Excess usage will be constrained by limit capacity ({self.capacity})."
             )
 
     def get_stats(self) -> dict:
@@ -251,9 +273,16 @@ class RateLimit(Limit):
 class CallLimit(RateLimit):
     """Special RateLimit for counting individual calls.
 
-    CallLimit is a specialized RateLimit that enforces a simpler semantic: counting
-    the number of calls (acquisitions) rather than arbitrary token amounts. Usage
-    must always be 1 per call, and the key is fixed to "call_count".
+    CallLimit is a specialized RateLimit that enforces call counting semantics.
+    It supports both implicit (automatic) and explicit (manual) acquisition:
+
+    - **Implicit (requested=1, default)**: Auto-acquired with value of 1, no update needed
+    - **Explicit (requested>1)**: Must call update() with usage in range [0, requested]
+
+    The distinction allows for both convenient single-call tracking (implicit) and
+    explicit batch operation tracking (explicit) within the same limit type. For
+    explicit mode, any value from 0 to requested is valid, enabling proper error
+    handling when only some calls in a batch succeed.
 
     Note:
         CallLimit is not thread-safe and cannot be acquired directly. Use within
@@ -266,13 +295,15 @@ class CallLimit(RateLimit):
         capacity: Maximum calls allowed per window
 
     Characteristics:
-        - Usage must always be 1 (validated on update)
         - Key is fixed to "call_count" for consistency
         - Inherits all RateLimit algorithm support
-        - No need to call update() in LimitSet (handled automatically)
+        - Implicit requests (requested=1, default): No update needed, automatic
+        - Explicit requests (requested>1): Must call update() with usage in [0, requested]
+        - Validation enforces correct usage patterns for both modes
+        - Explicit mode supports partial completion reporting (useful in error scenarios)
 
     Example:
-        Use within LimitSet::
+        Implicit usage (automatic, most common)::
 
             from concurry import CallLimit, RateLimit, RateLimitAlgorithm, LimitSet
 
@@ -290,16 +321,38 @@ class CallLimit(RateLimit):
                 )
             ])
 
-            # CallLimit doesn't need explicit requested or update
+            # CallLimit implicitly acquired with default=1, no update needed
             with limits.acquire(requested={"tokens": 100}) as acq:
                 result = do_work()
                 acq.update(usage={"tokens": result.actual_tokens})
                 # No need to update "call_count" - automatic!
 
+        Explicit usage (batch operations)::
+
+            # Explicitly request 10 calls for batch operation
+            # MUST call update() with usage in [0, 10]
+            with limits.acquire(requested={"call_count": 10, "tokens": 1000}) as acq:
+                batch_results = batch_process_items()
+                # Can report partial completion on errors
+                acq.update(usage={
+                    "call_count": len(batch_results),  # 0-10 is valid
+                    "tokens": sum(r.tokens for r in batch_results)
+                })
+
+    Validation Rules:
+        - **Implicit (requested=1)**: Usage must be 1, enforced automatically
+        - **Explicit (requested>1)**: Usage must be in range [0, requested]
+        - Allows reporting partial completion when batch operations fail partway through
+        - These rules prevent incorrect usage tracking in both modes
+
+    Use Cases:
+        - **Implicit**: Single API calls, individual operations (most common)
+        - **Explicit**: Batch API calls, multi-item operations consuming N calls
+
     Notes:
-        - Trying to set usage != 1 raises ValueError
-        - Perfect for enforcing call rate limits independent of resource usage
-        - Use RateLimit directly if you need custom keys or multi-token semantics
+        - Use implicit mode (default) for 99% of cases
+        - Use explicit mode for batch operations that consume multiple calls
+        - Use RateLimit directly if you need custom keys or different semantics
 
     See Also:
         - RateLimit: General-purpose rate limiting with custom keys
@@ -313,12 +366,33 @@ class CallLimit(RateLimit):
         data["key"] = cls.CallLimit_key  ## Force the key to be "call_count"
 
     def validate_usage(self, requested: int, used: int) -> None:
-        """Validate that usage is always 1 for CallLimit."""
-        if used != 1:
-            raise ValueError(
-                f"CallLimit usage must always be 1, got: {used}. "
-                f"CallLimit '{self.key}' is for counting individual calls only."
-            )
+        """Validate CallLimit usage based on implicit vs explicit acquisition.
+
+        - If requested == 1 (implicit): Usage must be 1 (default behavior)
+        - If requested > 1 (explicit): Usage must be in range [0, requested]
+
+        This allows explicit multi-call acquisitions while preserving
+        automatic single-call semantics. For explicit mode, any value
+        from 0 to requested is valid to support error scenarios where
+        only some calls succeed.
+        """
+        if requested == 1:
+            # Implicit acquisition: usage must be 1
+            if used != 1:
+                raise ValueError(
+                    f"CallLimit usage must be 1 for implicit acquisition (requested=1), got: {used}. "
+                    f"CallLimit '{self.key}' defaults to 1 call per acquisition."
+                )
+        else:
+            # Explicit acquisition: usage must be non-negative and <= requested
+            if used < 0:
+                raise ValueError(
+                    f"CallLimit usage cannot be negative, got: {used} for limit '{self.key}'. "
+                    f"Usage must be in range [0, {requested}]."
+                )
+            # Parent will warn if used > requested
+
+        # Call parent to check used <= requested (now a warning)
         super().validate_usage(requested, used)
 
 

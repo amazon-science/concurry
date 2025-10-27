@@ -254,10 +254,20 @@ class LimitSetAcquisition:
         required_updates = set()
         for key, acq in self.acquisitions.items():
             limit = acq.limit
-            # RateLimits (excluding CallLimit) require updates
-            # ResourceLimits and CallLimits are automatic
-            if not isinstance(limit, (ResourceLimit, CallLimit)):
-                required_updates.add(key)
+
+            # ResourceLimits are always automatic (no update needed)
+            if isinstance(limit, ResourceLimit):
+                continue
+
+            # CallLimits with requested=1 are automatic (implicit acquisition)
+            # CallLimits with requested>1 require explicit update
+            if isinstance(limit, CallLimit):
+                if acq.requested > 1:
+                    required_updates.add(key)
+                continue
+
+            # All other RateLimits require explicit update
+            required_updates.add(key)
 
         missing_updates = required_updates - self._updated_keys
 

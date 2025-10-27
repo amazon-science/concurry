@@ -442,3 +442,191 @@ class TestLimitSetSharedModes:
             with limits.acquire(requested={"tokens": 10, "connections": 1}) as acq:
                 assert acq.successful is True
                 acq.update(usage={"tokens": 10})
+
+
+class TestUnknownLimitKeys:
+    """Test handling of unknown limit keys in acquisition requests."""
+
+    def test_unknown_key_warns_once(self, caplog):
+        """Test that unknown key logs warning once per key."""
+        import logging
+
+        limits = LimitSet(
+            limits=[
+                RateLimit(
+                    key="tokens",
+                    window_seconds=1,
+                    algorithm=RateLimitAlgorithm.TokenBucket,
+                    capacity=100,
+                ),
+                ResourceLimit(key="connections", capacity=5),
+            ]
+        )
+
+        # First acquisition with unknown key - should warn
+        with caplog.at_level(logging.WARNING):
+            caplog.clear()
+            with limits.acquire(requested={"tokens": 10, "unknown_key": 50}) as acq:
+                acq.update(usage={"tokens": 10})
+                assert acq.successful is True
+
+            # Should have one warning about unknown_key
+            assert len(caplog.records) == 1
+            assert "Unknown limit key 'unknown_key'" in caplog.records[0].message
+            assert "Available limit keys:" in caplog.records[0].message
+
+        # Second acquisition with same unknown key - should NOT warn again
+        with caplog.at_level(logging.WARNING):
+            caplog.clear()
+            with limits.acquire(requested={"tokens": 10, "unknown_key": 50}) as acq:
+                acq.update(usage={"tokens": 10})
+                assert acq.successful is True
+
+            # Should have NO warnings (already warned)
+            assert len(caplog.records) == 0
+
+        # Third acquisition with different unknown key - should warn
+        with caplog.at_level(logging.WARNING):
+            caplog.clear()
+            with limits.acquire(requested={"tokens": 10, "another_unknown": 25}) as acq:
+                acq.update(usage={"tokens": 10})
+                assert acq.successful is True
+
+            # Should have one warning about another_unknown
+            assert len(caplog.records) == 1
+            assert "Unknown limit key 'another_unknown'" in caplog.records[0].message
+
+    def test_unknown_key_does_not_raise_error(self):
+        """Test that unknown key does not raise ValueError."""
+        limits = LimitSet(
+            limits=[
+                RateLimit(
+                    key="tokens",
+                    window_seconds=1,
+                    algorithm=RateLimitAlgorithm.TokenBucket,
+                    capacity=100,
+                ),
+                ResourceLimit(key="connections", capacity=5),
+            ]
+        )
+
+        # Should NOT raise ValueError for unknown key
+        with limits.acquire(requested={"tokens": 10, "nonexistent": 100}) as acq:
+            acq.update(usage={"tokens": 10})
+            assert acq.successful is True
+            # Only known keys should be in acquisitions
+            assert "tokens" in acq.acquisitions
+            assert "nonexistent" not in acq.acquisitions
+
+    def test_mixed_known_unknown_keys(self):
+        """Test partial acquisition with mix of known and unknown keys."""
+        limits = LimitSet(
+            limits=[
+                CallLimit(window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
+                RateLimit(
+                    key="tokens",
+                    window_seconds=1,
+                    algorithm=RateLimitAlgorithm.TokenBucket,
+                    capacity=1000,
+                ),
+                ResourceLimit(key="connections", capacity=10),
+            ]
+        )
+
+        # Mix of known and unknown keys
+        with limits.acquire(
+            requested={
+                "tokens": 100,  # Known
+                "gpu_memory": 500,  # Unknown
+                "connections": 2,  # Known
+                "premium_quota": 50,  # Unknown
+            }
+        ) as acq:
+            acq.update(usage={"tokens": 80})
+            assert acq.successful is True
+
+            # Only known keys + auto-added CallLimit should be acquired
+            assert len(acq.acquisitions) == 3
+            assert "tokens" in acq.acquisitions
+            assert "connections" in acq.acquisitions
+            assert "call_count" in acq.acquisitions  # Auto-added
+            assert "gpu_memory" not in acq.acquisitions
+            assert "premium_quota" not in acq.acquisitions
+
+            # Check requested amounts for known keys
+            assert acq.acquisitions["tokens"].requested == 100
+            assert acq.acquisitions["connections"].requested == 2
+            assert acq.acquisitions["call_count"].requested == 1  # Auto-added
+
+    def test_all_unknown_keys(self):
+        """Test that all unknown keys still acquires CallLimit/ResourceLimit."""
+        limits = LimitSet(
+            limits=[
+                CallLimit(window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
+                RateLimit(
+                    key="tokens",
+                    window_seconds=1,
+                    algorithm=RateLimitAlgorithm.TokenBucket,
+                    capacity=1000,
+                ),
+                ResourceLimit(key="connections", capacity=10),
+            ]
+        )
+
+        # All requested keys are unknown
+        with limits.acquire(requested={"unknown1": 100, "unknown2": 50, "unknown3": 25}) as acq:
+            # Tokens RateLimit was not requested, so it's not in acquisitions
+            # No need to update it (only CallLimit and ResourceLimit auto-added)
+            assert acq.successful is True
+
+            # Should still acquire auto-added CallLimit and ResourceLimit
+            assert len(acq.acquisitions) == 2
+            assert "call_count" in acq.acquisitions
+            assert "connections" in acq.acquisitions
+            assert acq.acquisitions["call_count"].requested == 1
+            assert acq.acquisitions["connections"].requested == 1
+
+            # Unknown keys should not be acquired
+            assert "unknown1" not in acq.acquisitions
+            assert "unknown2" not in acq.acquisitions
+            assert "unknown3" not in acq.acquisitions
+
+            # Tokens RateLimit should not be acquired (not requested, not auto-added)
+            assert "tokens" not in acq.acquisitions
+
+    def test_warning_shows_available_keys(self, caplog):
+        """Test that warning message shows available limit keys."""
+        import logging
+
+        limits = LimitSet(
+            limits=[
+                RateLimit(
+                    key="input_tokens",
+                    window_seconds=1,
+                    algorithm=RateLimitAlgorithm.TokenBucket,
+                    capacity=1000,
+                ),
+                RateLimit(
+                    key="output_tokens",
+                    window_seconds=1,
+                    algorithm=RateLimitAlgorithm.TokenBucket,
+                    capacity=500,
+                ),
+                ResourceLimit(key="db_connections", capacity=10),
+            ]
+        )
+
+        with caplog.at_level(logging.WARNING):
+            caplog.clear()
+            with limits.acquire(requested={"input_tokens": 100, "typo_key": 50}) as acq:
+                acq.update(usage={"input_tokens": 100})
+
+            # Check warning message contains available keys
+            assert len(caplog.records) == 1
+            warning_msg = caplog.records[0].message
+            assert "Unknown limit key 'typo_key'" in warning_msg
+            assert "Available limit keys:" in warning_msg
+            # Should list all available keys
+            assert "input_tokens" in warning_msg or "'input_tokens'" in warning_msg
+            assert "output_tokens" in warning_msg or "'output_tokens'" in warning_msg
+            assert "db_connections" in warning_msg or "'db_connections'" in warning_msg

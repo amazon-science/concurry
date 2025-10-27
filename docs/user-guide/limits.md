@@ -74,12 +74,16 @@ with limits.acquire(requested={"tokens": 50, "connections": 2}) as acq:
 | **Config** | Each LimitSet can have metadata accessible via acquisition |
 | **Empty LimitSet** | Workers always have `self.limits`, even without configuration |
 | **No limits** | Empty LimitSet always allows acquisition, zero overhead |
-| **CallLimit** | Always acquired with default of 1, no update needed |
+| **CallLimit (implicit)** | Acquired with default of 1, no update needed |
+| **CallLimit (explicit)** | If requested > 1, must call update() with value in [0, requested] |
 | **ResourceLimit** | Always acquired with default if not specified, no update needed |
 | **RateLimit** | Must be in `requested` dict, requires `update()` call |
+| **Unknown limit keys** | Logs warning once, skips unknown keys, continues with known ones |
+| **Usage exceeds requested** | Logs warning but allows (spend already occurred) |
+| **Requested exceeds capacity** | Raises ValueError immediately (request can never be fulfilled) |
 | **Partial acquisition** | Specify only what you need, CallLimit/ResourceLimit auto-included |
 | **Nested acquisition** | Supported, enables fine-grained resource management |
-| **Shared limits** | `shared=True` (default) shares limits across workers |
+| **Shared limits** | `shared=False` (default) creates private limits; `shared=True` shares across workers |
 | **Mode matching** | `mode` parameter must match worker execution mode |
 
 ## Basic Usage
@@ -102,7 +106,7 @@ rate_limit = RateLimit(
 # Create thread-safe LimitSet
 limits = LimitSet(
     limits=[rate_limit],
-    shared=True,  # Default: share across workers
+    shared=False,  # Default: private to this worker
     mode="sync"   # Default: for sync/thread/asyncio
 )
 
@@ -194,7 +198,7 @@ with limits.acquire(requested={"api_tokens": 100}) as acq:
 
 ### CallLimit
 
-CallLimit is a special RateLimit for counting calls, where usage is always 1.
+CallLimit is a special RateLimit for counting calls. It supports both implicit (automatic) and explicit (multi-call) acquisition:
 
 ```python
 from concurry import LimitSet, CallLimit, RateLimitAlgorithm
@@ -209,16 +213,25 @@ call_limit = CallLimit(
 # Create LimitSet
 limits = LimitSet(limits=[call_limit])
 
-# Each acquisition counts as 1 call (automatic)
+# Implicit: Each acquisition counts as 1 call (automatic)
 with limits.acquire():
     make_api_call()
+    # No update() needed - usage=1 is automatic
+
+# Explicit: Request multiple calls (e.g., batch operations)
+with limits.acquire(requested={"call_count": 10}) as acq:
+    batch_results = process_batch()
+    # Report actual count - can be 0-10 (useful for error handling)
+    acq.update(usage={"call_count": len(batch_results)})
 ```
 
 **Key points:**
 - Fixed key: `"call_count"`
-- Usage is always 1 (validated)
-- No need to call `update()` - handled automatically
+- **Implicit (requested=1)**: No `update()` needed, usage is always 1
+- **Explicit (requested>1)**: MUST call `update()` with usage in range [0, requested]
+- Allows reporting partial completion in error scenarios (e.g., 5 out of 10 batch items succeeded)
 - Perfect for call rate limits independent of resource usage
+- Use explicit requests for batch operations that consume multiple calls
 
 ### ResourceLimit
 
@@ -1168,7 +1181,7 @@ shared_limits = LimitSet(
             capacity=5
         )
     ],
-    shared=True,  # Shared across workers (default)
+    shared=True,  # Share across workers
     mode="thread"  # Match worker mode
 )
 
@@ -1315,14 +1328,14 @@ worker = MyWorker.options(mode="ray", limits=ray_limits).init()
 
 ## Shared vs Non-Shared LimitSets
 
-`LimitSet` supports both shared and non-shared modes via the `shared` parameter (defaults to `True`).
+`LimitSet` supports both shared and non-shared modes via the `shared` parameter (defaults to `False`).
 
-### Shared LimitSets (shared=True, default)
+### Shared LimitSets (shared=True)
 
 Multiple workers share the same limit pool:
 
 ```python
-# Create shared LimitSet
+# Create shared LimitSet (must set shared=True explicitly)
 shared_limits = LimitSet(
     limits=[
         RateLimit(
@@ -1332,7 +1345,7 @@ shared_limits = LimitSet(
             capacity=1000
         )
     ],
-    shared=True,  # Default
+    shared=True,  # Required for sharing across workers
     mode="thread"
 )
 
@@ -1364,7 +1377,7 @@ worker2 = APIWorker.options(mode="sync", limits=non_shared_limits).init()
 # worker1's usage doesn't affect worker2's limits
 ```
 
-**Note**: Non-shared mode only works with `mode="sync"`. For most use cases, you want `shared=True` (the default).
+**Note**: Non-shared mode only works with `mode="sync"`. For sharing limits across multiple workers, explicitly set `shared=True`.
 
 ### Backend Types and Performance
 
@@ -1490,13 +1503,25 @@ with limits.acquire(requested={"tokens": 100}) as acq:
     result = operation()
     acq.update(usage={"tokens": result.actual_cost})
 
+# ⚠️  Warning: Usage exceeds requested (warns but allows)
+with limits.acquire(requested={"tokens": 100}) as acq:
+    result = operation()
+    acq.update(usage={"tokens": 150})  # Logs WARNING - spend already occurred
+
 # ❌ Bad: Missing update for RateLimit (raises RuntimeError)
 with limits.acquire(requested={"tokens": 100}) as acq:
     result = operation()
     # Missing acq.update()! Will raise error on context exit
+
+# ❌ Bad: Requesting more than capacity (raises ValueError immediately)
+limits.acquire(requested={"tokens": 1500})  # Capacity is 1000 - can never fulfill!
 ```
 
-**Note**: CallLimit and ResourceLimit are automatic and don't need `update()`.
+**Note**: 
+- Implicit CallLimit (default=1) and ResourceLimit are automatic and don't need `update()`
+- Explicit CallLimit (requested>1) requires `update()` with value in [0, requested]
+- Explicit mode allows reporting partial completion (useful in error scenarios)
+- If usage exceeds requested, a warning is logged but operation succeeds (spend already occurred)
 
 ### 4. Use Nested Acquisition for Better Resource Management
 
@@ -1572,19 +1597,71 @@ with limits.acquire(requested={"tokens": 50}) as acq:
     # CallLimit was automatically acquired and released
 ```
 
+### 9. Flexible Conditional Limiting
+
+```python
+# ✅ Good: Write code that works with or without optional limits
+# Unknown keys are skipped with a warning, enabling flexible configurations
+class DataProcessor(Worker):
+    def process(self, data):
+        # Works whether gpu_memory and premium_quota are configured or not
+        with self.limits.acquire(requested={
+            "tokens": 100,          # Always present
+            "gpu_memory": 1000,     # May or may not exist
+            "premium_quota": 50     # Only in premium tier
+        }) as acq:
+            result = expensive_operation(data)
+            acq.update(usage={"tokens": result.tokens})
+            return result
+
+# Dev environment: Only tokens configured - gpu_memory/premium_quota skipped
+# Prod environment: All limits configured - full enforcement
+```
+
 ## Error Handling
 
 ### Common Errors
 
-**ValueError: Usage exceeds requested**
+**Warning: Unknown limit key**
 ```python
-# Cause: Trying to use more than requested
-acq = limit.acquire(requested=100)
-acq.update(used=150)  # Error!
+# Behavior: Logs warning (once per key) but continues gracefully
+limits = LimitSet(limits=[
+    RateLimit(key="tokens", window_seconds=60, capacity=1000)
+])
 
-# Solution: Request sufficient amount upfront
-acq = limit.acquire(requested=200)
-acq.update(used=150)  # OK
+# Unknown keys are skipped with warning
+with limits.acquire(requested={"tokens": 100, "unknown_key": 50}) as acq:
+    acq.update(usage={"tokens": 80})
+    # Works fine - unknown_key ignored
+
+# Why: Enables flexible conditional limiting and graceful degradation
+# The warning helps identify typos or configuration issues
+# Auto-addition of CallLimit/ResourceLimit still occurs
+```
+
+**Warning: Usage exceeds requested**
+```python
+# Behavior: Warns but allows (spend already occurred)
+with limits.acquire(requested={"tokens": 100}) as acq:
+    result = api_call()
+    acq.update(usage={"tokens": 150})  # Logs WARNING but succeeds
+    # Excess usage is naturally constrained by limit capacity
+
+# Why: The tokens were already spent and cannot be undone
+# The warning helps identify incorrect usage tracking
+```
+
+**ValueError: Requested exceeds capacity**
+```python
+# Cause: Requesting more than limit capacity (would block forever)
+limits = LimitSet(limits=[
+    RateLimit(key="tokens", window_seconds=60, capacity=1000)
+])
+limits.acquire(requested={"tokens": 1500})  # Raises ValueError immediately!
+
+# Why: Request can NEVER be fulfilled - capacity is 1000
+# Solution: Request within capacity or increase capacity
+limits.acquire(requested={"tokens": 1000})  # OK - equals capacity
 ```
 
 **RuntimeError: Not all limits updated**
@@ -1597,6 +1674,26 @@ with limits.acquire(requested={"tokens": 100}) as acq:
 with limits.acquire(requested={"tokens": 100}) as acq:
     result = operation()
     acq.update(usage={"tokens": result.tokens})
+```
+
+**ValueError: CallLimit validation errors**
+```python
+# Cause: Explicit CallLimit request > 1 without update()
+limits = LimitSet(limits=[CallLimit(window_seconds=60, capacity=100)])
+
+# Explicit request (>1) requires update with value in [0, requested]
+with limits.acquire(requested={"call_count": 10}) as acq:
+    batch_results = process_batch()
+    # Report actual count - can be less than requested on errors
+    acq.update(usage={"call_count": len(batch_results)})  # 0-10 is valid
+
+# Implicit request (default=1) is automatic - no update needed
+with limits.acquire() as acq:
+    pass  # No update needed for implicit CallLimit
+
+# Error: Negative usage
+with limits.acquire(requested={"call_count": 5}) as acq:
+    acq.update(usage={"call_count": -1})  # Raises ValueError!
 ```
 
 **TimeoutError: Failed to acquire**

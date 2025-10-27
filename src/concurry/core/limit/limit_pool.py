@@ -202,6 +202,7 @@ class LimitPool(Typed):
         Args:
             requested: Dict mapping limit keys to requested amounts.
                 If None or empty, acquires all limits with defaults.
+                Unknown keys are skipped with a warning (logged once per key).
             timeout: Maximum time to wait for acquisition in seconds.
                 If None, blocks indefinitely.
 
@@ -210,7 +211,10 @@ class LimitPool(Typed):
 
         Raises:
             TimeoutError: If acquisition times out
-            ValueError: If requested amounts are invalid
+            ValueError: If requested amounts exceed limit capacities
+
+        Warnings:
+            Logs warning if requested keys don't exist in selected LimitSet
 
         Example:
             Acquire with specific amounts::
@@ -241,6 +245,7 @@ class LimitPool(Typed):
         Args:
             requested: Dict mapping limit keys to requested amounts.
                 If None or empty, acquires all limits with defaults.
+                Unknown keys are skipped with a warning (logged once per key).
 
         Returns:
             LimitSetAcquisition with successful attribute indicating success

@@ -28,6 +28,7 @@ Shared State Management:
         - This ensures all workers check against the SAME shared state, not local copies
 """
 
+import logging
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -36,6 +37,8 @@ from typing import Any, Dict, List, Optional, Union
 from ..constants import ExecutionMode
 from .acquisition import Acquisition, LimitSetAcquisition
 from .limit import CallLimit, Limit, RateLimit, ResourceLimit
+
+logger = logging.getLogger(__name__)
 
 
 class BaseLimitSet(ABC):
@@ -57,6 +60,7 @@ class BaseLimitSet(ABC):
         self._limits_by_key: Dict[str, Limit] = {}
         self.shared = shared
         self.config = config if config is not None else {}
+        self._warned_keys: set = set()  # Track unknown keys we've already warned about
         # Build internal index of limits by key
         for limit in self.limits:
             if limit.key in self._limits_by_key:
@@ -100,23 +104,35 @@ class BaseLimitSet(ABC):
         pass
 
     def _build_requested_amounts(self, requested: Optional[Dict[str, int]]) -> Dict[str, int]:
-        """Build requested amounts with defaults.
+        """Build requested amounts with defaults and validate against capacity.
 
         This method supports partial acquisition:
         - If requested is empty/None: Acquire ALL limits (CallLimit, ResourceLimit, RateLimit)
         - If requested is not empty: Acquire specified limits + automatically add
           any CallLimit/ResourceLimit with default of 1 (RateLimits must be explicit)
 
+        Unknown Keys:
+            Unknown limit keys in the requested dict are skipped with a warning (logged once
+            per key per LimitSet instance). This allows flexible conditional limit usage and
+            graceful degradation when limits are not configured. Auto-addition of CallLimit/
+            ResourceLimit still occurs even if all requested keys are unknown.
+
+        After building the requested amounts, validates that no request exceeds its
+        limit's capacity. This prevents infinite blocking on impossible requests.
+
         Args:
             requested: User-provided requested amounts. If None or empty dict,
                 acquires all limits with defaults.
 
         Returns:
-            Complete mapping of limit key to requested amount
+            Complete mapping of limit key to requested amount (unknown keys excluded)
 
         Raises:
             ValueError: If RateLimit is not specified when acquiring all,
-                or if unknown key provided
+                or if requested > capacity for any limit
+
+        Warnings:
+            Logs warning once per unknown key, showing available limit keys
         """
         if requested is None:
             requested = {}
@@ -135,10 +151,25 @@ class BaseLimitSet(ABC):
                     )
         else:
             # Partial acquisition: acquire specified limits
+            # Track unknown keys for warning
+            unknown_keys = []
+
             for key, amount in requested.items():
                 if key not in self._limits_by_key:
-                    raise ValueError(f"Unknown limit key: '{key}'")
+                    unknown_keys.append(key)
+                    # Skip unknown key - don't acquire what doesn't exist
+                    continue
                 requested_amounts[key] = amount
+
+            # Warn once per unknown key
+            for key in unknown_keys:
+                if key not in self._warned_keys:
+                    self._warned_keys.add(key)
+                    available_keys = list(self._limits_by_key.keys())
+                    logger.warning(
+                        f"Unknown limit key '{key}' in acquisition request. "
+                        f"This key will be ignored. Available limit keys: {available_keys}"
+                    )
 
             # Automatically add CallLimit and ResourceLimit with default of 1
             # (but NOT unspecified RateLimits)
@@ -147,7 +178,34 @@ class BaseLimitSet(ABC):
                     if isinstance(limit, (CallLimit, ResourceLimit)):
                         requested_amounts[limit.key] = 1
 
+        # Validate that requested amounts don't exceed capacity
+        # This prevents infinite blocking on impossible requests
+        self._validate_requested_amounts(requested_amounts)
+
         return requested_amounts
+
+    def _validate_requested_amounts(self, requested_amounts: Dict[str, int]) -> None:
+        """Validate that requested amounts don't exceed limit capacities.
+
+        This prevents infinite blocking when a request can never be fulfilled.
+
+        Args:
+            requested_amounts: Mapping of limit key to requested amount
+
+        Raises:
+            ValueError: If any requested amount exceeds its limit's capacity
+        """
+        for key, amount in requested_amounts.items():
+            limit = self._limits_by_key[key]
+
+            # Check capacity for all limit types
+            if hasattr(limit, "capacity"):
+                if amount > limit.capacity:
+                    raise ValueError(
+                        f"Requested amount ({amount}) exceeds capacity ({limit.capacity}) "
+                        f"for limit '{key}'. This request can never be fulfilled. "
+                        f"Check your configuration or reduce the requested amount."
+                    )
 
     def _can_acquire_all(self, requested_amounts: Dict[str, int]) -> bool:
         """Check if all limits can be acquired.
@@ -294,7 +352,9 @@ class InMemorySharedLimitSet(BaseLimitSet):
                 self._resource_semaphores[limit.key] = threading.Semaphore(limit.capacity)
 
     def acquire(
-        self, requested: Optional[Dict[str, int]] = None, timeout: Optional[float] = None
+        self,
+        requested: Optional[Dict[str, int]] = None,
+        timeout: Optional[float] = None,
     ) -> LimitSetAcquisition:
         """Acquire all limits atomically, blocking until available."""
         from ...config import global_config

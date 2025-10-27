@@ -149,7 +149,7 @@ class RateLimit(Limit):
 - `GCRA`: Most precise, theoretical arrival time tracking
 
 #### `CallLimit`
-Special case of RateLimit for counting calls.
+Special case of RateLimit for counting calls. Supports both implicit and explicit acquisition.
 
 ```python
 class CallLimit(RateLimit):
@@ -157,9 +157,12 @@ class CallLimit(RateLimit):
 ```
 
 **Characteristics:**
-- Usage is always 1 (validated and enforced)
-- No update needed - handled automatically
+- **Implicit acquisition (requested=1)**: Usage is always 1, no update needed (automatic)
+- **Explicit acquisition (requested>1)**: Must call `update()` with usage in range [0, requested]
+- Validation enforces correct usage patterns for both modes
+- Explicit mode allows reporting partial completion (useful in error scenarios)
 - Perfect for call rate limits independent of resource usage
+- Use explicit requests for batch operations consuming multiple calls
 
 #### `ResourceLimit`
 Semaphore-based resource limiting (e.g., connection pools).
@@ -282,7 +285,8 @@ class BaseLimitSet(ABC):
 ```
 
 **Common Logic (in base class):**
-- `_build_requested_amounts()`: Handle defaults and partial acquisition
+- `_build_requested_amounts()`: Handle defaults, partial acquisition, unknown key filtering, and validate requested amounts
+- `_validate_requested_amounts()`: Validate that requested amounts don't exceed limit capacities
 - `_can_acquire_all()`: Check if all limits can be acquired
 - `_acquire_all()`: Acquire all limits atomically
 - `_release_acquisitions()`: Release all acquired limits
@@ -311,13 +315,106 @@ limits = LimitSet(limits=[
     ResourceLimit(key="connections", capacity=10)
 ])
 
-# Partial acquisition: only tokens
+# Partial acquisition: only tokens specified
 # CallLimit automatically acquired with default 1
-# ResourceLimit NOT acquired (not specified)
+# ResourceLimit automatically acquired with default 1
 with limits.acquire(requested={"tokens": 100}) as acq:
-    # Only tokens and call_count acquired
+    # tokens, call_count, and connections all acquired
     pass
 ```
+
+### Capacity Validation
+
+**Purpose**: Prevent infinite blocking on impossible requests.
+
+After building the requested amounts, `_build_requested_amounts()` calls `_validate_requested_amounts()` to ensure no request exceeds the limit's capacity. This validation happens BEFORE attempting acquisition, providing immediate feedback.
+
+**Behavior:**
+```python
+# Raises ValueError immediately if requested > capacity
+limits = LimitSet(limits=[
+    RateLimit(key="tokens", window_seconds=60, capacity=1000)
+])
+
+# This would block forever without validation
+limits.acquire(requested={"tokens": 1500})  # ValueError: requested exceeds capacity
+
+# Valid request (at or below capacity)
+limits.acquire(requested={"tokens": 1000})  # OK
+```
+
+**Implementation:**
+```python
+def _validate_requested_amounts(self, requested_amounts: Dict[str, int]) -> None:
+    """Validate that requested amounts don't exceed limit capacities."""
+    for key, amount in requested_amounts.items():
+        limit = self._limits_by_key[key]
+        if amount > limit.capacity:
+            raise ValueError(
+                f"Requested amount ({amount}) exceeds capacity ({limit.capacity}) "
+                f"for limit '{key}'. This request can never be fulfilled."
+            )
+```
+
+**Why This Matters:**
+- Without validation, `acquire()` would block forever on impossible requests
+- Immediate error provides clear feedback to the caller
+- Helps catch configuration errors early (e.g., requesting batch size larger than limit)
+
+### Unknown Key Handling
+
+**Purpose**: Enable flexible conditional limit usage and graceful degradation.
+
+When a requested key doesn't exist in the LimitSet, it's skipped with a warning instead of raising an error. This allows code to work with varying limit configurations across environments.
+
+**Behavior:**
+```python
+limits = LimitSet(limits=[
+    RateLimit(key="tokens", window_seconds=60, capacity=1000)
+])
+
+# Unknown keys are filtered out with warning (logged once per key)
+with limits.acquire(requested={"tokens": 100, "gpu_memory": 500}) as acq:
+    acq.update(usage={"tokens": 80})
+    # "gpu_memory" skipped with warning, only "tokens" acquired
+```
+
+**Implementation:**
+```python
+def _build_requested_amounts(self, requested):
+    # Track unknown keys for warning
+    unknown_keys = []
+    
+    for key, amount in requested.items():
+        if key not in self._limits_by_key:
+            unknown_keys.append(key)
+            continue  # Skip unknown key
+        requested_amounts[key] = amount
+    
+    # Warn once per unknown key (using _warned_keys set)
+    for key in unknown_keys:
+        if key not in self._warned_keys:
+            self._warned_keys.add(key)
+            logger.warning(
+                f"Unknown limit key '{key}' in acquisition request. "
+                f"This key will be ignored. Available limit keys: {list(self._limits_by_key.keys())}"
+            )
+```
+
+**Use Cases:**
+- **Conditional limits**: Request optional limits that may not be configured
+- **Environment differences**: Dev has fewer limits than prod
+- **Feature flags**: Enable/disable limits without code changes
+- **Debugging**: Turn off specific limits temporarily
+- **Graceful rollout**: Add limits gradually without breaking existing code
+
+**Design Decision:**
+Originally this raised `ValueError` for unknown keys. Changed to warning because:
+- Enables flexible conditional limiting
+- Supports graceful degradation
+- Users can debug production by temporarily removing limits
+- Warning (once per key) catches typos without blocking execution
+- Auto-addition of CallLimit/ResourceLimit still works
 
 ### Config Parameter
 
@@ -606,7 +703,8 @@ class LimitSetAcquisition:
 
 **Update Requirements:**
 - **RateLimits**: MUST call `update()` before context exit
-- **CallLimits**: No update needed (usage always 1)
+- **CallLimits (implicit, requested=1)**: No update needed (automatic, usage=1)
+- **CallLimits (explicit, requested>1)**: MUST call `update()` with usage in [0, requested]
 - **ResourceLimits**: No update needed (acquired = used)
 
 **Validation on `__exit__`:**
@@ -621,6 +719,11 @@ def __exit__(self, exc_type, exc_val, exc_tb):
     # Check that all RateLimits were updated
     for key, acq in self.acquisitions.items():
         if isinstance(acq.limit, RateLimit):
+            # Implicit CallLimit (requested=1) is automatic, no update needed
+            # Explicit CallLimit (requested>1) requires update
+            if isinstance(acq.limit, CallLimit) and acq.requested == 1:
+                continue  # Skip validation for implicit CallLimit
+            
             if key not in self._updated_keys:
                 raise RuntimeError(
                     f"RateLimit '{key}' was not updated. "
@@ -1464,9 +1567,48 @@ with limits.acquire(requested={"tokens": 100}) as acq:
 with limits.acquire(requested={"tokens": 100}) as acq:
     result = operation()
     acq.update(usage={"tokens": result.actual_tokens})  # Required!
+
+# ⚠️  WARNING - Usage exceeds requested (warns but allows)
+with limits.acquire(requested={"tokens": 100}) as acq:
+    result = operation()
+    acq.update(usage={"tokens": 150})  # Logs warning - spend already occurred
+
+# ❌ WRONG - Requesting more than capacity (immediate ValueError)
+limits.acquire(requested={"tokens": 1500})  # Capacity is 1000 - can never fulfill!
 ```
 
-### 3. Mode Compatibility
+**Why usage > requested is allowed:**
+- The tokens were already spent and cannot be undone
+- The warning helps identify incorrect usage tracking or unexpected consumption
+- Excess usage is naturally constrained by the limit's capacity
+
+### 3. Unknown Keys are Skipped with Warning
+
+**BEHAVIOR CHANGE**: Unknown limit keys in `requested` dict are now skipped with a warning instead of raising `ValueError`.
+
+```python
+limits = LimitSet(limits=[
+    RateLimit(key="tokens", window_seconds=60, capacity=1000)
+])
+
+# ✅ Works now - unknown key skipped with warning
+with limits.acquire(requested={"tokens": 100, "typo_key": 50}) as acq:
+    acq.update(usage={"tokens": 80})
+    # "typo_key" ignored, warning logged once
+
+# ⚠️ OLD BEHAVIOR: Would have raised ValueError for "typo_key"
+```
+
+**Why This Changed:**
+- Enables flexible conditional limiting across environments
+- Supports graceful degradation when limits not configured
+- Users can debug by temporarily turning off specific limits
+- Warning (once per key) still catches typos/configuration issues
+- Auto-addition of CallLimit/ResourceLimit still works correctly
+
+**Gotcha**: If you intentionally want to fail when a key is missing, you'll now get a warning instead of an error. Check warnings in your logs or validate keys before acquisition if strict validation is needed.
+
+### 4. Mode Compatibility
 
 **CRITICAL**: LimitSet mode must match worker mode.
 
@@ -1485,7 +1627,7 @@ worker = Worker.options(mode="process", limits=process_limitset).init()
 - `process` uses `Manager.Lock()` (works across processes)
 - `ray` uses Ray actor (works across distributed workers)
 
-### 4. Shared vs Non-Shared
+### 5. Shared vs Non-Shared
 
 **GOTCHA**: `shared=False` only works with `mode="sync"`.
 
@@ -1499,7 +1641,7 @@ limitset = LimitSet(limits=[...], shared=False, mode="sync")
 
 **Why**: Non-shared means "no synchronization needed" → only safe for single-threaded sync mode.
 
-### 5. LimitPool String Indexing
+### 6. LimitPool String Indexing
 
 **GOTCHA**: `pool["key"]` does NOT work.
 
@@ -1519,7 +1661,7 @@ limit = limitset["tokens"]
 
 **Why**: Different LimitSets may have different limit keys. Ambiguous which LimitSet to query.
 
-### 6. Config Immutability
+### 7. Config Immutability
 
 **GOTCHA**: `acquisition.config` is a copy, modifying it doesn't affect LimitSet.
 
@@ -1534,7 +1676,7 @@ print(limitset.config["region"])  # Still "us-east-1"
 
 **Why**: Config is copied during acquisition to prevent mutations. This is intentional for thread-safety.
 
-### 7. Empty LimitSet Still Requires Context Manager
+### 8. Empty LimitSet Still Requires Context Manager
 
 **GOTCHA**: Even empty LimitSet must use context manager or manual release.
 
@@ -1552,7 +1694,7 @@ with empty_limitset.acquire():
 
 **Why**: Consistent API, even if empty LimitSet is no-op.
 
-### 8. Partial Acquisition Automatic Inclusion
+### 9. Partial Acquisition Automatic Inclusion
 
 **GOTCHA**: CallLimit/ResourceLimit automatically included even if not requested.
 
@@ -1565,12 +1707,27 @@ limits = LimitSet(limits=[
 # Requesting only "tokens"
 with limits.acquire(requested={"tokens": 100}) as acq:
     # CallLimit ALSO acquired automatically with default=1!
-    pass
+    pass  # No update needed for implicit CallLimit (requested=1)
 ```
 
 **Why**: CallLimit/ResourceLimit are almost always needed. Explicit exclusion not supported.
 
-### 9. Serialization of LimitPool
+**CallLimit behavior:**
+- **Implicit (automatic, requested=1)**: No update needed
+- **Explicit (manually requested > 1)**: Must call `update()` with value in [0, requested]
+
+```python
+# Explicit CallLimit - requires update with actual count
+with limits.acquire(requested={"call_count": 10, "tokens": 1000}) as acq:
+    batch_results = batch_operation()
+    # Can report partial completion on errors
+    acq.update(usage={
+        "call_count": len(batch_results),  # 0-10 is valid
+        "tokens": sum(r.tokens for r in batch_results)
+    })
+```
+
+### 10. Serialization of LimitPool
 
 **GOTCHA**: LimitPool with RoundRobinBalancer contains lock, but pickling works via custom methods.
 
@@ -1584,7 +1741,7 @@ unpickled = pickle.loads(pickled)
 
 **But**: If you subclass LimitPool and add non-serializable state, you must handle it in `__getstate__` / `__setstate__`.
 
-### 10. Worker Pools Get Different worker_index
+### 11. Worker Pools Get Different worker_index
 
 **GOTCHA**: Each worker in pool gets different `worker_index`.
 
@@ -1603,7 +1760,7 @@ pool = Worker.options(
 
 **Why**: Staggers round-robin starting points to reduce contention.
 
-### 11. Multiprocess/Ray Shared State Overhead
+### 12. Multiprocess/Ray Shared State Overhead
 
 **GOTCHA**: `MultiprocessSharedLimitSet` and `RaySharedLimitSet` are 10-100x slower than `InMemorySharedLimitSet`.
 
@@ -1611,7 +1768,7 @@ pool = Worker.options(
 
 **Mitigation**: Use LimitPool to reduce contention on single LimitSet.
 
-### 12. RateLimit Algorithms Have Different Refund Behavior
+### 13. RateLimit Algorithms Have Different Refund Behavior
 
 **GOTCHA**: Not all algorithms support refunding unused tokens.
 
@@ -1633,7 +1790,7 @@ with limitset.acquire(requested={"tokens": 100}) as acq:
 
 **Why**: Algorithm-specific implementation. TokenBucket/GCRA continuously refill; others don't.
 
-### 13. Timeout Only Applies to Acquisition
+### 14. Timeout Only Applies to Acquisition
 
 **GOTCHA**: `timeout` parameter only applies to `acquire()`, not to work inside context manager.
 
@@ -1646,7 +1803,7 @@ with limitset.acquire(requested={"tokens": 100}, timeout=5.0) as acq:
 
 **Why**: Timeout is for blocking on limits, not for user code execution.
 
-### 14. try_acquire Still Needs Context Manager
+### 15. try_acquire Still Needs Context Manager
 
 **GOTCHA**: Even failed `try_acquire` should use context manager (or manual check).
 

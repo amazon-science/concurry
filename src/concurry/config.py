@@ -8,10 +8,10 @@ Users can customize defaults at both levels.
 """
 
 from contextlib import contextmanager
-from typing import Any, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 from morphic import MutableTyped
-from pydantic import ConfigDict, confloat, conint
+from pydantic import ConfigDict, Field, confloat, conint
 
 from .core.constants import ExecutionMode, LoadBalancingAlgorithm, RateLimitAlgorithm
 from .core.retry import RetryAlgorithm
@@ -31,9 +31,11 @@ class GlobalDefaults(MutableTyped):
         blocking: Default blocking mode (False = return futures, True = return results)
         unwrap_futures: Default future unwrapping behavior (True = auto-unwrap)
         num_retries: Default number of retry attempts (0 = no retries)
+        retry_on: Default exception types or filters that trigger retries ([Exception] = all exceptions)
         retry_algorithm: Default retry backoff algorithm
         retry_wait: Default minimum wait time between retries in seconds
         retry_jitter: Default jitter factor (0-1) for retry backoff
+        retry_until: Default validation functions for output (None = no validation)
         stop_timeout: Default timeout for worker.stop() in seconds
         rate_limit_algorithm: Default rate limiting algorithm
         limit_pool_load_balancing: Default load balancing for LimitPool
@@ -66,9 +68,11 @@ class GlobalDefaults(MutableTyped):
 
     # Retry configuration
     num_retries: conint(ge=0) = 0
+    retry_on: List[Any] = Field(default_factory=lambda: [Exception])
     retry_algorithm: RetryAlgorithm = RetryAlgorithm.Exponential
     retry_wait: confloat(ge=0) = 1.0
     retry_jitter: confloat(ge=0, le=1) = 0.3
+    retry_until: Optional[Any] = None
 
     # Timeout configuration
     stop_timeout: confloat(ge=0) = 30.0
@@ -149,9 +153,11 @@ class ExecutionModeDefaults(MutableTyped):
         blocking: Override for blocking mode
         unwrap_futures: Override for future unwrapping behavior
         num_retries: Override for retry attempts
+        retry_on: Override for exception types or filters that trigger retries
         retry_algorithm: Override for retry backoff algorithm
         retry_wait: Override for retry wait time
         retry_jitter: Override for retry jitter factor
+        retry_until: Override for validation functions for output
         stop_timeout: Override for stop timeout
         task_decorator_on_demand: Override for on-demand worker creation for @task
     """
@@ -175,9 +181,11 @@ class ExecutionModeDefaults(MutableTyped):
 
     # Retry configuration
     num_retries: Optional[conint(ge=0)] = None
+    retry_on: Optional[List[Any]] = None
     retry_algorithm: Optional[RetryAlgorithm] = None
     retry_wait: Optional[confloat(ge=0)] = None
     retry_jitter: Optional[confloat(ge=0, le=1)] = None
+    retry_until: Optional[Any] = None
 
     # Timeout configuration
     stop_timeout: Optional[confloat(ge=0)] = None
@@ -375,6 +383,14 @@ class ResolvedDefaults:
     @property
     def retry_jitter(self) -> confloat(ge=0, le=1):
         return self._mode.retry_jitter if self._mode.retry_jitter is not None else self._global.retry_jitter
+
+    @property
+    def retry_on(self) -> List[Any]:
+        return self._mode.retry_on if self._mode.retry_on is not None else self._global.retry_on
+
+    @property
+    def retry_until(self) -> Optional[Any]:
+        return self._mode.retry_until if self._mode.retry_until is not None else self._global.retry_until
 
     @property
     def stop_timeout(self) -> confloat(ge=0):
@@ -877,7 +893,7 @@ def temp_config(**overrides):
                     f"Invalid attribute in override key: '{attr_name}'. "
                     f"Valid attributes: max_workers, max_queued_tasks, load_balancing, "
                     f"load_balancing_on_demand, on_demand, blocking, unwrap_futures, num_retries, "
-                    f"retry_algorithm, retry_wait, retry_jitter, stop_timeout, "
+                    f"retry_on, retry_algorithm, retry_wait, retry_jitter, retry_until, stop_timeout, "
                     f"rate_limit_algorithm, limit_pool_load_balancing, limit_pool_worker_index, "
                     f"task_decorator_on_demand, "
                     f"worker_command_queue_timeout, worker_result_queue_timeout, "

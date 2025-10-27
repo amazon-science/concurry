@@ -41,7 +41,7 @@ def _process_worker_main(
     init_args_bytes,
     init_kwargs_bytes,
     limits,
-    retry_config_bytes,
+    retry_configs_bytes,
     command_queue,
     result_queue,
 ):
@@ -52,14 +52,14 @@ def _process_worker_main(
         init_args_bytes: Cloudpickle-serialized positional arguments for worker initialization
         init_kwargs_bytes: Cloudpickle-serialized keyword arguments for worker initialization
         limits: LimitSet instance (or None)
-        retry_config_bytes: Cloudpickle-serialized RetryConfig instance (or None)
+        retry_configs_bytes: Cloudpickle-serialized dict of RetryConfig instances (or None)
         command_queue: Queue for receiving commands
         result_queue: Queue for sending results
     """
     worker_cls = cloudpickle.loads(worker_cls_bytes)
     init_args = cloudpickle.loads(init_args_bytes)
     init_kwargs = cloudpickle.loads(init_kwargs_bytes)
-    retry_config = cloudpickle.loads(retry_config_bytes)
+    retry_configs = cloudpickle.loads(retry_configs_bytes)
     worker = None
 
     while True:
@@ -73,7 +73,7 @@ def _process_worker_main(
             try:
                 if method_name == "__initialize__":
                     # Create wrapper class with limits and retry logic if needed
-                    actual_worker_cls = _create_worker_wrapper(worker_cls, limits, retry_config)
+                    actual_worker_cls = _create_worker_wrapper(worker_cls, limits, retry_configs)
 
                     worker = actual_worker_cls(*init_args, **init_kwargs)
                     result_queue.put((request_id, "ok", None))
@@ -88,13 +88,20 @@ def _process_worker_main(
                         raise TypeError(f"fn must be callable, got {type(fn).__name__}")
 
                     # Apply retry logic if configured (for TaskWorker functions)
-                    if retry_config is not None and retry_config.num_retries > 0:
+                    # Get retry config for "submit" method (fallback to "*")
+                    submit_retry_config = None
+                    if retry_configs is not None:
+                        submit_retry_config = retry_configs.get("submit") or retry_configs.get("*")
+
+                    if submit_retry_config is not None and submit_retry_config.num_retries > 0:
                         context = {
                             "method_name": fn.__name__ if hasattr(fn, "__name__") else "anonymous_function",
                             "worker_class_name": "TaskWorker",
                         }
                         # execute_with_retry_auto handles both sync and async functions automatically
-                        result = execute_with_retry_auto(fn, task_args, task_kwargs, retry_config, context)
+                        result = execute_with_retry_auto(
+                            fn, task_args, task_kwargs, submit_retry_config, context
+                        )
                     else:
                         result = _invoke_function(fn, *task_args, **task_kwargs)
 
@@ -231,13 +238,13 @@ class ProcessWorkerProxy(WorkerProxy):
         self._futures = {}
         self._futures_lock = threading.Lock()
 
-        # Serialize the worker class, init args/kwargs, and retry_config with cloudpickle
+        # Serialize the worker class, init args/kwargs, and retry_configs with cloudpickle
         # This allows local functions, lambdas, and other non-standard objects
         # (e.g., functions defined in Jupyter notebooks, retry filters) to be pickled correctly
         worker_cls_bytes = cloudpickle.dumps(self.worker_cls)
         init_args_bytes = cloudpickle.dumps(self.init_args)
         init_kwargs_bytes = cloudpickle.dumps(self.init_kwargs)
-        retry_config_bytes = cloudpickle.dumps(self.retry_config)
+        retry_configs_bytes = cloudpickle.dumps(self.retry_configs)
 
         # Process limits for worker
         # Limits already processed by WorkerBuilder
@@ -250,7 +257,7 @@ class ProcessWorkerProxy(WorkerProxy):
                 init_args_bytes,
                 init_kwargs_bytes,
                 self.limits,
-                retry_config_bytes,
+                retry_configs_bytes,
                 self._command_queue,
                 self._result_queue,
             ),

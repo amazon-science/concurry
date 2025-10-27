@@ -48,14 +48,396 @@ worker.stop()
 
 All retry parameters are passed to `Worker.options()`:
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `num_retries` | int | 0 | Maximum number of retry attempts after initial failure |
-| `retry_on` | type \| callable \| list | `[Exception]` | Exception types or filters that trigger retries |
-| `retry_algorithm` | str | "exponential" | Backoff strategy: "exponential", "linear", "fibonacci" |
-| `retry_wait` | float | 1.0 | Base wait time in seconds between retries |
-| `retry_jitter` | float | 0.3 | Jitter factor (0-1) for randomizing wait times |
-| `retry_until` | callable \| list | None | Validation functions for output |
+| Parameter | Type | Default Source | Description |
+|-----------|------|----------------|-------------|
+| `num_retries` | int | `global_config.defaults.num_retries` (0) | Maximum number of retry attempts after initial failure |
+| `retry_on` | type \| callable \| list | `global_config.defaults.retry_on` (`[Exception]`) | Exception types or filters that trigger retries |
+| `retry_algorithm` | str | `global_config.defaults.retry_algorithm` ("exponential") | Backoff strategy: "exponential", "linear", "fibonacci" |
+| `retry_wait` | float | `global_config.defaults.retry_wait` (1.0) | Base wait time in seconds between retries |
+| `retry_jitter` | float | `global_config.defaults.retry_jitter` (0.3) | Jitter factor (0-1) for randomizing wait times |
+| `retry_until` | callable \| list | `global_config.defaults.retry_until` (None) | Validation functions for output |
+
+**Note**: All retry parameters support per-method configuration using dictionaries. See [Per-Method Configuration](#per-method-configuration) for details.
+
+### Default Configuration
+
+All retry parameters have default values from `global_config` that can be customized:
+
+```python
+from concurry import global_config, temp_config
+
+# View current defaults
+print(global_config.defaults.num_retries)      # 0 (no retries by default)
+print(global_config.defaults.retry_on)          # [Exception] (retry all exceptions)
+print(global_config.defaults.retry_algorithm)   # RetryAlgorithm.Exponential
+print(global_config.defaults.retry_wait)        # 1.0 (seconds)
+print(global_config.defaults.retry_jitter)      # 0.3 (30% jitter)
+print(global_config.defaults.retry_until)       # None (no output validation)
+
+# Customize defaults globally
+with temp_config(
+    global_num_retries=3,
+    global_retry_on=[ConnectionError, TimeoutError],
+    global_retry_wait=2.0
+):
+    # All workers created in this context use these defaults
+    worker = APIWorker.options(mode="thread").init()
+    # Uses num_retries=3, retry_on=[ConnectionError, TimeoutError], retry_wait=2.0
+
+# Customize per execution mode
+with temp_config(
+    thread_num_retries=5,
+    ray_num_retries=10,
+    thread_retry_on=[HTTPError]
+):
+    thread_worker = APIWorker.options(mode="thread").init()  # 5 retries, [HTTPError]
+    ray_worker = APIWorker.options(mode="ray").init()        # 10 retries, [Exception] (global)
+```
+
+**Key Points**:
+- All retry parameters can be overridden per worker via `Worker.options()`
+- Use `temp_config()` to temporarily change defaults for multiple workers
+- Mode-specific overrides take precedence over global defaults
+
+## Per-Method Configuration
+
+Configure different retry settings for different worker methods using dictionaries.
+
+### Basic Usage
+
+Use a dictionary to specify different retry parameters for different methods:
+
+```python
+class APIWorker(Worker):
+    def __init__(self, endpoint: str):
+        self.endpoint = endpoint
+    
+    def health_check(self) -> bool:
+        """Fast health check, no retry needed."""
+        return requests.get(f"{self.endpoint}/health").ok
+    
+    def fetch_data(self, id: int) -> dict:
+        """Moderate priority, retry a few times."""
+        response = requests.get(f"{self.endpoint}/data/{id}")
+        return response.json()
+    
+    def critical_operation(self, data: dict) -> bool:
+        """Critical operation, retry aggressively."""
+        response = requests.post(f"{self.endpoint}/process", json=data)
+        return response.ok
+
+# Configure different retries per method
+worker = APIWorker.options(
+    mode="thread",
+    num_retries={
+        "*": 0,                    # Default: no retries
+        "fetch_data": 3,           # Retry fetch_data 3 times
+        "critical_operation": 10   # Retry critical_operation 10 times
+    }
+).init(endpoint="https://api.example.com")
+
+# health_check: No retries (uses default "*": 0)
+# fetch_data: 3 retries
+# critical_operation: 10 retries
+```
+
+### Dictionary Format
+
+**Required**: All per-method dictionaries must include a `"*"` key for the default value:
+
+```python
+{
+    "*": default_value,           # Required: default for unlisted methods
+    "method_name1": value1,       # Optional: override for method_name1
+    "method_name2": value2,       # Optional: override for method_name2
+}
+```
+
+**All retry parameters support per-method configuration**:
+
+```python
+worker = MyWorker.options(
+    mode="thread",
+    num_retries={"*": 0, "critical": 5},              # Per-method
+    retry_wait={"*": 1.0, "critical": 2.0},            # Per-method
+    retry_algorithm={"*": "linear", "critical": "exponential"},  # Per-method
+    retry_on={"*": [Exception], "critical": [ConnectionError]},  # Per-method
+    retry_until={"*": None, "critical": my_validator}  # Per-method
+).init()
+```
+
+### Mixed Configuration
+
+Mix single values and dictionaries - single values apply to all methods:
+
+```python
+worker = APIWorker.options(
+    mode="thread",
+    num_retries={"*": 0, "fetch": 3, "critical": 10},  # Per-method
+    retry_wait=2.0,                                     # Single value: all methods
+    retry_algorithm="exponential"                       # Single value: all methods
+).init()
+
+# Result:
+# - fetch: 3 retries, 2.0s wait, exponential
+# - critical: 10 retries, 2.0s wait, exponential
+# - others: 0 retries
+```
+
+### Partial Dictionaries
+
+Specify only the methods you want to override:
+
+```python
+worker = DataWorker.options(
+    mode="thread",
+    num_retries={
+        "*": 3,           # Default: 3 retries
+        "fast_method": 0  # Override: no retries for fast_method
+    }
+).init()
+
+# fast_method: 0 retries
+# all_other_methods: 3 retries (default)
+```
+
+### LLM/API Worker Example
+
+Common pattern for LLM workers with validation:
+
+```python
+from concurry import Worker, RetryAlgorithm
+
+class LLMWorker(Worker):
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+    
+    def generate_text(self, prompt: str) -> str:
+        """Generate simple text response."""
+        return self.llm_api.generate(prompt)
+    
+    def generate_json(self, prompt: str) -> dict:
+        """Generate structured JSON (needs validation)."""
+        response = self.llm_api.generate(prompt)
+        return json.loads(response)
+    
+    def generate_code(self, spec: str) -> str:
+        """Generate code (highly unreliable)."""
+        return self.llm_api.generate_code(spec)
+
+def is_valid_json(result, **ctx):
+    """Validate JSON has required structure."""
+    return isinstance(result, dict) and "data" in result
+
+def is_valid_code(result, **ctx):
+    """Validate code compiles."""
+    try:
+        compile(result, '<string>', 'exec')
+        return True
+    except SyntaxError:
+        return False
+
+worker = LLMWorker.options(
+    mode="thread",
+    num_retries={
+        "*": 0,              # Default: no retries
+        "generate_text": 3,  # Moderate retries for text
+        "generate_json": 10, # Aggressive retries for JSON
+        "generate_code": 15  # Very aggressive for code
+    },
+    retry_wait={
+        "*": 1.0,
+        "generate_code": 3.0  # Longer wait for code generation
+    },
+    retry_algorithm={
+        "*": RetryAlgorithm.Linear,
+        "generate_json": RetryAlgorithm.Exponential,
+        "generate_code": RetryAlgorithm.Exponential
+    },
+    retry_on={
+        "*": [Exception],
+        "generate_json": [json.JSONDecodeError, requests.RequestException]
+    },
+    retry_until={
+        "*": None,
+        "generate_json": is_valid_json,
+        "generate_code": is_valid_code
+    }
+).init(api_key="your-api-key")
+
+# generate_text: 3 retries, linear, 1s wait
+# generate_json: 10 retries, exponential, 1s wait, validates JSON structure
+# generate_code: 15 retries, exponential, 3s wait, validates code syntax
+```
+
+### Disabling Retries for Specific Methods
+
+Disable retries for fast methods while keeping them for others:
+
+```python
+worker = DatabaseWorker.options(
+    mode="thread",
+    num_retries={
+        "*": 5,             # Default: 5 retries for all methods
+        "ping": 0,          # No retries for ping (fast check)
+        "get_cache": 0      # No retries for cache lookup (fast)
+    }
+).init()
+
+# Most database operations: 5 retries
+# ping and get_cache: no retries, fail fast
+```
+
+### With Worker Pools
+
+Per-method configuration applies to all workers in a pool:
+
+```python
+# Each worker in the pool has the same per-method config
+pool = APIWorker.options(
+    mode="thread",
+    max_workers=10,
+    num_retries={
+        "*": 0,
+        "fetch_data": 3,
+        "critical_operation": 10
+    }
+).init()
+
+# All 10 workers:
+# - fetch_data: 3 retries
+# - critical_operation: 10 retries
+# - others: no retries
+```
+
+### With TaskWorker
+
+Configure retry for `TaskWorker.submit()` using the special `"submit"` method name:
+
+```python
+def flaky_function(x):
+    if random.random() < 0.5:
+        raise ConnectionError("Transient error")
+    return x * 2
+
+worker = TaskWorker.options(
+    mode="process",
+    num_retries={
+        "*": 5,
+        "submit": 3  # Configure retry for submit() method
+    },
+    retry_on={
+        "*": [Exception],
+        "submit": [ConnectionError, TimeoutError]
+    }
+).init()
+
+# Submitted functions will retry up to 3 times on network errors
+future = worker.submit(flaky_function, 10)
+result = future.result()
+```
+
+### Error Handling
+
+**Missing Default Key**:
+
+```python
+# ERROR: Dictionary must include "*" key
+worker = MyWorker.options(
+    num_retries={"method_a": 5}  # Missing "*"
+).init()
+# ValueError: num_retries dict must include '*' key for default value
+```
+
+**Unknown Method Names**:
+
+```python
+# ERROR: Method doesn't exist on worker
+worker = MyWorker.options(
+    num_retries={"*": 0, "nonexistent_method": 5}
+).init()
+# ValueError: num_retries dict contains unknown method names: ['nonexistent_method']
+```
+
+### Best Practices
+
+**1. Use "*" Default Wisely**
+
+```python
+# ✅ Good: Conservative default, aggressive for critical methods
+worker = MyWorker.options(
+    num_retries={"*": 0, "critical_method": 10}
+).init()
+
+# ❌ Bad: Aggressive default, defeats the purpose
+worker = MyWorker.options(
+    num_retries={"*": 10, "fast_method": 0}  # Most methods get 10 retries
+).init()
+```
+
+**2. Combine with Output Validation**
+
+```python
+# ✅ Good: Per-method retry + per-method validation
+worker = LLMWorker.options(
+    num_retries={"*": 0, "generate_json": 10},
+    retry_until={"*": None, "generate_json": is_valid_json}
+).init()
+```
+
+**3. Match Retry Strategy to Method Criticality**
+
+```python
+worker = APIWorker.options(
+    num_retries={
+        "*": 0,              # Default: no retries
+        "health_check": 0,   # Fast checks: no retry
+        "get_data": 3,       # Read operations: moderate retry
+        "post_data": 7,      # Write operations: aggressive retry
+        "critical_op": 15    # Critical operations: very aggressive
+    },
+    retry_algorithm={
+        "*": RetryAlgorithm.Linear,
+        "critical_op": RetryAlgorithm.Exponential  # More aggressive for critical
+    }
+).init()
+```
+
+**4. Test Each Method's Retry Behavior**
+
+```python
+import pytest
+
+def test_per_method_retries():
+    worker = MyWorker.options(
+        mode="sync",
+        num_retries={"*": 0, "critical": 3}
+    ).init()
+    
+    # fast_method should fail immediately (no retries)
+    with pytest.raises(ValueError):
+        worker.fast_method().result()
+    
+    # critical should retry 3 times
+    result = worker.critical().result()
+    assert result is not None
+```
+
+### Performance Considerations
+
+**Zero Overhead**:
+- Single-value configs (backward compatible): No overhead
+- Per-method configs: O(1) dict lookup per method call (~1 microsecond)
+
+**Memory**:
+- One `RetryConfig` instance per method with retries
+- Methods with `num_retries=0` have no config instance
+- Typical overhead: 2-10 KB per worker
+
+**Recommendations**:
+- Use per-method config when methods have significantly different requirements
+- Use single-value config for uniform retry behavior (simpler, no overhead)
+- Don't over-configure - most workers only need 2-3 different retry profiles
 
 ## Retry Algorithms
 

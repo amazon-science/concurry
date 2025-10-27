@@ -2246,6 +2246,46 @@ result = worker.fetch_data(123).result()
 worker.stop()
 ```
 
+### Default Values and Configuration
+
+All retry parameters have default values from `global_config` that can be customized globally:
+
+```python
+from concurry import global_config, temp_config
+
+# View current defaults
+print(global_config.defaults.num_retries)      # 0 (no retries by default)
+print(global_config.defaults.retry_on)          # [Exception] (retry all exceptions)
+print(global_config.defaults.retry_algorithm)   # RetryAlgorithm.Exponential
+print(global_config.defaults.retry_wait)        # 1.0 (seconds)
+print(global_config.defaults.retry_jitter)      # 0.3 (30% jitter)
+print(global_config.defaults.retry_until)       # None (no output validation)
+
+# Customize defaults globally
+with temp_config(
+    global_num_retries=3,
+    global_retry_on=[ConnectionError, TimeoutError],
+    global_retry_algorithm="linear"
+):
+    # All workers created in this context use these defaults
+    worker = APIWorker.options(mode="thread").init()
+    # Uses num_retries=3, retry_on=[ConnectionError, TimeoutError], linear algorithm
+
+# Customize per execution mode
+with temp_config(
+    thread_num_retries=5,
+    ray_num_retries=10
+):
+    thread_worker = APIWorker.options(mode="thread").init()  # 5 retries
+    ray_worker = APIWorker.options(mode="ray").init()        # 10 retries
+```
+
+**Key Points**:
+- `retry_on` defaults to `[Exception]` (retry on all exceptions when `num_retries > 0`)
+- `retry_until` defaults to `None` (no output validation)
+- All retry parameters can be overridden per worker via `Worker.options()`
+- Use `temp_config()` to temporarily change defaults for multiple workers
+
 ### Exception Filtering
 
 Retry only on specific exceptions:

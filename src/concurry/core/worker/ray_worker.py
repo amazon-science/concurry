@@ -216,10 +216,10 @@ class RayWorkerProxy(WorkerProxy):
             raise RuntimeError("Ray is not initialized. Call ray.init() before creating Ray workers.")
 
         # Create worker wrapper with limits and retry logic if needed
-        # (limits and retry_config already processed by WorkerBuilder)
+        # (limits and retry_configs already processed by WorkerBuilder)
         # Use for_ray=True to pre-wrap methods (Ray bypasses __getattribute__)
         worker_cls_to_use = _create_worker_wrapper(
-            self.worker_cls, self.limits, self.retry_config, for_ray=True
+            self.worker_cls, self.limits, self.retry_configs, for_ray=True
         )
 
         # Create the Ray actor. Use actor_options if provided, otherwise use defaults.
@@ -288,13 +288,18 @@ class RayWorkerProxy(WorkerProxy):
         import ray
 
         # Apply retry logic if configured (for TaskWorker functions)
-        if self.retry_config is not None and self.retry_config.num_retries > 0:
+        # Get retry config for "submit" method (fallback to "*")
+        submit_retry_config = None
+        if self.retry_configs is not None:
+            submit_retry_config = self.retry_configs.get("submit") or self.retry_configs.get("*")
+
+        if submit_retry_config is not None and submit_retry_config.num_retries > 0:
             # Wrap the function with retry logic before making it remote
             # Important: Serialize retry_config to avoid Pydantic pickling issues with Ray
             import cloudpickle
 
             original_fn = fn
-            retry_config_bytes = cloudpickle.dumps(self.retry_config)
+            retry_config_bytes = cloudpickle.dumps(submit_retry_config)
 
             # Create a wrapper that deserializes config and uses execute_with_retry_auto
             def ray_retry_wrapper(*inner_args, **inner_kwargs):

@@ -82,8 +82,8 @@ class SyncWorkerProxy(WorkerProxy):
         super().post_initialize()
 
         # Create worker wrapper with limits and retry logic if needed
-        # (limits and retry_config already processed by WorkerBuilder)
-        worker_cls = _create_worker_wrapper(self.worker_cls, self.limits, self.retry_config)
+        # (limits and retry_configs already processed by WorkerBuilder)
+        worker_cls = _create_worker_wrapper(self.worker_cls, self.limits, self.retry_configs)
 
         # Create the worker instance directly
         self._worker = worker_cls(*self.init_args, **self.init_kwargs)
@@ -187,13 +187,18 @@ class SyncWorkerProxy(WorkerProxy):
         # Execute the function and wrap any execution errors in the future
         try:
             # Apply retry logic if configured (for TaskWorker functions)
-            if self.retry_config is not None and self.retry_config.num_retries > 0:
+            # Get retry config for "submit" method (fallback to "*")
+            submit_retry_config = None
+            if self.retry_configs is not None:
+                submit_retry_config = self.retry_configs.get("submit") or self.retry_configs.get("*")
+
+            if submit_retry_config is not None and submit_retry_config.num_retries > 0:
                 context = {
                     "method_name": fn.__name__ if hasattr(fn, "__name__") else "anonymous_function",
                     "worker_class_name": "TaskWorker",
                 }
                 # execute_with_retry_auto handles both sync and async functions automatically
-                result = execute_with_retry_auto(fn, args, kwargs, self.retry_config, context)
+                result = execute_with_retry_auto(fn, args, kwargs, submit_retry_config, context)
             else:
                 result = _invoke_function(fn, *args, **kwargs)
             return SyncFuture(result_value=result)

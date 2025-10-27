@@ -365,6 +365,111 @@ def _is_infrastructure_method(
     return False
 
 
+def _get_user_defined_methods(worker_cls: Type) -> list[str]:
+    """Get list of user-defined method names on a worker class.
+
+    Filters out:
+    - Private/dunder methods (startswith("_"))
+    - Infrastructure methods from Typed/BaseModel
+    - Inherited methods (not in worker_cls.__dict__)
+    - Non-callable attributes
+    - Type objects
+
+    Args:
+        worker_cls: The worker class to inspect
+
+    Returns:
+        List of user-defined method names
+    """
+    method_names = []
+
+    for attr_name in dir(worker_cls):
+        # Skip private/dunder methods
+        if attr_name.startswith("_"):
+            continue
+
+        # Skip infrastructure methods
+        if _is_infrastructure_method(attr_name):
+            continue
+
+        # Only methods defined directly on worker class
+        if attr_name not in worker_cls.__dict__:
+            continue
+
+        try:
+            attr = getattr(worker_cls, attr_name)
+
+            # Only callable methods
+            if not callable(attr):
+                continue
+
+            # Skip type objects
+            if isinstance(attr, type):
+                continue
+
+            method_names.append(attr_name)
+        except (AttributeError, TypeError):
+            continue
+
+    return method_names
+
+
+def _normalize_retry_param(
+    param_value: Union[T, dict[str, T]],
+    param_name: str,
+    method_names: list[str],
+) -> dict[str, T]:
+    """Normalize retry parameter to dict format.
+
+    Converts:
+    - Single value → {"*": value, "method1": value, "method2": value, ...}
+    - Dict with "*" → Expand "*" to all methods not explicitly listed
+
+    Args:
+        param_value: Single value or dict of method_name → value
+        param_name: Name of parameter (for error messages)
+        method_names: List of all user-defined method names
+
+    Returns:
+        Dict mapping each method name to its value (always includes "*")
+
+    Raises:
+        ValueError: If dict missing "*" key or contains invalid method names
+    """
+    # Single value: expand to all methods
+    if not isinstance(param_value, dict):
+        result = {"*": param_value}
+        for method_name in method_names:
+            result[method_name] = param_value
+        return result
+
+    # Dict: validate and expand
+    if "*" not in param_value:
+        raise ValueError(
+            f"{param_name} dict must include '*' key for default value. Got keys: {list(param_value.keys())}"
+        )
+
+    # Validate all method names exist
+    default_value = param_value["*"]
+    invalid_methods = []
+    for method_name in param_value.keys():
+        if method_name != "*" and method_name not in method_names:
+            invalid_methods.append(method_name)
+
+    if len(invalid_methods) > 0:
+        raise ValueError(
+            f"{param_name} dict contains unknown method names: {invalid_methods}. "
+            f"Valid methods: {method_names}"
+        )
+
+    # Build result: all methods get default, then override from dict
+    result = {"*": default_value}
+    for method_name in method_names:
+        result[method_name] = param_value.get(method_name, default_value)
+
+    return result
+
+
 def _create_composition_wrapper(worker_cls: Type) -> Type:
     """Create a composition wrapper for BaseModel/Typed workers.
 
@@ -541,13 +646,16 @@ def _create_composition_wrapper(worker_cls: Type) -> Type:
 
 
 def _create_worker_wrapper(
-    worker_cls: Type, limits: Any, retry_config: Optional[Any] = None, for_ray: bool = False
+    worker_cls: Type,
+    limits: Any,
+    retry_configs: Optional[dict[str, Optional[RetryConfig]]] = None,
+    for_ray: bool = False,
 ) -> Type:
     """Create a wrapper class that injects limits and retry logic.
 
     This wrapper dynamically inherits from the user's worker class and:
     1. Sets self.limits in __init__ (if limits provided)
-    2. Wraps all public methods with retry logic (if retry_config provided and num_retries > 0)
+    2. Wraps all public methods with retry logic (if retry_configs provided and num_retries > 0)
     3. Handles both sync and async methods automatically
 
     The wrapper uses `object.__setattr__` to set attributes to support
@@ -563,7 +671,7 @@ def _create_worker_wrapper(
     Args:
         worker_cls: The original worker class
         limits: LimitSet instance OR list of Limit objects (optional)
-        retry_config: RetryConfig instance (optional, defaults to None)
+        retry_configs: Dict[str, RetryConfig] for per-method retry configs (optional, defaults to None)
         for_ray: If True, pre-wrap methods on the class (Ray actors need this)
 
     Returns:
@@ -578,14 +686,14 @@ def _create_worker_wrapper(
 
         # With limits and retries:
         from concurry import RetryConfig
-        config = RetryConfig(num_retries=3, retry_algorithm="exponential")
-        wrapper_cls = _create_worker_wrapper(MyWorker, limit_set, config)
+        configs = {"*": RetryConfig(num_retries=3, retry_algorithm="exponential")}
+        wrapper_cls = _create_worker_wrapper(MyWorker, limit_set, configs)
         worker = wrapper_cls(*args, **kwargs)
         # worker.limits is accessible
         # worker methods automatically retry on failure
 
         # With retries only (no limits):
-        wrapper_cls = _create_worker_wrapper(MyWorker, None, config)
+        wrapper_cls = _create_worker_wrapper(MyWorker, None, configs)
         worker = wrapper_cls(*args, **kwargs)
         # worker methods automatically retry on failure
         ```
@@ -595,7 +703,9 @@ def _create_worker_wrapper(
     # Determine if we need to apply any wrapping
     # Note: limits is now always provided (may be empty list or empty LimitSet)
     has_limits = limits is not None
-    has_retry = retry_config is not None and retry_config.num_retries > 0
+    has_retry = retry_configs is not None and any(
+        cfg is not None and cfg.num_retries > 0 for cfg in retry_configs.values()
+    )
 
     # If no retry, we still need to wrap to set limits attribute
     # (limits is always provided now, even if empty)
@@ -687,10 +797,22 @@ def _create_worker_wrapper(
                 if hasattr(attr, "__wrapped_with_retry__"):
                     return attr
 
+                # Get retry config for this method
+                # If method explicitly configured (even if None for 0 retries), use that
+                # Otherwise fall back to "*" default
+                if name in retry_configs:
+                    method_config = retry_configs[name]
+                else:
+                    method_config = retry_configs.get("*")
+
+                # Skip wrapping if no config or num_retries=0
+                if method_config is None or method_config.num_retries == 0:
+                    return attr
+
                 # Wrap the method with retry logic
                 wrapped = create_retry_wrapper(
                     attr,
-                    retry_config,
+                    method_config,
                     method_name=name,
                     worker_class_name=worker_cls.__name__,
                 )
@@ -738,8 +860,20 @@ def _create_worker_wrapper(
                 if not (inspect.isfunction(attr) or inspect.ismethod(attr)):
                     continue
 
+                # Get retry config for this method
+                # If method explicitly configured (even if None for 0 retries), use that
+                # Otherwise fall back to "*" default
+                if attr_name in retry_configs:
+                    method_config = retry_configs[attr_name]
+                else:
+                    method_config = retry_configs.get("*")
+
+                # Skip wrapping if no config or num_retries=0
+                if method_config is None or method_config.num_retries == 0:
+                    continue
+
                 # Create a wrapper method that applies retry logic
-                def make_wrapped_method(original_method, method_name):
+                def make_wrapped_method(original_method, method_name, method_retry_config):
                     # Check if it's async
                     is_async = inspect.iscoroutinefunction(original_method)
 
@@ -753,7 +887,7 @@ def _create_worker_wrapper(
                             # Bind self to the original method
                             bound_method = original_method.__get__(self, type(self))
                             return await execute_with_retry_async(
-                                bound_method, args, kwargs, retry_config, context
+                                bound_method, args, kwargs, method_retry_config, context
                             )
 
                         async_method_wrapper.__wrapped_with_retry__ = True
@@ -767,12 +901,14 @@ def _create_worker_wrapper(
                             }
                             # Bind self to the original method
                             bound_method = original_method.__get__(self, type(self))
-                            return execute_with_retry(bound_method, args, kwargs, retry_config, context)
+                            return execute_with_retry(
+                                bound_method, args, kwargs, method_retry_config, context
+                            )
 
                         sync_method_wrapper.__wrapped_with_retry__ = True
                         return sync_method_wrapper
 
-                wrapped = make_wrapped_method(attr, attr_name)
+                wrapped = make_wrapped_method(attr, attr_name, method_config)
                 setattr(WorkerWithLimitsAndRetry, attr_name, wrapped)
             except (AttributeError, TypeError):
                 # Skip attributes that can't be wrapped
@@ -885,13 +1021,13 @@ class WorkerBuilder(Typed):
     on_demand: bool
     max_queued_tasks: Optional[conint(ge=0)]
 
-    # Retry parameters
-    num_retries: conint(ge=0)
-    retry_on: Any  # List of exception types or callables, default [Exception]
-    retry_algorithm: RetryAlgorithm
-    retry_wait: confloat(ge=0)
-    retry_jitter: confloat(ge=0, le=1)
-    retry_until: Optional[Any]  # Truly optional, default None
+    # Retry parameters (can be single values or dicts mapping method names to values)
+    num_retries: Union[conint(ge=0), dict[str, Union[conint(ge=0), None]]]
+    retry_on: Union[Any, dict[str, Any]]  # List of exception types or callables, default [Exception]
+    retry_algorithm: Union[RetryAlgorithm, dict[str, Union[RetryAlgorithm, None]]]
+    retry_wait: Union[confloat(ge=0), dict[str, Union[confloat(ge=0), None]]]
+    retry_jitter: Union[confloat(ge=0, le=1), dict[str, Union[confloat(ge=0, le=1), None]]]
+    retry_until: Optional[Union[Any, dict[str, Any]]]  # Truly optional, default None
 
     # Worker-level configuration
     unwrap_futures: bool
@@ -948,26 +1084,85 @@ class WorkerBuilder(Typed):
                 # This is valid for Thread, Process, and Ray
                 pass
 
-    def _create_retry_config(self) -> Optional[Any]:
-        """Create RetryConfig from retry parameters.
+    def _create_retry_configs(self) -> Optional[dict[str, Optional[RetryConfig]]]:
+        """Create per-method RetryConfig objects from retry parameters.
 
         Returns:
-            RetryConfig instance if num_retries > 0, else None
+            Dict mapping method names to RetryConfig instances (or None for num_retries=0),
+            or None if all num_retries=0.
+            Always includes "*" key for default config.
         """
-
-        # Fast path: if num_retries is 0, don't create config
-        if self.num_retries == 0:
+        # Fast path: if num_retries is 0 (single value), no retry
+        if not isinstance(self.num_retries, dict) and self.num_retries == 0:
             return None
 
-        # Create RetryConfig
-        return RetryConfig(
-            num_retries=self.num_retries,
-            retry_on=self.retry_on if self.retry_on is not None else [Exception],
-            retry_algorithm=RetryAlgorithm(self.retry_algorithm),
-            retry_wait=self.retry_wait,
-            retry_jitter=self.retry_jitter,
-            retry_until=self.retry_until,
-        )
+        # Check if dict with all zeros
+        if isinstance(self.num_retries, dict):
+            if all(v == 0 for v in self.num_retries.values()):
+                return None
+
+        # Build per-method configs
+        result = {}
+
+        # Determine method names
+        if isinstance(self.num_retries, dict):
+            method_names = list(self.num_retries.keys())
+        else:
+            # Single value - just create default config
+            method_names = ["*"]
+
+        for method_name in method_names:
+            # Extract values for this method
+            if isinstance(self.num_retries, dict):
+                num_retries = self.num_retries[method_name]
+                retry_on = self.retry_on[method_name] if isinstance(self.retry_on, dict) else self.retry_on
+                retry_algorithm = (
+                    self.retry_algorithm[method_name]
+                    if isinstance(self.retry_algorithm, dict)
+                    else self.retry_algorithm
+                )
+                retry_wait = (
+                    self.retry_wait[method_name] if isinstance(self.retry_wait, dict) else self.retry_wait
+                )
+                retry_jitter = (
+                    self.retry_jitter[method_name]
+                    if isinstance(self.retry_jitter, dict)
+                    else self.retry_jitter
+                )
+                retry_until = (
+                    self.retry_until[method_name]
+                    if isinstance(self.retry_until, dict) and self.retry_until is not None
+                    else self.retry_until
+                )
+            else:
+                # All single values
+                num_retries = self.num_retries
+                retry_on = self.retry_on
+                retry_algorithm = self.retry_algorithm
+                retry_wait = self.retry_wait
+                retry_jitter = self.retry_jitter
+                retry_until = self.retry_until
+
+            # Skip if num_retries is 0 for this method
+            if num_retries == 0:
+                result[method_name] = None
+                continue
+
+            # Create RetryConfig for this method
+            result[method_name] = RetryConfig(
+                num_retries=num_retries,
+                retry_on=retry_on if retry_on is not None else [Exception],
+                retry_algorithm=RetryAlgorithm(retry_algorithm),
+                retry_wait=retry_wait,
+                retry_jitter=retry_jitter,
+                retry_until=retry_until,
+            )
+
+        # If all configs are None, return None
+        if all(v is None for v in result.values()):
+            return None
+
+        return result
 
     def _should_create_pool(self) -> bool:
         """Determine if a pool should be created.
@@ -1102,8 +1297,8 @@ class WorkerBuilder(Typed):
             worker_index=0,  # Single workers use index 0
         )
 
-        # Create retry config (always pass it, even if None)
-        retry_config = self._create_retry_config()
+        # Create retry configs (always pass it, even if None)
+        retry_configs = self._create_retry_configs()
 
         # Get mode defaults for worker timeouts (from global config)
         mode_defaults = local_config.get_defaults(execution_mode)
@@ -1117,7 +1312,7 @@ class WorkerBuilder(Typed):
             "max_queued_tasks": self.max_queued_tasks,
             "unwrap_futures": self.unwrap_futures,
             "limits": limits,
-            "retry_config": retry_config,
+            "retry_configs": retry_configs,
         }
 
         # Add mode-specific timeout fields
@@ -1180,8 +1375,8 @@ class WorkerBuilder(Typed):
             worker_index=0,  # Placeholder, actual indices assigned per worker
         )
 
-        # Create retry config (always pass it, even if None)
-        retry_config = self._create_retry_config()
+        # Create retry configs (always pass it, even if None)
+        retry_configs = self._create_retry_configs()
 
         # Select appropriate pool class
         if execution_mode in (ExecutionMode.Sync, ExecutionMode.Asyncio, ExecutionMode.Threads):
@@ -1225,7 +1420,7 @@ class WorkerBuilder(Typed):
             "max_queued_tasks": self.max_queued_tasks,
             "unwrap_futures": self.unwrap_futures,
             "limits": limits,
-            "retry_config": retry_config,
+            "retry_configs": retry_configs,
             "init_args": args,
             "init_kwargs": kwargs,
             "on_demand_cleanup_timeout": mode_defaults.pool_on_demand_cleanup_timeout,
@@ -1728,17 +1923,17 @@ class Worker:
         *,
         mode: ExecutionMode,
         blocking: Union[bool, _NO_ARG_TYPE] = _NO_ARG,
-        max_workers: Union[conint(ge=0), None, _NO_ARG_TYPE] = _NO_ARG,
+        max_workers: Optional[Union[conint(ge=0), _NO_ARG_TYPE]] = _NO_ARG,
         load_balancing: Union[LoadBalancingAlgorithm, _NO_ARG_TYPE] = _NO_ARG,
         on_demand: Union[bool, _NO_ARG_TYPE] = _NO_ARG,
-        max_queued_tasks: Union[conint(ge=0), None, _NO_ARG_TYPE] = _NO_ARG,
+        max_queued_tasks: Optional[Union[conint(ge=0), _NO_ARG_TYPE]] = _NO_ARG,
         # Retry parameters
-        num_retries: Union[conint(ge=0), _NO_ARG_TYPE] = _NO_ARG,
-        retry_on: Optional[Any] = None,
-        retry_algorithm: Union[RetryAlgorithm, _NO_ARG_TYPE] = _NO_ARG,
-        retry_wait: Union[confloat(ge=0), _NO_ARG_TYPE] = _NO_ARG,
-        retry_jitter: Union[confloat(ge=0, le=1), _NO_ARG_TYPE] = _NO_ARG,
-        retry_until: Optional[Any] = None,
+        num_retries: Union[conint(ge=0), dict[str, conint(ge=0)], _NO_ARG_TYPE] = _NO_ARG,
+        retry_on: Union[Any, dict[str, Any], _NO_ARG_TYPE] = _NO_ARG,
+        retry_algorithm: Union[RetryAlgorithm, dict[str, RetryAlgorithm], _NO_ARG_TYPE] = _NO_ARG,
+        retry_wait: Union[confloat(ge=0), dict[str, confloat(ge=0)], _NO_ARG_TYPE] = _NO_ARG,
+        retry_jitter: Union[confloat(ge=0, le=1), dict[str, confloat(ge=0, le=1)], _NO_ARG_TYPE] = _NO_ARG,
+        retry_until: Union[Any, dict[str, Any], _NO_ARG_TYPE] = _NO_ARG,
         **kwargs: Any,
     ) -> WorkerBuilder:
         """Configure worker execution options.
@@ -1805,7 +2000,7 @@ class Worker:
                 - List of exceptions: retry_on=[ValueError, ConnectionError]
                 - Callable filter: retry_on=lambda exception, **ctx: "retry" in str(exception)
                 - Mixed list: retry_on=[ValueError, custom_filter]
-                Default: [Exception] (retry on all exceptions when num_retries > 0)
+                Default value determined by global_config.<mode>.retry_on
             retry_algorithm: Backoff strategy for wait times
                 Default value determined by global_config.<mode>.retry_algorithm
             retry_wait: Minimum wait time between retries in seconds
@@ -1821,6 +2016,7 @@ class Worker:
                 Validators receive result and context as kwargs. Return True for valid output.
                 If validation fails, triggers retry even without exception.
                 Useful for LLM output validation (JSON schema, XML format, etc.)
+                Default value determined by global_config.<mode>.retry_until
             **kwargs: Additional options passed to the worker implementation
                 - For ray: num_cpus, num_gpus, resources, etc.
                 - For process: mp_context (fork, spawn, forkserver)
@@ -1940,6 +2136,60 @@ class Worker:
                     ]
                 ).init()
                 ```
+
+            Per-Method Retry Configuration:
+                All retry parameters support per-method configuration using dictionaries.
+                This allows different retry settings for different worker methods.
+
+                ```python
+                # Different retry settings per method
+                worker = APIWorker.options(
+                    mode="thread",
+                    num_retries={
+                        "*": 0,              # Default: no retries
+                        "fetch_data": 3,     # Moderate retries for fetch
+                        "critical_op": 10    # Aggressive retries for critical
+                    },
+                    retry_wait={
+                        "*": 1.0,
+                        "critical_op": 3.0   # Longer wait for critical
+                    },
+                    retry_algorithm={
+                        "*": RetryAlgorithm.Linear,
+                        "critical_op": RetryAlgorithm.Exponential
+                    }
+                ).init()
+
+                # Dictionary format requires "*" key for default
+                # Keys are method names, values are the parameter values
+                # Methods not explicitly listed use the "*" default value
+
+                # Mix single values and dicts
+                worker = APIWorker.options(
+                    mode="thread",
+                    num_retries={"*": 0, "critical": 10},  # Per-method
+                    retry_wait=2.0,                         # Single: all methods
+                    retry_algorithm="exponential"           # Single: all methods
+                ).init()
+
+                # LLM worker with per-method validation
+                worker = LLMWorker.options(
+                    mode="thread",
+                    num_retries={"*": 0, "generate_json": 10, "generate_code": 15},
+                    retry_until={
+                        "*": None,
+                        "generate_json": lambda result, **ctx: isinstance(result, dict),
+                        "generate_code": lambda result, **ctx: is_valid_syntax(result)
+                    }
+                ).init()
+
+                # TaskWorker: use "submit" as method name
+                worker = TaskWorker.options(
+                    mode="process",
+                    num_retries={"*": 5, "submit": 3},
+                    retry_on={"*": [Exception], "submit": [ConnectionError]}
+                ).init()
+                ```
         """
         # Import here to avoid circular imports
         from ...config import global_config
@@ -1978,6 +2228,12 @@ class Worker:
         if retry_jitter is _NO_ARG:
             retry_jitter = mode_defaults.retry_jitter
 
+        if retry_on is _NO_ARG:
+            retry_on = mode_defaults.retry_on
+
+        if retry_until is _NO_ARG:
+            retry_until = mode_defaults.retry_until
+
         # Extract unwrap_futures from kwargs (with default)
         unwrap_futures = kwargs.pop("unwrap_futures", mode_defaults.unwrap_futures)
 
@@ -1989,9 +2245,35 @@ class Worker:
         # For Process: mp_context (fork, spawn, forkserver)
         mode_options = kwargs  # Pass through all remaining kwargs
 
-        # Apply default for retry_on if None (default is [Exception])
-        if retry_on is None:
-            retry_on = [Exception]
+        # Get user-defined methods for validation (if needed)
+        # Only compute if any retry param is a dict
+        needs_normalization = (
+            isinstance(num_retries, dict)
+            or isinstance(retry_on, dict)
+            or isinstance(retry_algorithm, dict)
+            or isinstance(retry_wait, dict)
+            or isinstance(retry_jitter, dict)
+            or isinstance(retry_until, dict)
+        )
+
+        if needs_normalization:
+            # Get method names for normalization
+            method_names = _get_user_defined_methods(cls)
+
+            # Add "submit" for TaskWorker
+            from .task_worker import TaskWorker
+
+            if cls is TaskWorker or (isinstance(cls, type) and issubclass(cls, TaskWorker)):
+                if "submit" not in method_names:
+                    method_names.append("submit")
+
+            # Normalize each parameter
+            num_retries = _normalize_retry_param(num_retries, "num_retries", method_names)
+            retry_on = _normalize_retry_param(retry_on, "retry_on", method_names)
+            retry_algorithm = _normalize_retry_param(retry_algorithm, "retry_algorithm", method_names)
+            retry_wait = _normalize_retry_param(retry_wait, "retry_wait", method_names)
+            retry_jitter = _normalize_retry_param(retry_jitter, "retry_jitter", method_names)
+            retry_until = _normalize_retry_param(retry_until, "retry_until", method_names)
 
         return WorkerBuilder(
             worker_cls=cls,
@@ -2156,7 +2438,9 @@ class WorkerProxy(Typed, ABC):
     init_args: tuple
     init_kwargs: dict
     limits: Optional[Any]  # Possibly non-shared LimitSet instance (processed by WorkerBuilder)
-    retry_config: Optional[RetryConfig]
+    retry_configs: Optional[
+        dict[str, Optional[RetryConfig]]
+    ]  # Per-method retry configs (None = no retry for that method)
     max_queued_tasks: Optional[conint(ge=0)]
 
     # ========================================================================

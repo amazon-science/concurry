@@ -147,7 +147,9 @@ class WorkerProxyPool(Typed, ABC):
     blocking: bool
     unwrap_futures: bool
     limits: Optional[Any]  # Shared LimitSet (processed by WorkerBuilder)
-    retry_config: Optional[RetryConfig]
+    retry_configs: Optional[
+        dict[str, Optional[RetryConfig]]
+    ]  # Per-method retry configs (None = no retry for that method)
     max_queued_tasks: Optional[conint(ge=0)]
     init_args: tuple
     init_kwargs: dict
@@ -589,7 +591,7 @@ class InMemoryWorkerProxyPool(WorkerProxyPool):
             "init_args": self.init_args,
             "init_kwargs": self.init_kwargs,
             "limits": worker_limits,
-            "retry_config": self.retry_config,
+            "retry_configs": self.retry_configs,
             "max_queued_tasks": worker_queue_length,
         }
 
@@ -680,7 +682,7 @@ class MultiprocessWorkerProxyPool(WorkerProxyPool):
             "init_args": self.init_args,
             "init_kwargs": self.init_kwargs,
             "limits": worker_limits,
-            "retry_config": self.retry_config,
+            "retry_configs": self.retry_configs,
             "max_queued_tasks": worker_queue_length,
             "result_queue_timeout": mode_defaults.worker_result_queue_timeout,
             "result_queue_cleanup_timeout": mode_defaults.worker_result_queue_cleanup_timeout,
@@ -760,7 +762,7 @@ class RayWorkerProxyPool(WorkerProxyPool):
             init_args=self.init_args,
             init_kwargs=self.init_kwargs,
             limits=worker_limits,
-            retry_config=self.retry_config,
+            retry_configs=self.retry_configs,
             max_queued_tasks=worker_queue_length,
             actor_options=self.actor_options,
         )

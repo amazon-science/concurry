@@ -8,6 +8,7 @@ multiple futures, following concurrent.futures patterns with enhanced features:
 - Iterator mode for streaming results
 """
 
+import asyncio
 import time
 from concurrent.futures import TimeoutError
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple, Union
@@ -885,3 +886,586 @@ def _gather_iter_backend(
     # All done
     if isinstance(tracker, ProgressBar):
         tracker.success()
+
+
+# ======================== async_wait() Function ========================
+
+
+async def async_wait(
+    fs: Union[List, Tuple, Set, Dict, Any],
+    *futs,
+    timeout: Optional[float] = None,
+    return_when: Union[ReturnWhen, str] = ReturnWhen.ALL_COMPLETED,
+    progress: Union[bool, Dict, Callable, None] = None,
+) -> Tuple[Set[Any], Set[Any]]:
+    """Async version of wait() for use in async contexts.
+
+    This function is designed to be used with coroutines and asyncio tasks. It uses
+    native asyncio.wait() for efficient waiting without polling, and properly yields
+    control to the event loop.
+
+    Args:
+        fs: Primary argument - can be:
+            - List/tuple/set of coroutines, asyncio tasks, or futures
+            - Dict with coroutines/tasks/futures as values
+            - Single coroutine, task, or future
+        *futs: Additional coroutines/tasks/futures (only if fs is not a structure)
+        timeout: Maximum time to wait in seconds (None = indefinite)
+        return_when: Condition for returning. Options:
+            - ReturnWhen.ALL_COMPLETED: Wait until all complete (default)
+            - ReturnWhen.FIRST_COMPLETED: Return when any completes
+            - ReturnWhen.FIRST_EXCEPTION: Return when any raises exception
+            - Can also pass string values: "all_completed", "first_completed", "first_exception"
+        progress: Progress tracking configuration
+            - None/False: No progress
+            - True: Auto ProgressBar with miniters=len/100
+            - Dict: ProgressBar configuration
+            - Callable: Progress callback(completed, total, elapsed)
+
+    Returns:
+        Tuple of (done, not_done) sets containing the original coroutines/tasks/futures
+
+    Raises:
+        TimeoutError: If timeout expires before return_when condition met
+        ValueError: If return_when is invalid or if fs is a structure and *futs provided
+
+    Example:
+        Basic usage:
+            ```python
+            import asyncio
+            from concurry import async_wait, ReturnWhen
+
+            async def process():
+                async def fetch(url):
+                    await asyncio.sleep(0.1)
+                    return f"data from {url}"
+
+                # Create coroutines
+                coros = [fetch(f"https://api.example.com/{i}") for i in range(10)]
+
+                # Wait for all to complete
+                done, not_done = await async_wait(coros, timeout=30)
+
+                # Get results
+                results = [await f for f in done]
+                return results
+
+            # Run the async function
+            asyncio.run(process())
+            ```
+
+        With progress tracking:
+            ```python
+            async def process_with_progress():
+                coros = [fetch(url) for url in urls]
+                done, not_done = await async_wait(
+                    coros,
+                    progress={"desc": "Fetching", "unit": "request"}
+                )
+            ```
+
+        Return on first completion:
+            ```python
+            async def race_example():
+                coros = [task1(), task2(), task3()]
+                done, not_done = await async_wait(
+                    coros,
+                    return_when=ReturnWhen.FIRST_COMPLETED
+                )
+                # Cancel remaining tasks
+                for task in not_done:
+                    task.cancel()
+            ```
+
+        With Worker futures (use regular wait() instead):
+            ```python
+            # ✅ Correct: Use regular wait() with Worker futures
+            from concurry import Worker, wait
+
+            class AsyncWorker(Worker):
+                async def fetch(self, url):
+                    await asyncio.sleep(0.1)
+                    return f"data from {url}"
+
+            worker = AsyncWorker.options(mode="asyncio").init()
+            futures = [worker.fetch(f"url_{i}") for i in range(10)]
+
+            # Use regular wait(), not async_wait()
+            done, not_done = wait(futures, timeout=30)
+            results = [f.result() for f in done]
+            worker.stop()
+
+            # ❌ Wrong: Don't use async_wait() with Worker futures
+            # await async_wait(futures)  # Won't work correctly
+            ```
+
+    Note:
+        - This function uses a polling loop to enable dynamic progress updates.
+        - The poll interval defaults to global_config.defaults.async_wait_poll_interval
+          (100 microseconds = 10,000 checks/sec).
+        - Use async_wait() for raw coroutines in async contexts.
+        - Use regular wait() for Worker futures (works across all execution modes).
+    """
+    # Get poll interval from config
+    from ..config import global_config
+
+    local_config = global_config.clone()
+    poll_interval = local_config.defaults.async_wait_poll_interval
+
+    # Convert string to ReturnWhen enum if needed
+    if isinstance(return_when, str):
+        return_when = ReturnWhen(return_when)
+
+    # Validate usage: can't mix structure and *futs
+    if len(futs) > 0 and isinstance(fs, (list, tuple, set, dict)):
+        raise ValueError(
+            "Cannot provide both a structure (list/tuple/set/dict) as first argument "
+            "and additional futures via *futs. Either pass a structure, or pass individual futures."
+        )
+
+    # Build list of awaitables based on input pattern
+    if len(futs) > 0:
+        # Multiple individual items: async_wait(c1, c2, c3)
+        awaitables_list = [fs] + list(futs)
+    elif isinstance(fs, dict):
+        # Dict - extract values only, keys are not awaitables
+        awaitables_list = list(fs.values())
+    elif isinstance(fs, (list, tuple, set)):
+        # Structure of awaitables
+        awaitables_list = list(fs)
+    else:
+        # Single awaitable
+        awaitables_list = [fs]
+
+    # Ensure all are tasks (convert awaitables to tasks, wrap non-awaitables)
+    tasks = []
+    for item in awaitables_list:
+        if asyncio.iscoroutine(item) or asyncio.isfuture(item):
+            tasks.append(asyncio.ensure_future(item))
+        else:
+            # Non-awaitable value - wrap in completed task
+            future = asyncio.get_running_loop().create_future()
+            future.set_result(item)
+            tasks.append(future)
+    total = len(tasks)
+
+    # Early return if empty
+    if total == 0:
+        return set(), set()
+
+    # Create progress tracker
+    tracker = _create_progress_tracker(progress, total, "Waiting")
+    start_time = time.time()
+
+    # Map return_when to asyncio constants
+    asyncio_return_when = {
+        ReturnWhen.ALL_COMPLETED: asyncio.ALL_COMPLETED,
+        ReturnWhen.FIRST_COMPLETED: asyncio.FIRST_COMPLETED,
+        ReturnWhen.FIRST_EXCEPTION: asyncio.FIRST_EXCEPTION,
+    }[return_when]
+
+    # Initial check for already-done tasks
+    done_set = {t for t in tasks if t.done()}
+    not_done_set = set(tasks) - done_set
+    _update_progress(tracker, len(done_set), total, time.time() - start_time)
+
+    # Check if we can return early
+    if return_when == ReturnWhen.FIRST_COMPLETED and len(done_set) > 0:
+        if isinstance(tracker, ProgressBar):
+            tracker.success()
+        return done_set, not_done_set
+
+    if return_when == ReturnWhen.FIRST_EXCEPTION:
+        for task in done_set:
+            try:
+                if task.exception() is not None:
+                    if isinstance(tracker, ProgressBar):
+                        tracker.success()
+                    return done_set, not_done_set
+            except (asyncio.CancelledError, asyncio.InvalidStateError):
+                pass
+
+    if return_when == ReturnWhen.ALL_COMPLETED and len(not_done_set) == 0:
+        if isinstance(tracker, ProgressBar):
+            tracker.success()
+        return done_set, not_done_set
+
+    # Polling loop with progress updates
+    try:
+        while True:
+            elapsed = time.time() - start_time
+
+            # Check timeout
+            if timeout is not None and elapsed >= timeout:
+                if isinstance(tracker, ProgressBar):
+                    tracker.stop("Timeout")
+                raise TimeoutError(
+                    f"async_wait() timed out after {elapsed:.2f}s. "
+                    f"Completed {len(done_set)}/{total} tasks. "
+                    f"return_when={return_when}"
+                )
+
+            # Check which tasks are done
+            newly_done = {t for t in not_done_set if t.done()}
+            if len(newly_done) > 0:
+                done_set.update(newly_done)
+                not_done_set.difference_update(newly_done)
+                _update_progress(tracker, len(done_set), total, elapsed)
+
+                # Check return conditions
+                if return_when == ReturnWhen.FIRST_COMPLETED:
+                    if isinstance(tracker, ProgressBar):
+                        tracker.success()
+                    return done_set, not_done_set
+
+                if return_when == ReturnWhen.FIRST_EXCEPTION:
+                    for task in newly_done:
+                        try:
+                            if task.exception() is not None:
+                                if isinstance(tracker, ProgressBar):
+                                    tracker.success()
+                                return done_set, not_done_set
+                        except (asyncio.CancelledError, asyncio.InvalidStateError):
+                            pass
+
+                if return_when == ReturnWhen.ALL_COMPLETED and len(not_done_set) == 0:
+                    if isinstance(tracker, ProgressBar):
+                        tracker.success()
+                    return done_set, not_done_set
+
+            # Sleep before next check (yield to event loop)
+            remaining_timeout = None if timeout is None else timeout - elapsed
+            sleep_time = (
+                min(poll_interval, remaining_timeout) if remaining_timeout is not None else poll_interval
+            )
+            if sleep_time > 0:
+                await asyncio.sleep(sleep_time)
+
+    except asyncio.TimeoutError:
+        elapsed = time.time() - start_time
+        if isinstance(tracker, ProgressBar):
+            tracker.stop("Timeout")
+
+        raise TimeoutError(
+            f"async_wait() timed out after {elapsed:.2f}s. "
+            f"Completed {len(done_set)}/{total} tasks. "
+            f"return_when={return_when}"
+        )
+
+
+# ======================== async_gather() Function ========================
+
+
+async def async_gather(
+    fs: Union[List, Tuple, Set, Dict, Any],
+    *futs,
+    return_exceptions: bool = False,
+    timeout: Optional[float] = None,
+    progress: Union[bool, Dict, Callable, None] = None,
+) -> Union[List[Any], Dict[Any, Any]]:
+    """Async version of gather() for use in async contexts.
+
+    This function is designed to be used with coroutines and asyncio tasks. It uses
+    native asyncio.gather() for efficient gathering without polling, and properly
+    yields control to the event loop.
+
+    Args:
+        fs: Primary argument - can be:
+            - List/tuple/set of coroutines, asyncio tasks, or futures
+            - Dict with coroutines/tasks/futures as values -> returns dict with same keys
+            - Single coroutine, task, or future
+        *futs: Additional coroutines/tasks/futures (only if fs is not a structure)
+        return_exceptions: If True, return exceptions as results instead of raising
+        timeout: Maximum time to wait for all results (None = indefinite)
+        progress: Progress tracking configuration
+            - None/False: No progress
+            - True: Auto ProgressBar with miniters=len/100
+            - Dict: ProgressBar configuration
+            - Callable: Progress callback(completed, total, elapsed)
+
+    Returns:
+        If fs is list/tuple/set: List of results in same order as input
+        If fs is dict: Dict with same keys and gathered values
+
+    Raises:
+        Exception: Any exception from tasks (if return_exceptions=False)
+        TimeoutError: If timeout expires before all tasks complete
+        ValueError: If fs is a structure and *futs is provided
+
+    Example:
+        Basic usage:
+            ```python
+            import asyncio
+            from concurry import async_gather
+
+            async def batch_process():
+                async def compute(x):
+                    await asyncio.sleep(0.01)
+                    return x ** 2
+
+                # Create coroutines
+                coros = [compute(i) for i in range(100)]
+
+                # Gather all results
+                results = await async_gather(coros, timeout=60)
+                return results
+
+            # Run the async function
+            results = asyncio.run(batch_process())
+            ```
+
+        With dict (preserves keys):
+            ```python
+            async def fetch_multiple():
+                async def fetch(name):
+                    await asyncio.sleep(0.1)
+                    return f"data_{name}"
+
+                coros = {
+                    "user": fetch("user"),
+                    "posts": fetch("posts"),
+                    "comments": fetch("comments")
+                }
+
+                # Returns dict with same keys
+                results = await async_gather(coros)
+                # {'user': 'data_user', 'posts': 'data_posts', 'comments': 'data_comments'}
+                return results
+            ```
+
+        With exception handling:
+            ```python
+            async def handle_errors():
+                async def may_fail(x):
+                    if x == 5:
+                        raise ValueError("Failed at 5")
+                    return x * 2
+
+                coros = [may_fail(i) for i in range(10)]
+
+                # Return exceptions as values
+                results = await async_gather(coros, return_exceptions=True)
+
+                # Process results and errors
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        print(f"Task {i} failed: {result}")
+                    else:
+                        print(f"Task {i} succeeded: {result}")
+            ```
+
+        With progress tracking:
+            ```python
+            async def process_with_progress():
+                coros = [fetch(url) for url in urls]
+                results = await async_gather(
+                    coros,
+                    timeout=120,
+                    progress={"desc": "Fetching", "unit": "request", "color": "#00ff00"}
+                )
+                return results
+            ```
+
+        Mixed types:
+            ```python
+            async def mixed_example():
+                from concurrent.futures import ThreadPoolExecutor
+
+                async def async_task(x):
+                    await asyncio.sleep(0.01)
+                    return x * 2
+
+                # Mix coroutines, regular values, and thread futures
+                with ThreadPoolExecutor() as executor:
+                    items = [
+                        async_task(10),  # Coroutine
+                        42,              # Regular value
+                        executor.submit(lambda: 99)  # Thread future
+                    ]
+
+                    results = await async_gather(items)
+                    # [20, 42, 99]
+            ```
+
+        With Worker futures (use regular gather() instead):
+            ```python
+            # ✅ Correct: Use regular gather() with Worker futures
+            from concurry import Worker, gather
+            import asyncio
+
+            class AsyncWorker(Worker):
+                async def compute(self, x):
+                    await asyncio.sleep(0.01)
+                    return x ** 2
+
+            worker = AsyncWorker.options(mode="asyncio").init()
+            futures = [worker.compute(i) for i in range(10)]
+
+            # Use regular gather(), not async_gather()
+            results = gather(futures, timeout=30.0)
+            # [0, 1, 4, 9, 16, 25, 36, 49, 64, 81]
+
+            worker.stop()
+
+            # ❌ Wrong: Don't use async_gather() with Worker futures
+            # results = await async_gather(futures)  # Won't work correctly
+            ```
+
+    Note:
+        - This function uses a polling loop to enable dynamic progress updates.
+        - The poll interval defaults to global_config.defaults.async_gather_poll_interval
+          (100 microseconds = 10,000 checks/sec).
+        - Use async_gather() for raw coroutines in async contexts.
+        - Use regular gather() for Worker futures (works across all execution modes).
+    """
+    # Get poll interval from config
+    from ..config import global_config
+
+    local_config = global_config.clone()
+    poll_interval = local_config.defaults.async_gather_poll_interval
+
+    # Validate usage: can't mix structure and *futs
+    if len(futs) > 0 and isinstance(fs, (list, tuple, set, dict)):
+        raise ValueError(
+            "Cannot provide both a structure (list/tuple/set/dict) as first argument "
+            "and additional futures via *futs. Either pass a structure, or pass individual futures."
+        )
+
+    # Determine if dict input (to preserve keys)
+    is_dict_input = False
+    keys = None
+
+    # Build list of awaitables based on input pattern
+    if len(futs) > 0:
+        # Multiple individual items: async_gather(c1, c2, c3)
+        awaitables_list = [fs] + list(futs)
+    elif isinstance(fs, dict):
+        # Dict - extract keys and values
+        is_dict_input = True
+        keys = list(fs.keys())
+        awaitables_list = list(fs.values())
+    elif isinstance(fs, (list, tuple, set)):
+        # Structure of awaitables
+        awaitables_list = list(fs)
+    else:
+        # Single awaitable
+        awaitables_list = [fs]
+
+    total = len(awaitables_list)
+
+    # Early return if empty
+    if total == 0:
+        return {} if is_dict_input else []
+
+    # Create progress tracker
+    tracker = _create_progress_tracker(progress, total, "Gathering")
+    start_time = time.time()
+
+    # Ensure all are tasks (convert awaitables to tasks, wrap non-awaitables)
+    tasks = []
+    for item in awaitables_list:
+        if asyncio.iscoroutine(item) or asyncio.isfuture(item):
+            tasks.append(asyncio.ensure_future(item))
+        else:
+            # Non-awaitable value - wrap in completed task
+            future = asyncio.get_running_loop().create_future()
+            future.set_result(item)
+            tasks.append(future)
+
+    # Initial check for already-done tasks
+    completed_count = sum(1 for t in tasks if t.done())
+    _update_progress(tracker, completed_count, total, time.time() - start_time)
+
+    # If all tasks are already done, gather results immediately
+    if completed_count == total:
+        if isinstance(tracker, ProgressBar):
+            tracker.success()
+        results = []
+        for task in tasks:
+            try:
+                result = task.result()
+                results.append(result)
+            except Exception as e:
+                if return_exceptions:
+                    results.append(e)
+                else:
+                    raise
+        if is_dict_input:
+            return {k: v for k, v in zip(keys, results)}
+        else:
+            return results
+
+    # Polling loop with progress updates
+    try:
+        while True:
+            elapsed = time.time() - start_time
+
+            # Check timeout
+            if timeout is not None and elapsed >= timeout:
+                if isinstance(tracker, ProgressBar):
+                    tracker.stop("Timeout")
+                # Cancel remaining tasks
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+
+                completed = sum(1 for t in tasks if t.done())
+                raise TimeoutError(
+                    f"async_gather() timed out after {elapsed:.2f}s. Completed {completed}/{total} tasks."
+                )
+
+            # Check task completion
+            newly_completed = sum(1 for t in tasks if t.done())
+            if newly_completed > completed_count:
+                completed_count = newly_completed
+                _update_progress(tracker, completed_count, total, elapsed)
+
+            # All tasks completed
+            if completed_count == total:
+                if isinstance(tracker, ProgressBar):
+                    tracker.success()
+
+                # Gather results from completed tasks
+                results = []
+                for task in tasks:
+                    try:
+                        result = task.result()
+                        results.append(result)
+                    except Exception as e:
+                        if return_exceptions:
+                            results.append(e)
+                        else:
+                            if isinstance(tracker, ProgressBar):
+                                tracker.failure()
+                            raise
+
+                # Return dict if input was dict
+                if is_dict_input:
+                    return {k: v for k, v in zip(keys, results)}
+                else:
+                    return results
+
+            # Sleep before next check (yield to event loop)
+            remaining_timeout = None if timeout is None else timeout - elapsed
+            sleep_time = (
+                min(poll_interval, remaining_timeout) if remaining_timeout is not None else poll_interval
+            )
+            if sleep_time > 0:
+                await asyncio.sleep(sleep_time)
+
+    except asyncio.TimeoutError:
+        elapsed = time.time() - start_time
+        if isinstance(tracker, ProgressBar):
+            tracker.stop("Timeout")
+
+        # Cancel remaining tasks
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+
+        # Count completed
+        completed = sum(1 for t in tasks if t.done())
+
+        raise TimeoutError(
+            f"async_gather() timed out after {elapsed:.2f}s. Completed {completed}/{total} tasks."
+        )

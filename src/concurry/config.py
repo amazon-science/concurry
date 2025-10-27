@@ -101,6 +101,10 @@ class GlobalDefaults(MutableTyped):
     # === Asyncio Future Polling Defaults ===
     asyncio_future_poll_interval: confloat(ge=0) = 1e-6  # 1 microsecond
 
+    # === Async Wait/Gather Polling Defaults ===
+    async_wait_poll_interval: confloat(ge=0) = 100e-6  # 100 microseconds
+    async_gather_poll_interval: confloat(ge=0) = 100e-6  # 100 microseconds
+
     # === Ray Monitor Defaults ===
     ray_monitor_queue_get_timeout: confloat(ge=0) = 0.01  # 10ms
     ray_monitor_no_futures_sleep: confloat(ge=0) = 0.01  # 10ms

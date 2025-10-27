@@ -1147,12 +1147,16 @@ def wrap_future(future: Any) -> BaseFuture:
         future: A future-like object from any execution framework. Supported types:
             - `BaseFuture` (returned as-is)
             - `concurrent.futures.Future`
-            - `asyncio.Future`
+            - `asyncio.Future` or `asyncio.Task`
+            - Coroutine (scheduled on current running event loop)
             - Ray's `ObjectRef` (if Ray is installed)
             - Any other object (wrapped as `SyncFuture` with the object as result)
 
     Returns:
         A BaseFuture instance providing the unified interface
+
+    Raises:
+        RuntimeError: If a coroutine is provided but no event loop is running
 
     Example:
         ```python
@@ -1172,6 +1176,18 @@ def wrap_future(future: Any) -> BaseFuture:
             async_future = loop.create_future()
             async_future.set_result(100)
             unified = wrap_future(async_future)
+            result = unified.result(timeout=5)
+            return result
+
+        # Works with coroutines (from async context only)
+        async def coroutine_example():
+            async def compute(x):
+                await asyncio.sleep(0.01)
+                return x ** 2
+
+            # Coroutine is automatically scheduled on current loop
+            coro = compute(42)
+            unified = wrap_future(coro)
             result = unified.result(timeout=5)
             return result
 
@@ -1200,6 +1216,17 @@ def wrap_future(future: Any) -> BaseFuture:
         return ConcurrentFuture(future=future)
     elif asyncio.isfuture(future):
         return AsyncioFuture(future=future)
+    elif asyncio.iscoroutine(future):
+        # Schedule coroutine on current running event loop
+        # Check explicitly for running loop (Python 3.12+ has deprecated behavior)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError as e:
+            raise RuntimeError(f"Cannot schedule coroutine: no running event loop: {e}")
+
+        # Schedule on the running loop
+        task = asyncio.ensure_future(future, loop=loop)
+        return AsyncioFuture(future=task)
     elif _IS_RAY_INSTALLED:
         import ray
 

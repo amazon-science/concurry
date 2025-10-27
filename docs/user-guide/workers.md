@@ -505,6 +505,56 @@ except ValueError as e:
 worker.stop()
 ```
 
+### Coordinating Multiple Async Worker Calls
+
+When you need to coordinate results from multiple async worker method calls, use regular `wait()` and `gather()` with the Worker futures:
+
+```python
+from concurry import Worker, gather, wait
+import asyncio
+
+class AsyncAPIWorker(Worker):
+    async def fetch_user(self, user_id: int):
+        await asyncio.sleep(0.1)
+        return {"id": user_id, "name": f"User{user_id}"}
+    
+    async def fetch_posts(self, user_id: int):
+        await asyncio.sleep(0.1)
+        return [{"post": i} for i in range(5)]
+
+# Create worker
+worker = AsyncAPIWorker.options(mode="asyncio").init()
+
+# Submit multiple async method calls - returns Worker futures
+user_future = worker.fetch_user(123)
+posts_future = worker.fetch_posts(123)
+
+# Use regular gather() to coordinate Worker futures
+user, posts = gather([user_future, posts_future], timeout=10.0)
+
+print(f"User: {user}")
+print(f"Posts: {len(posts)} posts")
+
+worker.stop()
+```
+
+**Note on `async_wait()` and `async_gather()`:**
+
+Concurry also provides `async_wait()` and `async_gather()` for coordinating raw coroutines in async contexts. However, **Worker method calls return `concurry` futures, not coroutines**, so you should use regular `wait()` and `gather()` with Worker futures.
+
+```python
+# ✅ Correct: Use regular gather() with Worker futures
+futures = [worker.async_method(i) for i in range(10)]
+results = gather(futures, timeout=10.0)
+
+# ❌ Wrong: async_gather() expects coroutines, not Worker futures
+# This will not work as expected
+futures = [worker.async_method(i) for i in range(10)]
+results = await async_gather(futures)  # TypeError or incorrect behavior
+```
+
+Use `async_wait()` and `async_gather()` only when working with raw coroutines outside of Workers. See the [Synchronization Guide](synchronization.md#async_wait-and-async_gather) for details.
+
 ### Best Practices for Async Workers
 
 1. **Use AsyncIO mode for async functions**: Get maximum concurrency benefits (10-50x speedup)
@@ -533,11 +583,11 @@ worker.stop()
    # Both methods work efficiently without blocking each other
    ```
 
-3. **Use asyncio.gather() for concurrent operations**: Maximum performance
+3. **Use asyncio.gather() for concurrent operations inside worker methods**: Maximum performance
    ```python
    class APIWorker(Worker):
        async def fetch_many(self, urls: list) -> list:
-           # ✅ Good: All requests execute concurrently
+           # ✅ Good: All requests execute concurrently inside the worker
            tasks = [self.fetch_url(url) for url in urls]
            return await asyncio.gather(*tasks)
    
@@ -548,13 +598,24 @@ worker.stop()
                    return await response.text()
    ```
 
-4. **Use appropriate async libraries**:
+4. **Use regular `gather()` to coordinate multiple worker calls**: For client-side coordination
+   ```python
+   from concurry import gather
+   
+   # Submit multiple worker calls
+   futures = [worker.fetch_url(url) for url in urls]
+   
+   # Coordinate with regular gather()
+   results = gather(futures, timeout=30.0, progress=True)
+   ```
+
+5. **Use appropriate async libraries**:
    - `aiohttp` for HTTP requests (✅ major speedup)
    - `asyncpg` for PostgreSQL (✅ major speedup)
    - `motor` for MongoDB (✅ major speedup)
    - **Note**: For local file I/O, ThreadWorker or SyncWorker may be faster than AsyncioWorker due to OS-level buffering and small file sizes. Use AsyncioWorker for network I/O and remote files.
 
-5. **Handle exceptions properly**:
+6. **Handle exceptions properly**:
    ```python
    async def safe_operation(self):
        try:

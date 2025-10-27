@@ -886,6 +886,233 @@ class TestAsyncFunctionSupport:
         w.stop()
 
 
+class TestAsyncWorkerIntegrationWithAsyncWaitGather:
+    """Test AsyncWorker integration with wait/gather and async native coroutines."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(30)
+    async def test_async_wait_with_worker_native_coroutines(self):
+        """Test async_wait with raw coroutines created by AsyncWorker methods.
+
+        Note: async_wait/async_gather work with raw coroutines, not concurry futures.
+        For working with worker futures, use regular wait() and gather().
+        """
+        from concurry import async_wait
+
+        # Define async worker methods as standalone coroutines for testing
+        async def async_add(value, x):
+            await asyncio.sleep(0.01)
+            return value + x
+
+        # Create coroutines
+        coros = [async_add(10, i) for i in range(5)]
+
+        # Use async_wait
+        done, not_done = await async_wait(coros, timeout=15.0)
+
+        assert len(done) == 5
+        assert len(not_done) == 0
+
+        # Get results
+        results = [await t for t in done]
+        assert set(results) == {10, 11, 12, 13, 14}
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(30)
+    async def test_async_gather_with_native_coroutines(self):
+        """Test async_gather with raw coroutines."""
+        from concurry import async_gather
+
+        async def async_add(value, x):
+            await asyncio.sleep(0.01)
+            return value + x
+
+        # Create coroutines
+        coros = [async_add(100, i) for i in range(10)]
+
+        # Use async_gather
+        results = await async_gather(coros, timeout=15.0)
+
+        assert results == [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
+
+    def test_wait_with_async_worker_futures(self, worker_mode):
+        """Test regular wait() with AsyncWorker futures (works across all modes)."""
+        from concurry import wait
+
+        w = AsyncWorker.options(mode=worker_mode).init(10)
+
+        # Submit multiple async method calls
+        futures = [w.async_add(i) for i in range(5)]
+
+        # Use regular wait() for worker futures
+        done, not_done = wait(futures, timeout=15.0)
+
+        assert len(done) == 5
+        assert len(not_done) == 0
+
+        # Get results
+        results = [f.result(timeout=1) for f in done]
+        assert set(results) == {10, 11, 12, 13, 14}
+
+        w.stop()
+
+    def test_gather_with_async_worker_futures(self, worker_mode):
+        """Test regular gather() with AsyncWorker futures (works across all modes)."""
+        from concurry import gather
+
+        w = AsyncWorker.options(mode=worker_mode).init(100)
+
+        # Submit multiple async method calls
+        futures = [w.async_add(i) for i in range(10)]
+
+        # Use regular gather() for worker futures
+        results = gather(futures, timeout=15.0)
+
+        assert results == [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
+
+        w.stop()
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(30)
+    async def test_async_gather_with_progress(self):
+        """Test async_gather with progress tracking on coroutines."""
+        from concurry import async_gather
+
+        async def async_multiply(value, x):
+            await asyncio.sleep(0.01)
+            return value * x
+
+        # Create coroutines
+        coros = [async_multiply(50, i) for i in range(20)]
+
+        # Use async_gather with progress tracking
+        results = await async_gather(coros, progress=True, timeout=15.0)
+
+        assert len(results) == 20
+        assert results[0] == 0
+        assert results[10] == 500
+
+    def test_gather_with_worker_and_progress(self, worker_mode):
+        """Test regular gather() with worker futures and progress tracking."""
+        from concurry import gather
+
+        w = AsyncWorker.options(mode=worker_mode).init(50)
+
+        # Submit multiple async method calls
+        futures = [w.async_multiply(i) for i in range(20)]
+
+        # Use regular gather() with progress
+        results = gather(futures, progress=True, timeout=15.0)
+
+        assert len(results) == 20
+        assert results[0] == 0
+        assert results[10] == 500
+
+        w.stop()
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(30)
+    async def test_async_gather_with_exceptions(self):
+        """Test async_gather with exceptions in coroutines."""
+        from concurry import async_gather
+
+        async def async_error():
+            await asyncio.sleep(0.01)
+            raise ValueError("Async error occurred")
+
+        async def async_add(value, x):
+            await asyncio.sleep(0.01)
+            return value + x
+
+        # Create coroutines
+        coros = [
+            async_add(10, 1),
+            async_error(),
+            async_add(10, 3),
+        ]
+
+        # Test with return_exceptions=True
+        results = await async_gather(coros, return_exceptions=True, timeout=15.0)
+
+        assert results[0] == 11
+        assert isinstance(results[1], ValueError)
+        assert results[2] == 13
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(30)
+    async def test_async_gather_dict_with_coroutines(self):
+        """Test async_gather with dict of coroutines."""
+        from concurry import async_gather
+
+        async def async_add(value, x):
+            await asyncio.sleep(0.01)
+            return value + x
+
+        async def async_multiply(value, x):
+            await asyncio.sleep(0.01)
+            return value * x
+
+        # Create coroutines dict
+        coros_dict = {
+            "add_5": async_add(10, 5),
+            "add_10": async_add(10, 10),
+            "multiply_3": async_multiply(10, 3),
+        }
+
+        # Gather preserving keys
+        results = await async_gather(coros_dict, timeout=15.0)
+
+        assert isinstance(results, dict)
+        assert results["add_5"] == 15
+        assert results["add_10"] == 20
+        assert results["multiply_3"] == 30
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(30)
+    async def test_async_wait_with_progress_callback(self):
+        """Test async_wait with progress callback on coroutines."""
+        from concurry import async_wait
+
+        callback_calls = []
+
+        def progress_callback(completed, total, elapsed):
+            callback_calls.append((completed, total))
+
+        async def async_add(value, x):
+            await asyncio.sleep(0.05)
+            return value + x
+
+        # Create coroutines
+        coros = [async_add(10, i) for i in range(10)]
+
+        # Wait with progress callback
+        done, not_done = await async_wait(coros, progress=progress_callback, timeout=15.0)
+
+        assert len(done) == 10
+        assert len(not_done) == 0
+        # Callback should have been called
+        assert len(callback_calls) > 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(30)
+    async def test_async_gather_large_batch(self):
+        """Test async_gather with large batch of coroutines."""
+        from concurry import async_gather
+
+        async def async_add(value, x):
+            await asyncio.sleep(0.001)
+            return value + x
+
+        # Create many coroutines
+        coros = [async_add(0, i) for i in range(50)]
+
+        # Gather all results
+        results = await async_gather(coros, timeout=30.0)
+
+        assert len(results) == 50
+        assert results == list(range(50))
+
+
 class FileIOWorker(Worker):
     """Worker for testing file I/O performance with async."""
 

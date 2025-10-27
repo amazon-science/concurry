@@ -34,6 +34,8 @@ from .core import (
     SyncFuture,
     TaskWorker,
     Worker,
+    async_gather,
+    async_wait,
     gather,
     task,
     wait,
@@ -70,6 +72,8 @@ __all__ = [
     # Synchronization
     "wait",
     "gather",
+    "async_wait",
+    "async_gather",
     "ALL_COMPLETED",
     "FIRST_COMPLETED",
     "FIRST_EXCEPTION",

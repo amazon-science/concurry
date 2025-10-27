@@ -37,6 +37,8 @@ from .synch import (
     ALL_COMPLETED,
     FIRST_COMPLETED,
     FIRST_EXCEPTION,
+    async_gather,
+    async_wait,
     gather,
     wait,
 )
@@ -76,6 +78,8 @@ __all__ = [
     # Synchronization
     "wait",
     "gather",
+    "async_wait",
+    "async_gather",
     "ALL_COMPLETED",
     "FIRST_COMPLETED",
     "FIRST_EXCEPTION",

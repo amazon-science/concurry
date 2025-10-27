@@ -22,13 +22,14 @@ Both functions support:
 1. [Quick Start](#quick-start)
 2. [wait() Function](#wait-function)
 3. [gather() Function](#gather-function)
-4. [Dictionary Support](#dictionary-support)
-5. [Polling Strategies](#polling-strategies)
-6. [Progress Tracking](#progress-tracking)
-7. [Exception Handling](#exception-handling)
-8. [Performance Optimization](#performance-optimization)
-9. [Advanced Patterns](#advanced-patterns)
-10. [API Reference](#api-reference)
+4. [async_wait() and async_gather()](#async_wait-and-async_gather)
+5. [Dictionary Support](#dictionary-support)
+6. [Polling Strategies](#polling-strategies)
+7. [Progress Tracking](#progress-tracking)
+8. [Exception Handling](#exception-handling)
+9. [Performance Optimization](#performance-optimization)
+10. [Advanced Patterns](#advanced-patterns)
+11. [API Reference](#api-reference)
 
 ---
 
@@ -297,6 +298,382 @@ results = gather(tasks)  # Returns: {"fetch": r1, "process": r2, "save": r3}
 # 3. Variadic → Returns list
 results = gather(future1, future2, future3)  # Returns: [r1, r2, r3]
 ```
+
+---
+
+## async_wait() and async_gather()
+
+For use within `async` functions, Concurry provides async-native synchronization primitives that work seamlessly with coroutines and asyncio futures.
+
+### Overview
+
+- **`async_wait()`**: Async version of `wait()` for use in async contexts
+- **`async_gather()`**: Async version of `gather()` for use in async contexts
+
+Both functions:
+- ✅ Are themselves `async` functions (must be awaited)
+- ✅ Work with raw coroutines and `asyncio.Future`/`asyncio.Task` objects
+- ✅ Support all the same features as `wait()` and `gather()` (progress, timeout, dicts, etc.)
+- ✅ Use efficient polling with configurable intervals (100µs default = 10,000 checks/sec)
+- ✅ Yield control to the event loop during waiting (non-blocking)
+
+### When to Use
+
+**Use `async_wait()` / `async_gather()` when:**
+- You're inside an `async def` function
+- You have raw coroutines (from `async def` functions)
+- You have `asyncio.Future` or `asyncio.Task` objects
+- You want to coordinate multiple async operations
+
+**Use regular `wait()` / `gather()` when:**
+- You have `concurry` Worker futures (from any execution mode)
+- You're in a synchronous context
+- You want cross-framework compatibility (thread, process, ray futures)
+
+### Basic Usage with Coroutines
+
+```python
+import asyncio
+from concurry import async_gather, async_wait
+
+async def fetch_data(id: int) -> dict:
+    """Async function that simulates an API call."""
+    await asyncio.sleep(0.1)
+    return {"id": id, "data": f"result_{id}"}
+
+async def main():
+    # Create coroutines (not yet started)
+    coros = [fetch_data(i) for i in range(10)]
+    
+    # Use async_gather to run them concurrently
+    results = await async_gather(coros, timeout=5.0)
+    
+    print(f"Got {len(results)} results")
+    for result in results:
+        print(result)
+
+# Run the async function
+asyncio.run(main())
+```
+
+### Using with Async Workers
+
+When you have a Worker with `async` methods, you have two options:
+
+**Option 1: Use Worker futures with regular `wait()`/`gather()` (Recommended)**
+
+Worker method calls return `concurry` futures that work with the synchronous `wait()` and `gather()`:
+
+```python
+from concurry import Worker, gather
+import asyncio
+
+class AsyncWorker(Worker):
+    def __init__(self, base_value: int):
+        self.base_value = base_value
+    
+    async def async_compute(self, x: int) -> int:
+        """Async worker method."""
+        await asyncio.sleep(0.01)
+        return self.base_value + x
+
+# Create async worker (use asyncio mode for best performance)
+worker = AsyncWorker.options(mode="asyncio").init(base_value=100)
+
+# Submit async method calls - returns concurry futures
+futures = [worker.async_compute(i) for i in range(10)]
+
+# Use regular gather() with worker futures
+results = gather(futures, timeout=10.0)
+
+print(results)  # [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
+
+worker.stop()
+```
+
+**Option 2: Extract coroutines and use `async_wait()`/`async_gather()`**
+
+If you explicitly want to work with the raw coroutines in an async context:
+
+```python
+import asyncio
+from concurry import async_gather
+
+async def coordinate_async_operations():
+    """Coordinate multiple async operations in an async context."""
+    
+    # Define async operations
+    async def fetch_user(user_id: int):
+        await asyncio.sleep(0.05)
+        return {"id": user_id, "name": f"User{user_id}"}
+    
+    async def fetch_orders(user_id: int):
+        await asyncio.sleep(0.05)
+        return [{"order": i} for i in range(3)]
+    
+    # Create coroutines
+    user_coro = fetch_user(123)
+    orders_coro = fetch_orders(123)
+    
+    # Use async_gather to run concurrently
+    user, orders = await async_gather([user_coro, orders_coro], timeout=5.0)
+    
+    return {"user": user, "orders": orders}
+
+# Run
+result = asyncio.run(coordinate_async_operations())
+```
+
+### async_wait() Examples
+
+#### Wait for All Coroutines
+
+```python
+import asyncio
+from concurry import async_wait, ReturnWhen
+
+async def process_item(item_id: int):
+    await asyncio.sleep(0.1)
+    return f"Processed {item_id}"
+
+async def main():
+    # Create coroutines
+    coros = [process_item(i) for i in range(5)]
+    
+    # Wait for all to complete
+    done, not_done = await async_wait(coros, return_when=ReturnWhen.ALL_COMPLETED)
+    
+    print(f"Completed: {len(done)}, Pending: {len(not_done)}")
+    
+    # Get results from completed tasks
+    results = [await task for task in done]
+    print(results)
+
+asyncio.run(main())
+```
+
+#### Wait for First Completion (Racing)
+
+```python
+from concurry import async_wait, ReturnWhen
+
+async def fetch_from_api1():
+    await asyncio.sleep(0.3)
+    return "API1 data"
+
+async def fetch_from_api2():
+    await asyncio.sleep(0.1)
+    return "API2 data (faster!)"
+
+async def fetch_from_cache():
+    await asyncio.sleep(0.2)
+    return "Cache data"
+
+async def main():
+    # Race multiple sources
+    sources = [fetch_from_api1(), fetch_from_api2(), fetch_from_cache()]
+    
+    # Get the first to complete
+    done, not_done = await async_wait(
+        sources,
+        return_when=ReturnWhen.FIRST_COMPLETED,
+        timeout=5.0
+    )
+    
+    # Use the fastest result
+    first_task = done.pop()
+    result = await first_task
+    print(f"Fastest result: {result}")
+    
+    # Cancel the rest
+    for task in not_done:
+        task.cancel()
+
+asyncio.run(main())
+```
+
+### async_gather() Examples
+
+#### Gather with Progress Tracking
+
+```python
+import asyncio
+from concurry import async_gather
+
+async def download_file(file_id: int):
+    """Simulate downloading a file."""
+    await asyncio.sleep(0.05)
+    return f"file_{file_id}.dat"
+
+async def main():
+    # Create many download coroutines
+    downloads = [download_file(i) for i in range(100)]
+    
+    # Gather with progress bar
+    files = await async_gather(
+        downloads,
+        progress=True,
+        timeout=30.0
+    )
+    
+    print(f"Downloaded {len(files)} files")
+
+asyncio.run(main())
+```
+
+#### Gather with Exception Handling
+
+```python
+from concurry import async_gather
+
+async def reliable_task(x: int):
+    await asyncio.sleep(0.01)
+    return x * 2
+
+async def unreliable_task(x: int):
+    await asyncio.sleep(0.01)
+    if x % 3 == 0:
+        raise ValueError(f"Task {x} failed!")
+    return x * 2
+
+async def main():
+    # Mix of reliable and unreliable tasks
+    tasks = [
+        reliable_task(1),
+        unreliable_task(3),  # Will fail
+        reliable_task(4),
+        unreliable_task(6),  # Will fail
+    ]
+    
+    # Gather with exception handling
+    results = await async_gather(
+        tasks,
+        return_exceptions=True,
+        timeout=5.0
+    )
+    
+    # Process results
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            print(f"Task {i} failed: {result}")
+        else:
+            print(f"Task {i} succeeded: {result}")
+
+asyncio.run(main())
+```
+
+#### Gather with Dictionary Input
+
+```python
+from concurry import async_gather
+
+async def fetch_user_profile(user_id: int):
+    await asyncio.sleep(0.05)
+    return {"name": "Alice", "age": 30}
+
+async def fetch_user_posts(user_id: int):
+    await asyncio.sleep(0.05)
+    return [{"post": f"Post {i}"} for i in range(5)]
+
+async def fetch_user_friends(user_id: int):
+    await asyncio.sleep(0.05)
+    return [101, 102, 103]
+
+async def main():
+    user_id = 123
+    
+    # Organize coroutines with descriptive keys
+    user_data = {
+        "profile": fetch_user_profile(user_id),
+        "posts": fetch_user_posts(user_id),
+        "friends": fetch_user_friends(user_id),
+    }
+    
+    # Gather all data concurrently
+    data = await async_gather(user_data, timeout=5.0)
+    
+    # Access by key
+    print(f"Profile: {data['profile']}")
+    print(f"Posts: {len(data['posts'])} posts")
+    print(f"Friends: {len(data['friends'])} friends")
+
+asyncio.run(main())
+```
+
+### Progress Tracking in Async Context
+
+Progress tracking works identically to the synchronous versions:
+
+```python
+from concurry import async_gather
+
+async def process_batch(batch_id: int):
+    await asyncio.sleep(0.1)
+    return f"Batch {batch_id} processed"
+
+async def main():
+    batches = [process_batch(i) for i in range(50)]
+    
+    # Progress bar
+    results = await async_gather(batches, progress=True)
+    
+    # Or custom callback
+    def progress_callback(completed: int, total: int, elapsed: float):
+        print(f"Progress: {completed}/{total} ({elapsed:.1f}s)")
+    
+    results = await async_gather(batches, progress=progress_callback)
+
+asyncio.run(main())
+```
+
+### Comparison: async_gather() vs asyncio.gather()
+
+**Concurry's `async_gather()` provides additional features:**
+
+```python
+import asyncio
+from concurry import async_gather
+
+async def task(x: int):
+    await asyncio.sleep(0.01)
+    return x * 2
+
+# Standard asyncio.gather
+results = await asyncio.gather(task(1), task(2), task(3))
+# ❌ No progress tracking
+# ❌ No timeout support
+# ❌ No dict support
+# ❌ Returns list only
+
+# Concurry's async_gather
+results = await async_gather(
+    [task(1), task(2), task(3)],
+    progress=True,        # ✅ Progress bar
+    timeout=10.0,         # ✅ Timeout
+)
+
+# With dict
+results = await async_gather(
+    {"a": task(1), "b": task(2), "c": task(3)},  # ✅ Dict input
+    progress=True,
+)
+# Returns dict: {"a": 2, "b": 4, "c": 6}
+```
+
+### Performance Notes
+
+**Polling Interval:**
+- Default: 100 microseconds (10,000 checks per second)
+- Configurable via `global_config.defaults.async_wait_poll_interval`
+- Configurable via `global_config.defaults.async_gather_poll_interval`
+- Yields control to event loop between checks (non-blocking)
+
+**Best Practices:**
+1. **Use `async_wait()`/`async_gather()` for raw coroutines in async contexts**
+2. **Use regular `wait()`/`gather()` for Worker futures** (works across all modes)
+3. **Prefer `mode="asyncio"` for workers with async methods** (10-50x speedup)
+4. **Enable progress tracking for long-running operations**
+5. **Set reasonable timeouts to prevent indefinite waiting**
 
 ---
 
@@ -1158,6 +1535,72 @@ class PollingAlgorithm(AutoEnum):
     Exponential = "exponential"
     Progressive = "progressive"
 ```
+
+### async_wait()
+
+```python
+async def async_wait(
+    fs: Union[List, Tuple, Set, Dict, Any],
+    *futs,
+    timeout: Optional[float] = None,
+    return_when: Union[ReturnWhen, str] = ReturnWhen.ALL_COMPLETED,
+    progress: Union[bool, Dict, Callable, None] = None,
+) -> Tuple[Set[asyncio.Task], Set[asyncio.Task]]
+```
+
+**Parameters:**
+
+- `fs`: Primary argument - list/tuple/set/dict of coroutines/tasks, or single coroutine
+- `*futs`: Additional coroutines/tasks (only if `fs` is not a structure)
+- `timeout`: Maximum time to wait in seconds (None = indefinite)
+- `return_when`: When to return - ALL_COMPLETED, FIRST_COMPLETED, or FIRST_EXCEPTION
+- `progress`: Progress tracking - bool, dict, or callable
+
+**Returns:**
+
+Tuple of `(done, not_done)` sets containing `asyncio.Task` instances
+
+**Raises:**
+
+- `TimeoutError`: If timeout expires before condition met
+- `ValueError`: If invalid arguments provided
+- `RuntimeError`: If called outside of async context
+
+**Note:** Must be called with `await` from within an `async def` function.
+
+### async_gather()
+
+```python
+async def async_gather(
+    fs: Union[List, Tuple, Set, Dict, Any],
+    *futs,
+    return_exceptions: bool = False,
+    timeout: Optional[float] = None,
+    progress: Union[bool, Dict, Callable, None] = None,
+) -> Union[List[Any], Dict[Any, Any]]
+```
+
+**Parameters:**
+
+- `fs`: Primary argument - list/tuple/set/dict of coroutines/tasks, or single coroutine
+- `*futs`: Additional coroutines/tasks (only if `fs` is not a structure)
+- `return_exceptions`: Return exceptions as values instead of raising
+- `timeout`: Maximum time to wait for all results (None = indefinite)
+- `progress`: Progress tracking - bool, dict, or callable
+
+**Returns:**
+
+- If input is list/tuple: List of results in same order
+- If input is dict: Dict with same keys
+
+**Raises:**
+
+- `Exception`: Any exception from coroutines (if `return_exceptions=False`)
+- `TimeoutError`: If timeout expires before all complete
+- `ValueError`: If invalid arguments provided
+- `RuntimeError`: If called outside of async context
+
+**Note:** Must be called with `await` from within an `async def` function.
 
 ---
 

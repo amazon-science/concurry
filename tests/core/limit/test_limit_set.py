@@ -1,5 +1,7 @@
 """Tests for LimitSet functionality."""
 
+import logging
+
 import pytest
 
 from concurry import (
@@ -126,8 +128,8 @@ class TestLimitSet:
         assert acq_set2.successful is True
         acq_set2.release()
 
-    def test_limit_set_update_validation(self):
-        """Test that update validates keys."""
+    def test_limit_set_update_validation(self, caplog):
+        """Test that update validates keys with warnings for unknown keys."""
         limits = LimitSet(
             limits=[
                 RateLimit(
@@ -139,13 +141,19 @@ class TestLimitSet:
             ]
         )
 
-        with limits.acquire(requested={"input_tokens": 100}) as acq:
-            # Valid update
-            acq.update(usage={"input_tokens": 80})
+        with caplog.at_level(logging.WARNING):
+            caplog.clear()
+            with limits.acquire(requested={"input_tokens": 100}) as acq:
+                # Valid update
+                acq.update(usage={"input_tokens": 80})
 
-            # Invalid key should raise error
-            with pytest.raises(ValueError, match="Cannot update limit.*not acquired"):
+                # Unknown key should warn but not raise error
                 acq.update(usage={"output_tokens": 50})
+
+            # Should have warning for unknown key
+            assert len(caplog.records) == 1
+            assert "Cannot update limit 'output_tokens'" in caplog.records[0].message
+            assert "not acquired" in caplog.records[0].message
 
     def test_limit_set_missing_updates(self):
         """Test that missing updates raise error on exit."""
@@ -630,3 +638,88 @@ class TestUnknownLimitKeys:
             assert "input_tokens" in warning_msg or "'input_tokens'" in warning_msg
             assert "output_tokens" in warning_msg or "'output_tokens'" in warning_msg
             assert "db_connections" in warning_msg or "'db_connections'" in warning_msg
+
+
+class TestUnknownUpdateKeys:
+    """Test behavior when trying to update limits that weren't acquired."""
+
+    def test_update_unknown_key_warns_once(self, caplog):
+        """Test that updating unknown key logs warning once per key."""
+        limits = LimitSet(limits=[RateLimit(key="tokens", window_seconds=1, capacity=1000)])
+
+        with caplog.at_level(logging.WARNING):
+            caplog.clear()
+            with limits.acquire(requested={"tokens": 100}) as acq:
+                # Try to update unknown key multiple times
+                acq.update(usage={"tokens": 80, "unknown_key": 50})
+                acq.update(usage={"tokens": 80, "unknown_key": 50})  # Should not warn again
+                acq.update(usage={"tokens": 80, "another_unknown": 30})  # New key, should warn
+
+            # Should have exactly 2 warnings (one for each unique unknown key)
+            warning_msgs = [r.message for r in caplog.records if r.levelname == "WARNING"]
+            assert len(warning_msgs) == 2
+            assert any("unknown_key" in msg for msg in warning_msgs)
+            assert any("another_unknown" in msg for msg in warning_msgs)
+
+    def test_update_unknown_key_does_not_raise_error(self):
+        """Test that updating unknown key does not raise an error."""
+        limits = LimitSet(limits=[RateLimit(key="tokens", window_seconds=1, capacity=1000)])
+
+        # Should not raise ValueError
+        with limits.acquire(requested={"tokens": 100}) as acq:
+            acq.update(usage={"tokens": 80, "unknown_key": 50})
+            # Test passes if no exception is raised
+
+    def test_update_mixed_known_unknown_keys(self):
+        """Test that updating mix of known and unknown keys works correctly."""
+        limits = LimitSet(
+            limits=[
+                RateLimit(key="input_tokens", window_seconds=1, capacity=1000),
+                RateLimit(key="output_tokens", window_seconds=1, capacity=500),
+            ]
+        )
+
+        with limits.acquire(requested={"input_tokens": 100, "output_tokens": 50}) as acq:
+            # Update with mix of known and unknown keys
+            acq.update(
+                usage={
+                    "input_tokens": 80,
+                    "output_tokens": 40,
+                    "unknown_key1": 10,
+                    "unknown_key2": 20,
+                }
+            )
+            # Known keys should be updated, unknown keys skipped with warning
+
+    def test_update_all_unknown_keys(self):
+        """Test that updating only unknown keys doesn't break anything."""
+        limits = LimitSet(limits=[RateLimit(key="tokens", window_seconds=1, capacity=1000)])
+
+        with limits.acquire(requested={"tokens": 100}) as acq:
+            # Update with only unknown keys
+            acq.update(usage={"unknown_key": 50})
+            # Still need to update the acquired limit
+            acq.update(usage={"tokens": 80})
+
+    def test_warning_shows_available_keys(self, caplog):
+        """Test that warning message lists available keys."""
+        limits = LimitSet(
+            limits=[
+                RateLimit(key="input_tokens", window_seconds=1, capacity=1000),
+                RateLimit(key="output_tokens", window_seconds=1, capacity=500),
+            ]
+        )
+
+        with caplog.at_level(logging.WARNING):
+            caplog.clear()
+            with limits.acquire(requested={"input_tokens": 100, "output_tokens": 50}) as acq:
+                acq.update(usage={"input_tokens": 80, "output_tokens": 40, "typo_key": 10})
+
+            # Check warning message contains available keys
+            assert len(caplog.records) == 1
+            warning_msg = caplog.records[0].message
+            assert "Cannot update limit 'typo_key'" in warning_msg
+            assert "Available keys:" in warning_msg
+            # Should list all acquired keys
+            assert "input_tokens" in warning_msg or "'input_tokens'" in warning_msg
+            assert "output_tokens" in warning_msg or "'output_tokens'" in warning_msg

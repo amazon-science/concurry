@@ -707,6 +707,24 @@ class LimitSetAcquisition:
 - **CallLimits (explicit, requested>1)**: MUST call `update()` with usage in [0, requested]
 - **ResourceLimits**: No update needed (acquired = used)
 
+**Unknown Key Handling in update():**
+
+When calling `acq.update(usage={...})` with a key that wasn't acquired, the system logs a warning (once per key) and skips that key instead of raising `ValueError`. This enables flexible conditional updating:
+
+```python
+with limits.acquire(requested={"tokens": 100}) as acq:
+    result = operation()
+    # Try to update both tokens and optional gpu_memory
+    # If gpu_memory wasn't acquired, it's skipped with warning
+    acq.update(usage={"tokens": 80, "gpu_memory": 1000})
+```
+
+**Why this behavior:**
+- Allows code to work across different limit configurations
+- Supports conditional updates for optional limits
+- Warning (once per key) still catches typos/configuration issues
+- Consistent with unknown key behavior in `acquire()`
+
 **Validation on `__exit__`:**
 ```python
 def __exit__(self, exc_type, exc_val, exc_tb):

@@ -27,7 +27,10 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any, Dict, Optional, Set
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .limit import Limit
@@ -216,6 +219,7 @@ class LimitSetAcquisition:
         # Make a copy of config to prevent mutations
         self.config = dict(config) if config is not None else {}
         self._updated_keys: Set[str] = set()
+        self._warned_update_keys: Set[str] = set()  # Track unknown keys we've already warned about
         self._released = False
 
     def update(self, usage: Dict[str, int]) -> None:
@@ -224,8 +228,11 @@ class LimitSetAcquisition:
         Args:
             usage: Mapping of limit key to actual usage
 
+        Warnings:
+            Logs warning if key doesn't exist (logged once per key)
+
         Raises:
-            ValueError: If key doesn't exist or usage is invalid
+            ValueError: If usage is invalid for a limit
             RuntimeError: If already released
         """
         if self._released:
@@ -233,10 +240,14 @@ class LimitSetAcquisition:
 
         for key, used in usage.items():
             if key not in self.acquisitions:
-                raise ValueError(
-                    f"Cannot update limit '{key}': not acquired in this LimitSet. "
-                    f"Available keys: {list(self.acquisitions.keys())}"
-                )
+                # Warn once per unknown key and skip
+                if key not in self._warned_update_keys:
+                    self._warned_update_keys.add(key)
+                    logger.warning(
+                        f"Cannot update limit '{key}': not acquired in this LimitSet. "
+                        f"This key will be ignored. Available keys: {list(self.acquisitions.keys())}"
+                    )
+                continue  # Skip unknown key
 
             # Update the individual acquisition
             self.acquisitions[key].update(used)

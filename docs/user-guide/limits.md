@@ -1651,6 +1651,25 @@ with limits.acquire(requested={"tokens": 100}) as acq:
 # The warning helps identify incorrect usage tracking
 ```
 
+**Warning: Update unknown limit key**
+```python
+# Behavior: Logs warning (once per key) but continues gracefully
+limits = LimitSet(limits=[
+    RateLimit(key="tokens", window_seconds=60, capacity=1000)
+])
+
+# Acquire tokens
+with limits.acquire(requested={"tokens": 100}) as acq:
+    result = operation()
+    # Try to update limit that wasn't acquired - warning but continues
+    acq.update(usage={"tokens": 80, "unknown_key": 50})
+    # Works fine - unknown_key ignored with warning
+
+# Why: Enables flexible conditional updating for optional limits
+# The warning (once per key) helps identify typos or configuration issues
+# But allows code to work across different limit configurations
+```
+
 **ValueError: Requested exceeds capacity**
 ```python
 # Cause: Requesting more than limit capacity (would block forever)

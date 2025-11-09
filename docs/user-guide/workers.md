@@ -651,7 +651,12 @@ worker2.stop()
 
 ## Using the @worker Decorator
 
-You can also use the `@worker` decorator instead of inheriting from `Worker`:
+The `@worker` decorator provides a powerful way to create workers with pre-configured options. 
+You can use it in three ways: without parameters, with full configuration, or with the `auto_init` feature for direct instantiation.
+
+### Basic Decorator
+
+Use `@worker` without parameters to make any class a Worker:
 
 ```python
 from concurry import worker
@@ -669,6 +674,158 @@ calc = Calculator.options(mode="thread").init(10)
 result = calc.add(5).result()  # 15
 calc.stop()
 ```
+
+### Decorator with Configuration
+
+Configure worker options directly in the decorator:
+
+```python
+from concurry import worker
+
+@worker(mode='thread', max_workers=4, num_retries=3)
+class LLM:
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+    
+    def call_llm(self, prompt: str) -> str:
+        # Call LLM API
+        return f"Response to: {prompt}"
+
+# Options are pre-configured, but you still use .options().init()
+llm = LLM.options().init(model_name='gpt-4')
+result = llm.call_llm("What is 1+1?").result()
+llm.stop()
+
+# Override decorator settings if needed
+llm2 = LLM.options(mode='process', max_workers=8).init(model_name='gpt-4')
+llm2.stop()
+```
+
+### Auto-Initialization with `auto_init=True`
+
+The most powerful feature: direct class instantiation creates worker instances automatically:
+
+```python
+from concurry import worker
+
+@worker(mode='thread', max_workers=4, auto_init=True)
+class LLM:
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+    
+    def call_llm(self, prompt: str) -> str:
+        return f"Response from {self.model_name}: {prompt}"
+
+# Direct instantiation creates a worker! No .options().init() needed
+llm = LLM(model_name='gpt-4')
+
+# Returns a future (worker method call)
+future = llm.call_llm("What is 1+1?")
+result = future.result()
+
+# Clean up
+llm.stop()
+
+# Context manager works too
+with LLM(model_name='gpt-4') as llm:
+    result = llm.call_llm("Hello").result()
+# Automatically stopped
+```
+
+**Key Points:**
+- `auto_init=True` makes `LLM(...)` create a worker instance directly
+- No need to call `.options().init()` 
+- Worker methods return futures as usual
+- Context manager support works automatically
+- You can still use `.options().init()` to override settings
+
+### Disabling Auto-Init
+
+Use `auto_init=False` to create plain Python instances:
+
+```python
+@worker(mode='thread', max_workers=4, auto_init=False)
+class LLM:
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+    
+    def call_llm(self, prompt: str) -> str:
+        return f"Response: {prompt}"
+
+# Creates a plain Python instance (not a worker)
+llm = LLM(model_name='gpt-4')
+result = llm.call_llm("What is 1+1?")  # Returns string directly, not a future
+print(result)  # "Response: What is 1+1?"
+
+# To create a worker, use .options().init()
+worker_llm = LLM.options().init(model_name='gpt-4')
+future = worker_llm.call_llm("What is 1+1?")  # Returns future
+worker_llm.stop()
+```
+
+## Class Inheritance Configuration
+
+You can also configure worker options directly in the class definition using `__init_subclass__`:
+
+```python
+from concurry import Worker
+
+class LLM(Worker, mode='thread', max_workers=4, auto_init=True):
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+    
+    def call_llm(self, prompt: str) -> str:
+        return f"Response from {self.model_name}"
+
+# Direct instantiation creates a worker
+llm = LLM(model_name='gpt-4')
+result = llm.call_llm("Hello").result()
+llm.stop()
+```
+
+This syntax is equivalent to using the `@worker` decorator with the same parameters.
+
+### Configuration Priority
+
+When using both decorator and inheritance, decorator parameters take precedence:
+
+```python
+@worker(mode='process', max_workers=8)  # Decorator config
+class LLM(Worker, mode='thread', max_workers=4):  # Inheritance config
+    pass
+
+# Decorator wins: mode='process', max_workers=8
+llm = LLM.options().init(...)
+```
+
+**Warning:** Mixing decorator and inheritance is discouraged. Choose one approach for clarity.
+
+### Overriding Configuration
+
+Both decorator and inheritance configurations can be overridden at instantiation:
+
+```python
+@worker(mode='thread', max_workers=4, auto_init=True)
+class LLM:
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+
+# Use decorator defaults
+llm1 = LLM(model_name='gpt-4')  # mode='thread', max_workers=4
+
+# Override at instantiation
+llm2 = LLM.options(mode='process', max_workers=8).init(model_name='gpt-4')
+# mode='process', max_workers=8
+
+llm1.stop()
+llm2.stop()
+```
+
+**Configuration Priority (highest to lowest):**
+1. Explicit `.options()` parameters
+2. `@worker` decorator parameters
+3. `class Worker(...)` inheritance parameters
+4. `global_config` defaults
 
 ## Type Safety and Validation
 

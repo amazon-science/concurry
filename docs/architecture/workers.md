@@ -2194,6 +2194,376 @@ class TestDaskWorker:
         pool.stop()
 ```
 
+## Enhanced Worker Decorator and Auto-Initialization
+
+### Overview
+
+The `@worker` decorator and `__init_subclass__` mechanism provide three ways to configure workers with pre-defined options:
+
+1. **Decorator Configuration**: `@worker(mode='thread', max_workers=4)`
+2. **Inheritance Configuration**: `class LLM(Worker, mode='thread', max_workers=4)`
+3. **Auto-Initialization**: `auto_init=True` enables direct class instantiation to create workers
+
+This feature makes worker creation more ergonomic while maintaining backward compatibility.
+
+### Design Goals
+
+1. **Ergonomic API**: Enable `llm = LLM(model='gpt-4')` to create workers directly
+2. **Backward Compatible**: `@worker` without parameters still works
+3. **Flexible Configuration**: Support decorator, inheritance, and `.options()` override
+4. **Clear Precedence**: Explicit `.options()` > Decorator > Inheritance > `global_config`
+5. **No Recursion**: Prevent infinite loops when `auto_init=True`
+
+### Implementation Architecture
+
+#### Three Configuration Sources
+
+**1. Decorator Configuration (`_worker_decorator_config`)**
+
+Set by `@worker(...)` decorator:
+
+```python
+@worker(mode='thread', max_workers=4, auto_init=True)
+class LLM:
+    pass
+
+# Stored as: LLM._worker_decorator_config = {'mode': 'thread', 'max_workers': 4, 'auto_init': True}
+```
+
+**2. Inheritance Configuration (`_worker_inheritance_config`)**
+
+Set by `__init_subclass__` when subclassing `Worker`:
+
+```python
+class LLM(Worker, mode='thread', max_workers=4, auto_init=True):
+    pass
+
+# Stored as: LLM._worker_inheritance_config = {'mode': 'thread', 'max_workers': 4, 'auto_init': True}
+```
+
+**3. Explicit Configuration (`.options()`)**
+
+Highest priority, overrides both decorator and inheritance:
+
+```python
+llm = LLM.options(mode='process', max_workers=8).init(...)
+# mode='process', max_workers=8 (overrides decorator/inheritance)
+```
+
+#### Configuration Merging in `Worker.options()`
+
+The `Worker.options()` method merges all three sources:
+
+```python
+@classmethod
+def options(cls, *, mode=_NO_ARG, ...):
+    merged_params = {}
+    
+    # 1. Start with inheritance config (lowest priority)
+    if hasattr(cls, '_worker_inheritance_config'):
+        merged_params.update(cls._worker_inheritance_config)
+    
+    # 2. Override with decorator config (medium priority)
+    if hasattr(cls, '_worker_decorator_config'):
+        merged_params.update(cls._worker_decorator_config)
+    
+    # 3. Override with explicit parameters (highest priority)
+    if mode is not _NO_ARG:
+        merged_params['mode'] = mode
+    # ... (other parameters)
+    
+    # 4. Apply global_config defaults for missing values
+    # ...
+    
+    return WorkerBuilder(worker_cls=cls, ...)
+```
+
+**Precedence (highest to lowest)**:
+1. Explicit `.options()` parameters
+2. `@worker` decorator parameters
+3. `class Worker(...)` inheritance parameters
+4. `global_config` defaults
+
+#### Auto-Initialization via `Worker.__new__`
+
+When `auto_init=True`, direct class instantiation creates a worker:
+
+```python
+def __new__(cls, *args, **kwargs):
+    # 1. Check for _from_proxy flag (prevents recursion)
+    in_proxy_creation = kwargs.pop('_from_proxy', False)
+    if in_proxy_creation:
+        # Proxy is creating the actual worker instance
+        return super().__new__(cls)
+    
+    # 2. Merge decorator and inheritance configs
+    merged_config = {}
+    if hasattr(cls, '_worker_inheritance_config'):
+        merged_config.update(cls._worker_inheritance_config)
+    if hasattr(cls, '_worker_decorator_config'):
+        merged_config.update(cls._worker_decorator_config)
+    
+    # 3. Check if auto_init is enabled
+    should_auto_init = merged_config.get('auto_init', False)
+    
+    if should_auto_init:
+        # 4. Create worker via .options().init()
+        options_params = {k: v for k, v in merged_config.items() if k != 'auto_init'}
+        builder = cls.options(**options_params)
+        return builder.init(*args, **kwargs)
+    
+    # 5. Normal instantiation (plain Python instance)
+    return super().__new__(cls)
+```
+
+**Key Points**:
+- `_from_proxy=True` flag prevents infinite recursion
+- `auto_init` defaults to `True` if any config is provided
+- `.options().init()` is called automatically when `auto_init=True`
+
+#### Recursion Prevention with `_from_proxy` Flag
+
+**The Problem**: Without recursion prevention, this would loop infinitely:
+
+```python
+@worker(mode='thread', auto_init=True)
+class LLM:
+    pass
+
+llm = LLM(...)  # Calls Worker.__new__
+# → sees auto_init=True
+# → calls cls.options().init(...)
+# → WorkerBuilder creates proxy
+# → Proxy calls worker_cls(...) to create worker instance
+# → Calls Worker.__new__ again
+# → sees auto_init=True again
+# → INFINITE RECURSION!
+```
+
+**The Solution**: `_from_proxy=True` flag breaks the cycle:
+
+```python
+# In all proxy classes (SyncWorkerProxy, ThreadWorkerProxy, etc.):
+def post_initialize(self):
+    worker_cls = _create_worker_wrapper(self.worker_cls, ...)
+    
+    # CRITICAL: Pass _from_proxy=True to bypass auto_init
+    init_kwargs = dict(self.init_kwargs)
+    init_kwargs['_from_proxy'] = True  # ← Prevents recursion
+    
+    self._worker = worker_cls(*self.init_args, **init_kwargs)
+```
+
+When `_from_proxy=True` is present, `Worker.__new__` skips the `auto_init` logic and creates a plain instance directly.
+
+**Flow with `_from_proxy`**:
+1. User: `llm = LLM(model='gpt-4')`
+2. `Worker.__new__`: sees `auto_init=True`, calls `.options().init(model='gpt-4')`
+3. `WorkerBuilder`: creates `SyncWorkerProxy(init_kwargs={'model': 'gpt-4'})`
+4. `SyncWorkerProxy.post_initialize()`: adds `_from_proxy=True` to `init_kwargs`
+5. Proxy: calls `worker_cls(model='gpt-4', _from_proxy=True)`
+6. `Worker.__new__`: sees `_from_proxy=True`, skips `auto_init`, returns plain instance ✅
+7. No recursion!
+
+#### Composition Wrapper Compatibility
+
+The composition wrapper (for `Typed`/`BaseModel` workers) must NOT inherit `auto_init`:
+
+```python
+def _create_composition_wrapper(worker_cls):
+    class CompositionWrapper(Worker):
+        def __init__(self, *args, **kwargs):
+            # Remove _from_proxy before creating wrapped instance
+            kwargs.pop('_from_proxy', None)
+            self._wrapped_instance = worker_cls(*args, _from_proxy=True, **kwargs)
+    
+    # CRITICAL: Remove auto_init from config to prevent recursion
+    if hasattr(worker_cls, '_worker_inheritance_config'):
+        config = worker_cls._worker_inheritance_config.copy()
+        config.pop('auto_init', None)  # ← Remove auto_init
+        if len(config) > 0:
+            CompositionWrapper._worker_inheritance_config = config
+    
+    if hasattr(worker_cls, '_worker_decorator_config'):
+        config = worker_cls._worker_decorator_config.copy()
+        config.pop('auto_init', None)  # ← Remove auto_init
+        if len(config) > 0:
+            CompositionWrapper._worker_decorator_config = config
+    
+    return CompositionWrapper
+```
+
+**Why**: The composition wrapper is an internal implementation detail. It should never auto-initialize itself when instantiated by the proxy.
+
+#### Worker Wrapper Compatibility
+
+Similarly, worker wrappers (for limits/retries) must NOT inherit `auto_init`:
+
+```python
+def _create_worker_wrapper(worker_cls, limits, retry_configs):
+    if limits is not None:
+        class WorkerWithLimits(worker_cls):
+            def __init__(self, *args, **kwargs):
+                kwargs.pop('_from_proxy', None)
+                super().__init__(*args, **kwargs)
+                # ... limits logic
+        
+        # CRITICAL: Remove auto_init from inherited config
+        if hasattr(WorkerWithLimits, '_worker_inheritance_config'):
+            config = WorkerWithLimits._worker_inheritance_config.copy()
+            config.pop('auto_init', None)
+            if len(config) > 0:
+                WorkerWithLimits._worker_inheritance_config = config
+        
+        if hasattr(WorkerWithLimits, '_worker_decorator_config'):
+            config = WorkerWithLimits._worker_decorator_config.copy()
+            config.pop('auto_init', None)
+            if len(config) > 0:
+                WorkerWithLimits._worker_decorator_config = config
+        
+        return WorkerWithLimits
+    
+    return worker_cls
+```
+
+**Why**: Worker wrappers are internal classes created by the proxy. They should never trigger `auto_init` when instantiated.
+
+### Usage Patterns
+
+#### Pattern 1: Decorator with Auto-Init
+
+```python
+@worker(mode='thread', max_workers=4, auto_init=True)
+class LLM:
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+    
+    def call_llm(self, prompt: str) -> str:
+        return f"Response from {self.model_name}"
+
+# Direct instantiation creates worker
+llm = LLM(model_name='gpt-4')
+future = llm.call_llm("Hello")
+result = future.result()
+llm.stop()
+```
+
+#### Pattern 2: Inheritance with Auto-Init
+
+```python
+class LLM(Worker, mode='thread', max_workers=4, auto_init=True):
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+
+# Direct instantiation creates worker
+llm = LLM(model_name='gpt-4')
+llm.stop()
+```
+
+#### Pattern 3: Decorator Without Auto-Init (Backward Compatible)
+
+```python
+@worker
+class LLM:
+    pass
+
+# Must use .options().init() (backward compatible)
+llm = LLM.options(mode='thread').init(...)
+llm.stop()
+```
+
+#### Pattern 4: Override at Instantiation
+
+```python
+@worker(mode='thread', max_workers=4, auto_init=True)
+class LLM:
+    pass
+
+# Use decorator defaults
+llm1 = LLM(...)  # mode='thread', max_workers=4
+
+# Override decorator config
+llm2 = LLM.options(mode='process', max_workers=8).init(...)
+# mode='process', max_workers=8
+
+llm1.stop()
+llm2.stop()
+```
+
+### Testing and Validation
+
+**Test Coverage**:
+- `tests/core/worker/test_enhanced_worker_decorator.py` (comprehensive test suite)
+  - Basic decorator functionality
+  - Inheritance configuration
+  - Auto-initialization behavior
+  - Configuration precedence
+  - Options override
+  - All execution modes
+  - Typed/BaseModel workers
+  - Context manager support
+  - Error cases
+  - Recursion prevention
+
+**Key Test Cases**:
+1. Decorator with `auto_init=True` creates workers directly
+2. Decorator with `auto_init=False` creates plain instances
+3. Inheritance with `auto_init=True` creates workers directly
+4. `.options()` overrides decorator/inheritance config
+5. Mixed decorator + inheritance (decorator wins, with warning)
+6. No infinite recursion with `auto_init=True`
+7. Composition wrapper doesn't trigger `auto_init`
+8. Worker wrapper doesn't trigger `auto_init`
+9. Works across all execution modes (sync, thread, process, asyncio, ray)
+10. Works with `Typed` and `BaseModel` workers
+
+### Design Rationale
+
+**Why Three Configuration Sources?**
+- **Decorator**: Convenient for standalone classes
+- **Inheritance**: Natural for class hierarchies
+- **`.options()`**: Runtime flexibility and override capability
+
+**Why `auto_init` Defaults to `True`?**
+- If user provides any configuration, they likely want auto-initialization
+- Makes the API more ergonomic (`llm = LLM(...)` vs `llm = LLM.options().init(...)`)
+- Can be explicitly disabled with `auto_init=False`
+
+**Why `_from_proxy` Flag?**
+- Simplest solution to prevent recursion
+- Minimal performance overhead (one dict lookup)
+- Clear intent (flag explicitly indicates proxy creation)
+- Alternative approaches (checking call stack, thread-local state) are more complex
+
+**Why Remove `auto_init` from Wrappers?**
+- Wrappers are internal implementation details
+- They should never auto-initialize themselves
+- Prevents infinite recursion when proxy creates worker instance
+- Keeps `auto_init` behavior at the user-facing layer only
+
+### Backward Compatibility
+
+**Fully Backward Compatible**:
+- `@worker` without parameters still works
+- Existing `.options().init()` code unchanged
+- No breaking changes to existing APIs
+- New features are opt-in via `auto_init=True`
+
+**Migration Path**:
+```python
+# Old code (still works)
+@worker
+class LLM:
+    pass
+llm = LLM.options(mode='thread').init(...)
+
+# New code (more ergonomic)
+@worker(mode='thread', auto_init=True)
+class LLM:
+    pass
+llm = LLM(...)
+```
+
 ## Limitations and Gotchas
 
 ### 1. Typed/BaseModel Workers and Infrastructure Methods

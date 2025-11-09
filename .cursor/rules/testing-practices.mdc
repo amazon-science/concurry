@@ -431,6 +431,130 @@ Test fails
 ✅ Test edge cases (empty, single, mixed), exceptions, timeouts
 ✅ Include Ray runtime_env: `runtime_env={"py_modules": [concurry, morphic]}`
 
+## Testing Shared Limits
+
+### Why Shared Limit Testing is Critical
+
+Shared limit enforcement is challenging to test because:
+- **Timing Variability**: Ray/process/thread modes have different scheduling characteristics
+- **Race Conditions**: Must catch TOCTOU bugs and capacity violations
+- **Async Scheduling**: Ray's async execution makes precise timing assertions unreliable
+
+### Testing Strategy: Explicit Acquisition Tracking
+
+**Key Insight**: Track explicit acquisition events, not wall-clock timing.
+
+**Test Pattern** (see `tests/core/limit/test_shared_limits.py::TestSharedLimitAcquisitionTracking`):
+
+```python
+def test_shared_limit_behavior(self, worker_mode):
+    """Test [specific behavior].
+    
+    What this validates:
+    - [Property 1]
+    - [Property 2]
+    
+    Logical constraints (MUST hold):
+    1. [Constraint with reasoning]
+    2. [Constraint with reasoning]
+    """
+    class TrackingWorker(Worker):
+        def hold_resource(self, hold_time: float) -> dict:
+            import time
+            request_time = time.time()
+            
+            with self.limits.acquire(requested={"resource": 1}):
+                grant_time = time.time()
+                wait_time = grant_time - request_time
+                time.sleep(hold_time)
+                release_time = time.time()
+                
+                return {
+                    "request_time": request_time,
+                    "grant_time": grant_time,
+                    "release_time": release_time,
+                    "wait_time": wait_time,
+                }
+    
+    # Create shared limits and workers
+    # Submit tasks
+    # Validate logical constraints (not exact timings)
+    # Check capacity never exceeded
+```
+
+### Timing Thresholds for Shared Limits
+
+**Use generous thresholds that account for execution mode overhead:**
+
+| Threshold | Purpose | Rationale |
+|-----------|---------|-----------|
+| `< 0.6s` | "Immediate" acquisition | Ray scheduling delay + still catches bugs |
+| `>= 0.4s` | "Waited" for resource | Catches premature acquisition |
+| `>= 0.9s` | "Waited full duration" | Validates full hold time (1s - epsilon) |
+
+**Key Principle**: Thresholds should be:
+- **Loose enough** to handle Ray/process scheduling variations
+- **Tight enough** to catch actual bugs (e.g., limits not shared)
+
+### Critical Validations
+
+**1. Timeline Analysis (Capacity Never Exceeded):**
+```python
+# Build timeline of grant/release events
+events = []
+for r in results:
+    events.append(("grant", r["grant_time"], r["worker_id"]))
+    events.append(("release", r["release_time"], r["worker_id"]))
+events.sort(key=lambda e: e[1])
+
+# Track concurrent holdings
+current_holdings = set()
+max_concurrent = 0
+for event_type, timestamp, worker_id in events:
+    if event_type == "grant":
+        current_holdings.add(worker_id)
+        max_concurrent = max(max_concurrent, len(current_holdings))
+    else:
+        current_holdings.discard(worker_id)
+
+# CRITICAL: Max concurrent MUST NOT exceed capacity
+assert max_concurrent <= capacity
+```
+
+**2. Sequential Wave Validation:**
+```python
+# Wave 2 cannot acquire before Wave 1 releases
+wave1_latest_release = max(r["release_time"] for r in wave1)
+wave2_earliest_grant = min(r["grant_time"] for r in wave2)
+assert wave2_earliest_grant >= wave1_latest_release - 0.1
+```
+
+**3. Total Elapsed Time (More Robust than Individual Timings):**
+```python
+# Total time MUST show sequential waves
+assert total_elapsed >= 1.9  # Two 1s waves - epsilon
+assert total_elapsed < 3.0   # Not three sequential waves
+```
+
+### What NOT to Test
+
+❌ **Bad**: `assert task_wait_time == 1.0` (exact timing)
+❌ **Bad**: `assert 3 <= immediate <= 4` (depends on which tasks start first)
+❌ **Bad**: `assert waited >= 2` (depends on Ray scheduling order)
+❌ **Bad**: Assuming FIFO ordering of waiting tasks (not guaranteed)
+
+✅ **Good**: `assert total_elapsed >= 1.5` (logical minimum - proves sharing)
+✅ **Good**: `assert max_concurrent <= capacity` (hard constraint - MUST hold)
+✅ **Good**: `assert not all_immediate` (at least one task waited)
+
+### Example Tests
+
+See `tests/core/limit/test_shared_limits.py::TestSharedLimitAcquisitionTracking`:
+- `test_shared_resource_limit_sequential_waves`: Validates wave pattern
+- `test_shared_resource_limit_precise_capacity_enforcement`: Timeline analysis
+
+**For full details**, see [Architecture: Limits - Testing Section](../docs/architecture/limits.md#testing-shared-limit-enforcement).
+
 ## Anti-Patterns to Avoid
 
 ❌ Hardcoding mode: `mode="thread"` (use `worker_mode` fixture)
@@ -438,3 +562,4 @@ Test fails
 ❌ Not cleaning up: missing `w.stop()`
 ❌ Unclear test names: `test_1()` instead of `test_feature_behavior()`
 ❌ Testing only happy path without exception handling
+❌ Exact timing assertions for shared limits (use logical constraints instead)

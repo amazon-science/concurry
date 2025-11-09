@@ -1055,6 +1055,11 @@ class RaySharedLimitSet(BaseLimitSet):
 
     Uses a Ray actor for centralized coordination across Ray workers.
     Suitable for Ray workers.
+
+    Pickling Note:
+        This class is designed to be pickled and sent to Ray workers. The Ray actor
+        handle (_actor) is correctly preserved during pickling/unpickling, ensuring
+        all workers share the same centralized LimitTrackerActor.
     """
 
     def __init__(self, limits: List[Limit], shared: bool = True, config: Optional[dict] = None):
@@ -1075,6 +1080,8 @@ class RaySharedLimitSet(BaseLimitSet):
         if not ray.is_initialized():
             raise RuntimeError("Ray is not initialized. Call ray.init() before creating RaySharedLimitSet.")
 
+        # Create Ray actor for centralized limit tracking
+        # This actor handle is preserved during pickling, so all workers share the same actor
         self._actor = LimitTrackerActor.options(num_cpus=0.01).remote()
 
         # Register limits with the actor

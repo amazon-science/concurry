@@ -75,7 +75,12 @@ def _process_worker_main(
                     # Create wrapper class with limits and retry logic if needed
                     actual_worker_cls = _create_worker_wrapper(worker_cls, limits, retry_configs)
 
-                    worker = actual_worker_cls(*init_args, **init_kwargs)
+                    # CRITICAL: Pass _from_proxy=True to bypass auto_init logic in Worker.__new__
+                    # This prevents infinite recursion when the worker class has auto_init=True
+                    worker_init_kwargs = dict(init_kwargs)
+                    worker_init_kwargs["_from_proxy"] = True
+
+                    worker = actual_worker_cls(*init_args, **worker_init_kwargs)
                     result_queue.put((request_id, "ok", None))
                     continue
 

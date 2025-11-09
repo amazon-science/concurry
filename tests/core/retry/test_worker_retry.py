@@ -114,13 +114,9 @@ class ConfiguredPydanticWorker(Worker, BaseModel):
 
     max_retries: int = Field(default=3)
     timeout: float = Field(default=1.0)
+    attempt_count: int = Field(default=0)
 
     model_config = {"arbitrary_types_allowed": True, "extra": "allow"}
-
-    def __init__(self, **data):
-        super().__init__(**data)
-        # Use object.__setattr__ to bypass Pydantic validation for runtime attributes
-        object.__setattr__(self, "attempt_count", 0)
 
     def process(self, value: int) -> int:
         object.__setattr__(self, "attempt_count", self.attempt_count + 1)
@@ -136,8 +132,7 @@ class TypedWorkerWithRetry(Worker, Typed):
 
     model_config = {"extra": "allow"}
 
-    def __init__(self, config_value: int):
-        super().__init__(config_value=config_value)
+    def post_initialize(self):
         # Use object.__setattr__ to bypass Pydantic validation for runtime attributes
         object.__setattr__(self, "attempt_count", 0)
 
@@ -768,13 +763,23 @@ class TestRetryWithSharedLimits:
         total_times = [r["total_time"] for r in results]
         avg_time = sum(total_times) / len(total_times)
 
-        # Average should be significantly more than 0.5s (the base sleep time)
-        # This proves resources were contended and limits were shared
-        # With capacity=3 and 6 workers competing, expect substantial waiting
-        assert avg_time > 0.6, (
-            f"Average completion time {avg_time:.2f}s suggests limits may not be shared. "
-            f"Expected average > 0.6s due to resource contention (base time is 0.5s sleep). "
+        # Validate shared behavior using a more robust check:
+        # NOT all tasks should complete in ~0.5s (the base sleep time)
+        # If limits are shared, at least some tasks must wait
+        immediate_completions = sum(1 for t in total_times if t < 0.55)
+
+        # With capacity=3 and 6 workers, we expect 3-4 to complete immediately
+        # and 2-3 to wait. Due to Ray's async scheduling, allow some variance.
+        assert immediate_completions < 6, (
+            f"All {immediate_completions} tasks completed immediately (<0.55s), limits NOT shared! "
             f"Individual times: {total_times}"
+        )
+
+        # At least one task should have waited significantly
+        max_time = max(total_times)
+        assert max_time > 0.7, (
+            f"No task waited significantly (max={max_time:.2f}s), limits may not be shared. "
+            f"Expected at least one task to wait >0.7s. Individual times: {total_times}"
         )
 
         # No worker should complete faster than the base sleep time

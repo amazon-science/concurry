@@ -1392,7 +1392,9 @@ class TestSubmissionQueueFastSubmission:
         assert task_ids == list(range(10)), "Task IDs should be 0-9"
 
         # With 10 workers, completion should be much faster than serial execution
-        # Serial would be ~20s, parallel should be ~2-3s (allow up to 6s for Ray overhead)
-        assert complete_time < 6.0, f"Completion took {complete_time:.3f}s, should show parallelism (< 6s)"
+        # Serial would be ~20s, parallel should be ~2-3s
+        # Ray client mode adds significant overhead (actor startup, network communication)
+        # Allow up to 8s to account for Ray client mode overhead while still catching regressions
+        assert complete_time < 8.0, f"Completion took {complete_time:.3f}s, should show parallelism (< 8s)"
 
         pool.stop()

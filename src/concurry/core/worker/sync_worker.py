@@ -85,8 +85,13 @@ class SyncWorkerProxy(WorkerProxy):
         # (limits and retry_configs already processed by WorkerBuilder)
         worker_cls = _create_worker_wrapper(self.worker_cls, self.limits, self.retry_configs)
 
+        # CRITICAL: Pass _from_proxy=True to bypass auto_init logic in Worker.__new__
+        # This prevents infinite recursion when the worker class has auto_init=True
+        init_kwargs = dict(self.init_kwargs)
+        init_kwargs["_from_proxy"] = True
+
         # Create the worker instance directly
-        self._worker = worker_cls(*self.init_args, **self.init_kwargs)
+        self._worker = worker_cls(*self.init_args, **init_kwargs)
 
     def __getattr__(self, name: str):
         """Intercept method calls with caching for maximum performance.

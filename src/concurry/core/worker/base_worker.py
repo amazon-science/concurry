@@ -530,10 +530,35 @@ def _create_composition_wrapper(worker_cls: Type) -> Type:
 
         def __init__(self, *args, **kwargs):
             """Initialize by creating the wrapped BaseModel/Typed instance."""
+            # Remove _from_proxy flag from our kwargs (if present)
+            kwargs.pop("_from_proxy", None)
+
             # Don't call super().__init__() since Worker base class doesn't define __init__
             # Create the actual BaseModel/Typed instance internally
             # This happens inside the Ray actor, so serialization is fine
-            self._wrapped_instance = worker_cls(*args, **kwargs)
+
+            # CRITICAL: Only pass _from_proxy=True if Worker comes before Typed/BaseModel in MRO
+            # This prevents auto_init recursion while avoiding Pydantic validation errors
+            # If Typed/BaseModel comes first, they'll reject _from_proxy before Worker can pop it
+            mro = worker_cls.__mro__
+            worker_idx = mro.index(Worker) if Worker in mro else -1
+
+            # Check if Typed or BaseModel comes before Worker in MRO
+            typed_before_worker = False
+            for i, cls in enumerate(mro):
+                cls_name = cls.__name__
+                if cls_name in ("Typed", "BaseModel") and (worker_idx == -1 or i < worker_idx):
+                    typed_before_worker = True
+                    break
+
+            # Only pass _from_proxy if Worker comes first (can pop it before Typed validation)
+            if typed_before_worker:
+                # Typed/BaseModel comes first - don't pass _from_proxy
+                # The wrapped class won't have auto_init anyway (we removed it from config)
+                self._wrapped_instance = worker_cls(*args, **kwargs)
+            else:
+                # Worker comes first - pass _from_proxy to prevent auto_init recursion
+                self._wrapped_instance = worker_cls(*args, _from_proxy=True, **kwargs)
 
         def __getattr__(self, name: str):
             """Delegate attribute access to wrapped instance.
@@ -642,6 +667,21 @@ def _create_composition_wrapper(worker_cls: Type) -> Type:
     CompositionWrapper.__qualname__ = f"{worker_cls.__qualname__}_CompositionWrapper"
     CompositionWrapper.__module__ = worker_cls.__module__
 
+    # CRITICAL: Copy config attributes to wrapper, but EXCLUDE auto_init
+    # The composition wrapper should never auto-initialize itself (it's created by the proxy)
+    # Copying auto_init would cause infinite recursion when proxy tries to instantiate the wrapper
+    if hasattr(worker_cls, "_worker_inheritance_config"):
+        inheritance_config = worker_cls._worker_inheritance_config.copy()
+        inheritance_config.pop("auto_init", None)  # Remove auto_init
+        if len(inheritance_config) > 0:  # Only set if there are other configs
+            CompositionWrapper._worker_inheritance_config = inheritance_config
+
+    if hasattr(worker_cls, "_worker_decorator_config"):
+        decorator_config = worker_cls._worker_decorator_config.copy()
+        decorator_config.pop("auto_init", None)  # Remove auto_init
+        if len(decorator_config) > 0:  # Only set if there are other configs
+            CompositionWrapper._worker_decorator_config = decorator_config
+
     return CompositionWrapper
 
 
@@ -713,6 +753,9 @@ def _create_worker_wrapper(
         # Only need to set limits, no retry logic
         class WorkerWithLimits(worker_cls):
             def __init__(self, *args, **kwargs):
+                # Remove _from_proxy flag if present (internal use only)
+                kwargs.pop("_from_proxy", None)
+
                 # Call parent __init__ first to properly initialize Pydantic models
                 super().__init__(*args, **kwargs)
 
@@ -743,10 +786,32 @@ def _create_worker_wrapper(
 
         WorkerWithLimits.__name__ = f"{worker_cls.__name__}_WithLimits"
         WorkerWithLimits.__qualname__ = f"{worker_cls.__qualname__}_WithLimits"
+
+        # CRITICAL: Remove auto_init from inherited config to prevent infinite recursion
+        # The worker wrapper should never auto-initialize itself (it's created by the proxy)
+        if hasattr(WorkerWithLimits, "_worker_inheritance_config"):
+            config = WorkerWithLimits._worker_inheritance_config.copy()
+            config.pop("auto_init", None)
+            if len(config) > 0:
+                WorkerWithLimits._worker_inheritance_config = config
+            else:
+                delattr(WorkerWithLimits, "_worker_inheritance_config")
+
+        if hasattr(WorkerWithLimits, "_worker_decorator_config"):
+            config = WorkerWithLimits._worker_decorator_config.copy()
+            config.pop("auto_init", None)
+            if len(config) > 0:
+                WorkerWithLimits._worker_decorator_config = config
+            else:
+                delattr(WorkerWithLimits, "_worker_decorator_config")
+
         return WorkerWithLimits
 
     class WorkerWithLimitsAndRetry(worker_cls):
         def __init__(self, *args, **kwargs):
+            # Remove _from_proxy flag if present (internal use only)
+            kwargs.pop("_from_proxy", None)
+
             # Call parent __init__ first to properly initialize Pydantic models
             super().__init__(*args, **kwargs)
 
@@ -913,6 +978,24 @@ def _create_worker_wrapper(
             except (AttributeError, TypeError):
                 # Skip attributes that can't be wrapped
                 pass
+
+    # CRITICAL: Remove auto_init from inherited config to prevent infinite recursion
+    # The worker wrapper should never auto-initialize itself (it's created by the proxy)
+    if hasattr(WorkerWithLimitsAndRetry, "_worker_inheritance_config"):
+        config = WorkerWithLimitsAndRetry._worker_inheritance_config.copy()
+        config.pop("auto_init", None)
+        if len(config) > 0:
+            WorkerWithLimitsAndRetry._worker_inheritance_config = config
+        else:
+            delattr(WorkerWithLimitsAndRetry, "_worker_inheritance_config")
+
+    if hasattr(WorkerWithLimitsAndRetry, "_worker_decorator_config"):
+        config = WorkerWithLimitsAndRetry._worker_decorator_config.copy()
+        config.pop("auto_init", None)
+        if len(config) > 0:
+            WorkerWithLimitsAndRetry._worker_decorator_config = config
+        else:
+            delattr(WorkerWithLimitsAndRetry, "_worker_decorator_config")
 
     return WorkerWithLimitsAndRetry
 
@@ -1303,11 +1386,14 @@ class WorkerBuilder(Typed):
         # Get mode defaults for worker timeouts (from global config)
         mode_defaults = local_config.get_defaults(execution_mode)
 
+        # Add _from_proxy flag to init_kwargs to prevent auto_init recursion
+        worker_init_kwargs = {**kwargs, "_from_proxy": True}
+
         # Build kwargs with only known proxy fields
         proxy_kwargs = {
             "worker_cls": self.worker_cls,
             "init_args": args,
-            "init_kwargs": kwargs,
+            "init_kwargs": worker_init_kwargs,
             "blocking": self.blocking,
             "max_queued_tasks": self.max_queued_tasks,
             "unwrap_futures": self.unwrap_futures,
@@ -1409,6 +1495,9 @@ class WorkerBuilder(Typed):
         if max_workers is None:
             max_workers = mode_defaults.max_workers
 
+        # Add _from_proxy flag to init_kwargs to prevent auto_init recursion
+        pool_init_kwargs = {**kwargs, "_from_proxy": True}
+
         # Create pool instance with known pool fields + mode_options
         pool_kwargs = {
             "worker_cls": self.worker_cls,
@@ -1422,7 +1511,7 @@ class WorkerBuilder(Typed):
             "limits": limits,
             "retry_configs": retry_configs,
             "init_args": args,
-            "init_kwargs": kwargs,
+            "init_kwargs": pool_init_kwargs,
             "on_demand_cleanup_timeout": mode_defaults.pool_on_demand_cleanup_timeout,
             "on_demand_slot_max_wait": mode_defaults.pool_on_demand_slot_max_wait,
         }
@@ -1916,12 +2005,122 @@ class Worker:
         See user guide for more: `/docs/user-guide/limits.md`
     """
 
+    def __init_subclass__(
+        cls,
+        *,
+        # Core worker configuration (all optional)
+        mode: Union[ExecutionMode, _NO_ARG_TYPE] = _NO_ARG,
+        blocking: Union[bool, _NO_ARG_TYPE] = _NO_ARG,
+        max_workers: Optional[Union[conint(ge=0), _NO_ARG_TYPE]] = _NO_ARG,
+        load_balancing: Union[LoadBalancingAlgorithm, _NO_ARG_TYPE] = _NO_ARG,
+        on_demand: Union[bool, _NO_ARG_TYPE] = _NO_ARG,
+        max_queued_tasks: Optional[Union[conint(ge=0), _NO_ARG_TYPE]] = _NO_ARG,
+        # Retry parameters
+        num_retries: Union[conint(ge=0), dict[str, conint(ge=0)], _NO_ARG_TYPE] = _NO_ARG,
+        retry_on: Union[Any, dict[str, Any], _NO_ARG_TYPE] = _NO_ARG,
+        retry_algorithm: Union[RetryAlgorithm, dict[str, RetryAlgorithm], _NO_ARG_TYPE] = _NO_ARG,
+        retry_wait: Union[confloat(ge=0), dict[str, confloat(ge=0)], _NO_ARG_TYPE] = _NO_ARG,
+        retry_jitter: Union[confloat(ge=0, le=1), dict[str, confloat(ge=0, le=1)], _NO_ARG_TYPE] = _NO_ARG,
+        retry_until: Union[Any, dict[str, Any], _NO_ARG_TYPE] = _NO_ARG,
+        # Worker-level configuration
+        unwrap_futures: Union[bool, _NO_ARG_TYPE] = _NO_ARG,
+        limits: Optional[Any] = None,
+        # NEW: Control instantiation behavior
+        auto_init: Union[bool, _NO_ARG_TYPE] = _NO_ARG,
+        # Mode-specific options
+        **kwargs: Any,
+    ) -> None:
+        """Called when Worker is subclassed, allowing parameter configuration.
+
+        This enables syntax like:
+            class LLM(Worker, mode='thread', max_workers=4, auto_init=True):
+                ...
+
+        All parameters are optional and match Worker.options() signature.
+        Configuration is stored in cls._worker_inheritance_config.
+
+        Args:
+            mode: Execution mode (sync, thread, process, asyncio, ray)
+            blocking: Whether to return results directly
+            max_workers: Number of workers for pool
+            auto_init: Whether direct instantiation creates workers (default: True if any param set)
+            num_retries: Maximum number of retry attempts after initial failure
+            retry_on: Exception types or callables that trigger retries
+            retry_algorithm: Backoff strategy for wait times
+            retry_wait: Minimum wait time between retries in seconds
+            retry_jitter: Jitter factor between 0 and 1
+            retry_until: Validation functions for output
+            unwrap_futures: If True, automatically unwrap BaseFuture arguments
+            limits: Resource protection and rate limiting
+            load_balancing: Load balancing algorithm
+            on_demand: If True, create workers on-demand per request
+            max_queued_tasks: Maximum number of in-flight tasks per worker
+            **kwargs: Mode-specific options (num_cpus, mp_context, etc.)
+
+        Examples:
+            Inheritance Configuration:
+                ```python
+                class LLM(Worker, mode='thread', max_workers=4):
+                    def __init__(self, model_name: str):
+                        self.model_name = model_name
+
+                # Direct instantiation creates worker pool
+                llm = LLM(model_name='gpt-4')
+                future = llm.call_llm("prompt")
+                ```
+
+            With Decorator (decorator takes precedence):
+                ```python
+                @worker(mode='process')  # Overrides thread mode
+                class LLM(Worker, mode='thread', max_workers=4):
+                    ...
+                ```
+        """
+        super().__init_subclass__(**kwargs)
+
+        # Collect all provided parameters (skip _NO_ARG)
+        inheritance_config = {}
+
+        # Helper to add param if not _NO_ARG
+        def add_if_set(key, value):
+            if value is not _NO_ARG:
+                inheritance_config[key] = value
+
+        add_if_set("mode", mode)
+        add_if_set("blocking", blocking)
+        add_if_set("max_workers", max_workers)
+        add_if_set("load_balancing", load_balancing)
+        add_if_set("on_demand", on_demand)
+        add_if_set("max_queued_tasks", max_queued_tasks)
+        add_if_set("num_retries", num_retries)
+        add_if_set("retry_on", retry_on)
+        add_if_set("retry_algorithm", retry_algorithm)
+        add_if_set("retry_wait", retry_wait)
+        add_if_set("retry_jitter", retry_jitter)
+        add_if_set("retry_until", retry_until)
+        add_if_set("unwrap_futures", unwrap_futures)
+        if limits is not None:
+            inheritance_config["limits"] = limits
+        add_if_set("auto_init", auto_init)
+
+        # Add mode-specific options
+        if len(kwargs) > 0:
+            inheritance_config["mode_options"] = kwargs
+
+        # Store configuration on class
+        # Note: Parent classes may also have this, creating inheritance chain
+        cls._worker_inheritance_config = inheritance_config
+
+        # If any config provided but auto_init not specified, default to True
+        if len(inheritance_config) > 0 and "auto_init" not in inheritance_config:
+            inheritance_config["auto_init"] = True
+
     @classmethod
     @validate
     def options(
         cls: Type[T],
         *,
-        mode: ExecutionMode,
+        mode: Union[ExecutionMode, _NO_ARG_TYPE] = _NO_ARG,
         blocking: Union[bool, _NO_ARG_TYPE] = _NO_ARG,
         max_workers: Optional[Union[conint(ge=0), _NO_ARG_TYPE]] = _NO_ARG,
         load_balancing: Union[LoadBalancingAlgorithm, _NO_ARG_TYPE] = _NO_ARG,
@@ -1940,6 +2139,12 @@ class Worker:
 
         Returns a WorkerBuilder that can be used to create worker instances
         with .init(*args, **kwargs).
+
+        This method merges configuration from multiple sources in priority order:
+        1. Parameters passed to this method (highest priority)
+        2. @worker decorator parameters
+        3. class LLM(Worker, ...) inheritance parameters
+        4. global_config defaults (lowest priority)
 
         **Type Validation:**
 
@@ -2194,56 +2399,139 @@ class Worker:
         # Import here to avoid circular imports
         from ...config import global_config
 
+        # 1. Start with inheritance config (lowest priority)
+        merged_params = {}
+        inheritance_config = getattr(cls, "_worker_inheritance_config", None)
+        if inheritance_config is not None:
+            merged_params.update(inheritance_config)
+
+        # 2. Override with decorator config (medium priority)
+        decorator_config = getattr(cls, "_worker_decorator_config", None)
+        if decorator_config is not None:
+            merged_params.update(decorator_config)
+
+        # 3. Override with provided parameters (highest priority)
+        # Only override if parameter was explicitly provided (not _NO_ARG)
+        if mode is not _NO_ARG:
+            merged_params["mode"] = mode
+        if blocking is not _NO_ARG:
+            merged_params["blocking"] = blocking
+        if max_workers is not _NO_ARG:
+            merged_params["max_workers"] = max_workers
+        if load_balancing is not _NO_ARG:
+            merged_params["load_balancing"] = load_balancing
+        if on_demand is not _NO_ARG:
+            merged_params["on_demand"] = on_demand
+        if max_queued_tasks is not _NO_ARG:
+            merged_params["max_queued_tasks"] = max_queued_tasks
+        if num_retries is not _NO_ARG:
+            merged_params["num_retries"] = num_retries
+        if retry_on is not _NO_ARG:
+            merged_params["retry_on"] = retry_on
+        if retry_algorithm is not _NO_ARG:
+            merged_params["retry_algorithm"] = retry_algorithm
+        if retry_wait is not _NO_ARG:
+            merged_params["retry_wait"] = retry_wait
+        if retry_jitter is not _NO_ARG:
+            merged_params["retry_jitter"] = retry_jitter
+        if retry_until is not _NO_ARG:
+            merged_params["retry_until"] = retry_until
+
+        # Handle unwrap_futures and limits from kwargs
+        if "unwrap_futures" in kwargs:
+            merged_params["unwrap_futures"] = kwargs.pop("unwrap_futures")
+        if "limits" in kwargs:
+            merged_params["limits"] = kwargs.pop("limits")
+
+        # Merge mode_options from configs and kwargs
+        final_mode_options = {}
+        if "mode_options" in merged_params:
+            final_mode_options.update(merged_params["mode_options"])
+        final_mode_options.update(kwargs)  # kwargs override config mode_options
+
+        # 4. Extract mode and validate it's present
+        if "mode" not in merged_params:
+            raise ValueError(
+                f"mode parameter is required. Provide it via:\n"
+                f"  - .options(mode='thread')\n"
+                f"  - @worker(mode='thread')\n"
+                f"  - class {cls.__name__}(Worker, mode='thread')"
+            )
+
+        execution_mode = merged_params["mode"]
+
         # Get defaults for this mode from global config
-        mode_defaults = global_config.get_defaults(mode)
+        mode_defaults = global_config.get_defaults(execution_mode)
 
-        # Apply defaults for all parameters if not specified
-        if blocking is _NO_ARG:
+        # Apply defaults for all parameters if not specified in merged_params
+        if "blocking" not in merged_params:
             blocking = mode_defaults.blocking
+        else:
+            blocking = merged_params["blocking"]
 
-        if max_workers is _NO_ARG:
+        if "max_workers" not in merged_params:
             max_workers = mode_defaults.max_workers
+        else:
+            max_workers = merged_params["max_workers"]
 
-        if on_demand is _NO_ARG:
+        if "on_demand" not in merged_params:
             on_demand = mode_defaults.on_demand
+        else:
+            on_demand = merged_params["on_demand"]
 
-        if max_queued_tasks is _NO_ARG:
+        if "max_queued_tasks" not in merged_params:
             max_queued_tasks = mode_defaults.max_queued_tasks
+        else:
+            max_queued_tasks = merged_params["max_queued_tasks"]
 
-        if load_balancing is _NO_ARG:
+        if "load_balancing" not in merged_params:
             if on_demand:
                 load_balancing = mode_defaults.load_balancing_on_demand
             else:
                 load_balancing = mode_defaults.load_balancing
+        else:
+            load_balancing = merged_params["load_balancing"]
 
-        if num_retries is _NO_ARG:
+        if "num_retries" not in merged_params:
             num_retries = mode_defaults.num_retries
+        else:
+            num_retries = merged_params["num_retries"]
 
-        if retry_algorithm is _NO_ARG:
+        if "retry_algorithm" not in merged_params:
             retry_algorithm = mode_defaults.retry_algorithm
+        else:
+            retry_algorithm = merged_params["retry_algorithm"]
 
-        if retry_wait is _NO_ARG:
+        if "retry_wait" not in merged_params:
             retry_wait = mode_defaults.retry_wait
+        else:
+            retry_wait = merged_params["retry_wait"]
 
-        if retry_jitter is _NO_ARG:
+        if "retry_jitter" not in merged_params:
             retry_jitter = mode_defaults.retry_jitter
+        else:
+            retry_jitter = merged_params["retry_jitter"]
 
-        if retry_on is _NO_ARG:
+        if "retry_on" not in merged_params:
             retry_on = mode_defaults.retry_on
+        else:
+            retry_on = merged_params["retry_on"]
 
-        if retry_until is _NO_ARG:
+        if "retry_until" not in merged_params:
             retry_until = mode_defaults.retry_until
+        else:
+            retry_until = merged_params["retry_until"]
 
-        # Extract unwrap_futures from kwargs (with default)
-        unwrap_futures = kwargs.pop("unwrap_futures", mode_defaults.unwrap_futures)
+        # Extract unwrap_futures from merged_params (with default)
+        unwrap_futures = merged_params.get("unwrap_futures", mode_defaults.unwrap_futures)
 
-        # Extract limits from kwargs
-        limits = kwargs.pop("limits", None)
+        # Extract limits from merged_params
+        limits = merged_params.get("limits", None)
 
         # Everything else in kwargs is mode-specific options (passed through as-is)
         # For Ray: actor_options dict containing num_cpus, num_gpus, resources, etc.
         # For Process: mp_context (fork, spawn, forkserver)
-        mode_options = kwargs  # Pass through all remaining kwargs
+        mode_options = final_mode_options  # Use merged mode_options
 
         # Get user-defined methods for validation (if needed)
         # Only compute if any retry param is a dict
@@ -2277,7 +2565,7 @@ class Worker:
 
         return WorkerBuilder(
             worker_cls=cls,
-            mode=mode,
+            mode=execution_mode,
             blocking=blocking,
             max_workers=max_workers,
             load_balancing=load_balancing,
@@ -2295,13 +2583,56 @@ class Worker:
         )
 
     def __new__(cls, *args, **kwargs):
-        """Override __new__ to support direct instantiation as sync mode."""
-        # If instantiated directly (not via options), behave as sync mode
+        """Override __new__ to support automatic worker initialization.
+
+        Checks for configuration from decorator or inheritance and automatically
+        creates worker instances when auto_init=True.
+
+        Returns:
+            WorkerProxy/WorkerProxyPool if auto_init enabled, else plain instance
+        """
+
+        # CRITICAL PERFORMANCE OPTIMIZATION: Check _from_proxy FIRST before any other logic
+        # This flag indicates we're being called from WorkerProxy/WorkerBuilder
+        # Fast-path this to avoid overhead on every worker instantiation
+        if "_from_proxy" in kwargs:
+            kwargs.pop("_from_proxy")
+            # Normal instantiation for proxy creation - bypass all auto_init logic
+            instance = super().__new__(cls)
+            return instance
+
+        # 1. Check if Worker base class is being instantiated directly
         if cls is Worker:
             raise TypeError("Worker cannot be instantiated directly. Subclass it or use @worker decorator.")
 
-        # Check if this is being called from a proxy
-        # This is a bit of a hack but allows: worker = MLModelWorker() to work
+        # 2. Merge configurations to determine auto_init
+        # Priority: decorator > inheritance
+        merged_config = {}
+
+        # Start with inheritance config (lowest priority)
+        inheritance_config = getattr(cls, "_worker_inheritance_config", None)
+        if inheritance_config is not None:
+            merged_config.update(inheritance_config)
+
+        # Override with decorator config (higher priority)
+        decorator_config = getattr(cls, "_worker_decorator_config", None)
+        if decorator_config is not None:
+            merged_config.update(decorator_config)
+
+        # 3. Check auto_init flag
+        should_auto_init = merged_config.get("auto_init", False)
+
+        # 4. If auto_init enabled, create worker via .options().init()
+        if should_auto_init:
+            # Build options from merged config (excluding auto_init)
+            options_params = {k: v for k, v in merged_config.items() if k != "auto_init"}
+
+            # Create worker via .options().init()
+            # Note: .options() will further merge with global_config
+            builder = cls.options(**options_params)
+            return builder.init(*args, **kwargs)
+
+        # 5. Normal instantiation (auto_init=False or no config)
         instance = super().__new__(cls)
         return instance
 
@@ -2310,6 +2641,8 @@ class Worker:
 
         This method supports cooperative multiple inheritance, allowing Worker
         to be combined with model classes like morphic.Typed or pydantic.BaseModel.
+
+        Removes internal _from_proxy flag before calling parent __init__.
 
         Examples:
             ```python
@@ -2329,6 +2662,9 @@ class Worker:
                 value: int = 0
             ```
         """
+        # Remove _from_proxy flag if present (internal use only)
+        kwargs.pop("_from_proxy", None)
+
         # Support cooperative multiple inheritance with Typed/BaseModel
         # Try to call super().__init__() to propagate to other base classes
         try:
@@ -2651,77 +2987,164 @@ class WorkerProxy(Typed, ABC):
         self.stop()
 
 
-def worker(cls: Type[T]) -> Type[T]:
-    """Decorator to mark a class as a worker.
+@validate
+def worker(
+    cls: Optional[Type[T]] = None,
+    *,
+    # Core worker configuration (all match __init_subclass__)
+    mode: Union[ExecutionMode, _NO_ARG_TYPE] = _NO_ARG,
+    blocking: Union[bool, _NO_ARG_TYPE] = _NO_ARG,
+    max_workers: Optional[Union[conint(ge=0), _NO_ARG_TYPE]] = _NO_ARG,
+    load_balancing: Union[LoadBalancingAlgorithm, _NO_ARG_TYPE] = _NO_ARG,
+    on_demand: Union[bool, _NO_ARG_TYPE] = _NO_ARG,
+    max_queued_tasks: Optional[Union[conint(ge=0), _NO_ARG_TYPE]] = _NO_ARG,
+    # Retry parameters
+    num_retries: Union[conint(ge=0), dict[str, conint(ge=0)], _NO_ARG_TYPE] = _NO_ARG,
+    retry_on: Union[Any, dict[str, Any], _NO_ARG_TYPE] = _NO_ARG,
+    retry_algorithm: Union[RetryAlgorithm, dict[str, RetryAlgorithm], _NO_ARG_TYPE] = _NO_ARG,
+    retry_wait: Union[confloat(ge=0), dict[str, confloat(ge=0)], _NO_ARG_TYPE] = _NO_ARG,
+    retry_jitter: Union[confloat(ge=0, le=1), dict[str, confloat(ge=0, le=1)], _NO_ARG_TYPE] = _NO_ARG,
+    retry_until: Union[Any, dict[str, Any], _NO_ARG_TYPE] = _NO_ARG,
+    # Worker-level configuration
+    unwrap_futures: Union[bool, _NO_ARG_TYPE] = _NO_ARG,
+    limits: Optional[Any] = None,
+    # NEW: Control instantiation behavior
+    auto_init: Union[bool, _NO_ARG_TYPE] = _NO_ARG,
+    # Mode-specific options
+    **kwargs: Any,
+) -> Union[Callable[[Type[T]], Type[T]], Type[T]]:
+    """Decorator to create a Worker class with pre-configured options.
 
-    This decorator converts a regular class into a Worker, allowing it to use
-    the `.options()` method for execution mode selection. This is optional -
-    classes can also directly inherit from Worker.
+    This decorator accepts all Worker.options() parameters and stores them
+    for automatic application when the class is instantiated.
+
+    Can be used with or without parameters:
+    - `@worker` (no params)
+    - `@worker(mode='thread', max_workers=4, auto_init=True)`
 
     Args:
-        cls: The class to convert into a worker
+        cls: The class to decorate (when used without parentheses)
+        mode: Execution mode (sync, thread, process, asyncio, ray)
+        blocking: Whether to return results directly
+        max_workers: Number of workers for pool
+        auto_init: Whether direct instantiation creates workers (default: True if any param)
+        num_retries: Maximum number of retry attempts after initial failure
+        retry_on: Exception types or callables that trigger retries
+        retry_algorithm: Backoff strategy for wait times
+        retry_wait: Minimum wait time between retries in seconds
+        retry_jitter: Jitter factor between 0 and 1
+        retry_until: Validation functions for output
+        unwrap_futures: If True, automatically unwrap BaseFuture arguments
+        limits: Resource protection and rate limiting
+        load_balancing: Load balancing algorithm
+        on_demand: If True, create workers on-demand per request
+        max_queued_tasks: Maximum number of in-flight tasks per worker
+        **kwargs: Mode-specific options
 
     Returns:
-        The worker class with Worker capabilities
+        Decorated class or decorator function
 
     Examples:
-        Basic Decorator Usage:
+        Decorator Only:
             ```python
-            from concurry import worker
+            @worker(mode='thread', max_workers=4, auto_init=True)
+            class LLM:
+                def __init__(self, model_name: str):
+                    self.model_name = model_name
 
-            @worker
-            class DataProcessor:
-                def __init__(self, multiplier: int):
-                    self.multiplier = multiplier
-
-                def process(self, value: int) -> int:
-                    return value * self.multiplier
-
-            # Use like any Worker
-            processor = DataProcessor.options(mode="thread").init(3)
-            result = processor.process(10).result()  # 30
-            processor.stop()
+            # Direct instantiation creates worker
+            llm = LLM(model_name='gpt-4')
+            future = llm.call_llm("What is 1+1?")
             ```
 
-        Equivalent to Inheriting from Worker:
+        Without Parameters (Backward Compatible):
             ```python
-            # These two are equivalent:
-
-            # Using decorator
             @worker
-            class ProcessorA:
-                def __init__(self, value: int):
-                    self.value = value
+            class LLM(Worker):
+                ...
 
-            # Inheriting from Worker
-            class ProcessorB(Worker):
-                def __init__(self, value: int):
-                    self.value = value
+            # Must use .options().init() (no auto_init)
+            llm = LLM.options(mode='thread').init(...)
             ```
 
-        With Different Execution Modes:
+        Override at Instantiation:
             ```python
-            @worker
-            class Calculator:
-                def __init__(self):
-                    self.operations = 0
+            @worker(mode='thread', max_workers=4)
+            class LLM:
+                ...
 
-                def calculate(self, x: int, y: int) -> int:
-                    self.operations += 1
-                    return x + y
+            # Override mode, keep max_workers
+            llm = LLM.options(mode='process').init(...)
+            ```
 
-            # Use with any execution mode
-            calc_thread = Calculator.options(mode="thread")
-            calc_process = Calculator.options(mode="process")
-            calc_sync = Calculator.options(mode="sync")
+    Warnings:
+        Mixing decorator and inheritance parameters is discouraged:
+            ```python
+            @worker(mode='process')  # Decorator
+            class LLM(Worker, mode='thread'):  # Inheritance
+                ...
+            # UserWarning: Both decorator and inheritance config found
             ```
     """
-    if not isinstance(cls, type):
-        raise TypeError(f"@worker decorator requires a class, got {type(cls).__name__}")
 
-    # Make the class inherit from Worker if it doesn't already
-    if not issubclass(cls, Worker):
-        # Create a new class that inherits from both Worker and the original class
-        cls = type(cls.__name__, (Worker, cls), dict(cls.__dict__))
+    def decorator(target_cls: Type[T]) -> Type[T]:
+        # 1. Make class inherit from Worker if needed
+        if not issubclass(target_cls, Worker):
+            target_cls = type(target_cls.__name__, (Worker, target_cls), dict(target_cls.__dict__))
 
-    return cls
+        # 2. Collect decorator configuration
+        decorator_config = {}
+
+        def add_if_set(key, value):
+            if value is not _NO_ARG:
+                decorator_config[key] = value
+
+        add_if_set("mode", mode)
+        add_if_set("blocking", blocking)
+        add_if_set("max_workers", max_workers)
+        add_if_set("load_balancing", load_balancing)
+        add_if_set("on_demand", on_demand)
+        add_if_set("max_queued_tasks", max_queued_tasks)
+        add_if_set("num_retries", num_retries)
+        add_if_set("retry_on", retry_on)
+        add_if_set("retry_algorithm", retry_algorithm)
+        add_if_set("retry_wait", retry_wait)
+        add_if_set("retry_jitter", retry_jitter)
+        add_if_set("retry_until", retry_until)
+        add_if_set("unwrap_futures", unwrap_futures)
+        if limits is not None:
+            decorator_config["limits"] = limits
+        add_if_set("auto_init", auto_init)
+
+        if len(kwargs) > 0:
+            decorator_config["mode_options"] = kwargs
+
+        # If any config provided but auto_init not specified, default to True
+        if len(decorator_config) > 0 and "auto_init" not in decorator_config:
+            decorator_config["auto_init"] = True
+
+        # 3. Check for mixed decorator + inheritance (anti-pattern warning)
+        inheritance_config = getattr(target_cls, "_worker_inheritance_config", None)
+        if inheritance_config is not None and len(decorator_config) > 0:
+            warnings.warn(
+                f"Class {target_cls.__name__} uses both @worker decorator "
+                f"and inheritance parameters (Worker subclass with kwargs). "
+                f"This is an anti-pattern. Decorator parameters take precedence. "
+                f"Recommend using one approach only.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        # 4. Store decorator configuration
+        if len(decorator_config) > 0:
+            target_cls._worker_decorator_config = decorator_config
+
+        return target_cls
+
+    # Support both @worker and @worker(...) syntax
+    if cls is None:
+        # Called with parameters: @worker(...)
+        return decorator
+    else:
+        # Called without parameters: @worker
+        return decorator(cls)

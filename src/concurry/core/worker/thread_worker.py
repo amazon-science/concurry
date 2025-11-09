@@ -151,7 +151,12 @@ class ThreadWorkerProxy(WorkerProxy):
 
                         worker_cls = _create_worker_wrapper(self.worker_cls, self.limits, self.retry_configs)
 
-                        worker = worker_cls(*self.init_args, **self.init_kwargs)
+                        # CRITICAL: Pass _from_proxy=True to bypass auto_init logic in Worker.__new__
+                        # This prevents infinite recursion when the worker class has auto_init=True
+                        init_kwargs = dict(self.init_kwargs)
+                        init_kwargs["_from_proxy"] = True
+
+                        worker = worker_cls(*self.init_args, **init_kwargs)
                         future._future.set_result(None)
                         with self._futures_lock:
                             self._futures.pop(request_id, None)

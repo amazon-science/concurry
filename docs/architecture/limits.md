@@ -1839,6 +1839,210 @@ else:
 
 **Why**: Successful acquisition must be released via context manager.
 
+## Testing Shared Limit Enforcement
+
+### Why Testing is Critical
+
+Shared limit enforcement is one of the most challenging aspects to test correctly because:
+
+1. **Timing Variability**: Different execution modes (thread/process/ray) have different scheduling characteristics
+2. **Race Conditions**: Limits must be enforced atomically without TOCTOU bugs
+3. **Capacity Violations**: Must ensure concurrent holdings never exceed capacity
+4. **Async Scheduling**: Ray's async execution makes timing-based assertions unreliable
+
+**Historical Context (November 2025):**
+
+Initial tests for shared limits used precise timing thresholds (e.g., "tasks should wait exactly 1.0s") which were flaky due to Ray's scheduling delays. Tests were refactored to use:
+- Total elapsed time as the primary metric (more robust than individual task timings)
+- Generous timing thresholds accounting for execution mode overhead
+- Logical constraints that MUST hold regardless of timing variations
+
+### Testing Strategy: Explicit Acquisition Tracking
+
+**Key Insight**: Instead of relying on wall-clock timing, track explicit acquisition events and validate logical relationships.
+
+**Test Class: `TestSharedLimitAcquisitionTracking`**
+
+Located in `tests/core/limit/test_shared_limits.py`, this class provides comprehensive validation of shared limit behavior with:
+
+1. **Explicit Timestamp Tracking**: Workers return `request_time`, `grant_time`, `release_time`, `wait_time`
+2. **Logical Timing Constraints**: Validates hard constraints derived from acquisition patterns
+3. **No Retries**: Tests pure limit enforcement without retry complexity
+4. **Timeline Analysis**: Constructs event timelines to verify capacity never exceeded
+
+### Test 1: Sequential Waves
+
+**Test**: `test_shared_resource_limit_sequential_waves`
+
+**Validates**: With capacity=2 and 4 tasks holding for 1 second:
+- Wave 1: First 2 tasks acquire immediately
+- Wave 2: Last 2 tasks wait until Wave 1 releases
+
+**Logical Constraints (MUST hold regardless of execution mode):**
+```python
+# Wave 1 tasks acquire close together
+wave1_spread = max(wave1_grant_times) - min(wave1_grant_times)
+assert wave1_spread < 0.6  # Generous for Ray scheduling
+
+# Wave 2 tasks MUST wait >= 0.9s (for 1s hold - 0.1s epsilon)
+assert all(wt >= 0.9 for wt in wave2_wait_times)
+
+# Wave 2 cannot acquire before Wave 1 releases
+assert wave2_earliest_grant >= wave1_latest_release - 0.1
+
+# Total time MUST be >= 1.9s (two sequential 1s waves)
+assert total_elapsed >= 1.9
+
+# Total time should be < 4s (allow extra slack for Ray overhead)
+assert total_elapsed < 4.0
+```
+
+**Why This Test Matters:**
+- Validates that tasks cannot acquire resources still being held
+- Ensures capacity enforcement creates sequential execution waves
+- Catches race conditions where Wave 2 acquires before Wave 1 releases
+
+### Test 2: Precise Capacity Enforcement
+
+**Test**: `test_shared_resource_limit_precise_capacity_enforcement`
+
+**Validates**: With capacity=3 and 6 tasks:
+- Exactly 3 tasks acquire immediately
+- Exactly 3 tasks wait for resources
+- At no point do more than 3 tasks hold resources simultaneously
+
+**Logical Constraints:**
+```python
+# Key validation: NOT all 6 tasks should acquire immediately
+# If all 6 acquired in < 0.2s, limits are definitely not shared
+all_immediate = all(wt < 0.2 for wt in wait_times)
+assert not all_immediate  # At least one task must wait
+
+# Build timeline of grant/release events
+events = [(event_type, timestamp, worker_id) for ...]
+events.sort(key=lambda e: e[1])
+
+# Track concurrent holdings
+current_holdings = set()
+max_concurrent = 0
+for event_type, timestamp, worker_id in events:
+    if event_type == "grant":
+        current_holdings.add(worker_id)
+        max_concurrent = max(max_concurrent, len(current_holdings))
+    else:  # release
+        current_holdings.discard(worker_id)
+
+# CRITICAL: Max concurrent MUST NOT exceed capacity
+assert max_concurrent <= 3
+
+# Total time validation: If limits NOT shared, all 6 would complete in ~1s
+# With shared limits (capacity=3), should take ~2s (two waves)
+assert total_elapsed >= 1.5  # Proves limits are shared
+```
+
+**Why This Test Matters:**
+- **Race Condition Detection**: Timeline analysis catches if capacity is ever exceeded
+- **Exact Capacity Validation**: Ensures limits enforce exact capacity, not approximate
+- **Concurrent Holdings Check**: Verifies that at no timestamp do holdings exceed capacity
+
+### Timing Thresholds: Why So Generous?
+
+**Problem**: Ray's async scheduling introduces variable delays:
+- Tasks don't start immediately when submitted
+- Ray scheduler may delay task start by 0-500ms
+- Network overhead adds 10-100ms per remote call
+
+**Solution**: Use generous thresholds that still catch bugs:
+
+| Threshold | Purpose | Why This Value |
+|-----------|---------|----------------|
+| `< 0.6s` | "Immediate" acquisition | Accounts for Ray scheduling delay while catching if task waited for resource |
+| `>= 0.4s` | "Waited" for resource | Catches if task acquired resource still being held (1s hold - slack) |
+| `>= 0.9s` | "Waited full duration" | Validates task waited for full hold time (1s - 0.1s epsilon) |
+
+**Key Principle**: Thresholds should be:
+- **Loose enough** to handle execution mode variations
+- **Tight enough** to catch actual bugs (e.g., limits not shared)
+
+### What NOT to Test
+
+**Avoid timing-based assertions that depend on stochastic conditions:**
+
+❌ **Bad**: `assert task_wait_time == 1.0` (exact timing)
+❌ **Bad**: `assert 3 <= immediate <= 4` (depends on which tasks start first)
+❌ **Bad**: `assert waited >= 2` (depends on Ray scheduling order)
+❌ **Bad**: Assuming FIFO ordering of waiting tasks (not guaranteed)
+
+✅ **Good**: `assert total_elapsed >= 1.5` (logical minimum - proves sharing)
+✅ **Good**: `assert max_concurrent <= capacity` (hard constraint - MUST hold)
+✅ **Good**: `assert not all_immediate` (at least one task waited)
+
+### Differences from `test_retry_shared_limit_no_starvation`
+
+The retry test (`test_retry_shared_limit_no_starvation` in `test_worker_retry.py`) validates:
+- Limits are released between retry attempts
+- No deadlock when workers retry
+- All workers eventually succeed
+
+The acquisition tracking tests validate:
+- Pure limit enforcement (no retry complexity)
+- Precise timing relationships between acquisitions
+- Capacity is never exceeded (race condition check)
+- Sequential wave patterns
+
+Both test suites are complementary and necessary.
+
+### Running the Tests
+
+```bash
+# Run acquisition tracking tests across all modes
+pytest tests/core/limit/test_shared_limits.py::TestSharedLimitAcquisitionTracking -v
+
+# Run specific test
+pytest tests/core/limit/test_shared_limits.py::TestSharedLimitAcquisitionTracking::test_shared_resource_limit_sequential_waves -v
+
+# Run with specific mode
+pytest tests/core/limit/test_shared_limits.py::TestSharedLimitAcquisitionTracking -v -k "ray"
+```
+
+**Expected Results:**
+- ✅ All tests pass across thread/process/ray modes
+- ✅ Tests are stable (not flaky) across multiple runs
+- ✅ Timing constraints validate logical properties, not exact timings
+
+### Adding New Shared Limit Tests
+
+When adding new tests for shared limits:
+
+1. **Track Explicit Timestamps**: Return `request_time`, `grant_time`, `release_time`
+2. **Derive Logical Constraints**: What MUST be true regardless of timing?
+3. **Use Generous Thresholds**: Account for Ray/process scheduling delays
+4. **Validate Hard Constraints**: Check capacity never exceeded, not just "some tasks wait"
+5. **Test Across All Modes**: Use `worker_mode` or `pool_mode` fixture
+6. **Document What You're Testing**: Detailed docstring explaining constraints
+
+**Example Pattern:**
+```python
+def test_my_limit_behavior(self, worker_mode):
+    """Test [specific behavior].
+    
+    What this validates:
+    - [Specific property 1]
+    - [Specific property 2]
+    
+    Logical constraints (MUST hold):
+    1. [Constraint 1 with reasoning]
+    2. [Constraint 2 with reasoning]
+    
+    Difference from other tests:
+    - [What makes this test unique]
+    """
+    # Create workers that track timestamps
+    # Submit tasks
+    # Validate logical constraints (not exact timings)
+    # Check capacity never exceeded
+```
+
 ## Summary
 
 **Key Architectural Principles:**

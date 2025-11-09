@@ -182,7 +182,12 @@ class AsyncioWorkerProxy(WorkerProxy):
         # (limits and retry_configs already processed by WorkerBuilder)
         worker_cls = _create_worker_wrapper(self.worker_cls, self.limits, self.retry_configs)
 
-        self._worker = worker_cls(*self.init_args, **self.init_kwargs)
+        # CRITICAL: Pass _from_proxy=True to bypass auto_init logic in Worker.__new__
+        # This prevents infinite recursion when the worker class has auto_init=True
+        init_kwargs = dict(self.init_kwargs)
+        init_kwargs["_from_proxy"] = True
+
+        self._worker = worker_cls(*self.init_args, **init_kwargs)
 
     def _run_sync_thread(self):
         """Run the dedicated thread for sync method execution.

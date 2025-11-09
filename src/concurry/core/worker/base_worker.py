@@ -2107,13 +2107,15 @@ class Worker:
         if len(kwargs) > 0:
             inheritance_config["mode_options"] = kwargs
 
-        # Store configuration on class
+        # Store configuration on class ONLY if non-empty
         # Note: Parent classes may also have this, creating inheritance chain
-        cls._worker_inheritance_config = inheritance_config
+        # Don't set empty dict - let it remain unset so getattr returns None
+        if len(inheritance_config) > 0:
+            cls._worker_inheritance_config = inheritance_config
 
-        # If any config provided but auto_init not specified, default to True
-        if len(inheritance_config) > 0 and "auto_init" not in inheritance_config:
-            inheritance_config["auto_init"] = True
+            # If any config provided but auto_init not specified, default to True
+            if "auto_init" not in inheritance_config:
+                inheritance_config["auto_init"] = True
 
     @classmethod
     @validate
@@ -3124,8 +3126,12 @@ def worker(
             decorator_config["auto_init"] = True
 
         # 3. Check for mixed decorator + inheritance (anti-pattern warning)
+        # Only warn if BOTH decorator AND inheritance have actual configuration
         inheritance_config = getattr(target_cls, "_worker_inheritance_config", None)
-        if inheritance_config is not None and len(decorator_config) > 0:
+        has_inheritance_config = inheritance_config is not None and len(inheritance_config) > 0
+        has_decorator_config = len(decorator_config) > 0
+
+        if has_inheritance_config and has_decorator_config:
             warnings.warn(
                 f"Class {target_cls.__name__} uses both @worker decorator "
                 f"and inheritance parameters (Worker subclass with kwargs). "

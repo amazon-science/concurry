@@ -17,16 +17,16 @@ Built on the actor model, `concurry` provides worker pools with rate limiting, l
 A delicious bowl of parallelism, served instantly.
 
 
-## 🚀 Quickstart: 50x Speedup for Batch LLM calls with 2 Lines of Code
+## 🚀 Quickstart: 50x Speedup for Batch LLM calls with 3 Lines of Code
 
-Calling LLMs in a loop is painfully slow. With concurry's `@worker` decorator, transform your existing sequential code to parallel with just **2 lines of changes**:
+Calling LLMs in a loop is painfully slow. With concurry's `@worker` decorator, transform your existing sequential code to parallel with just **3 lines of changes**:
 
 ```diff
 from pydantic import BaseModel
 + from concurry import worker, gather
 import litellm
 
-# Your existing LLM class - just add @worker decorator
+# Your existing sequential class - just add @worker decorator
 + @worker(mode='thread', max_workers=100)
 class LLM(BaseModel):
     temperature: float
@@ -42,28 +42,29 @@ class LLM(BaseModel):
         )
         return response
 
-# Load 1000 prompts for batch evaluation
-prompts = [...]
+# Load 10k prompts for batch evaluation
+prompts = [f"What is {i} + {i}?" for i in range(10_000)]
 
 # Create worker instance (same initialization as before)
 llm = LLM(temperature=0.1, top_p=0.9, model="meta-llama/llama-3.1-8b-instruct")
 
-# Submit tasks and collect results
-- responses = [llm.call_llm(prompt) for prompt in prompts]
-+ futures   = [llm.call_llm(prompt) for prompt in prompts]
-+ responses = gather(futures)
+# Submit tasks: llm.call_llm(...) now returns a future!
+responses = [llm.call_llm(prompt) for prompt in prompts]  
+# Collect results
++ responses = gather(responses, progress=True)
 ```
 
-**Performance:**
-- **Sequential (before):** ~775 seconds
-- **Parallel (after):** ~16 seconds (48x faster)
+**Performance gap:**
+- **Sequential (before concurry):** ~775 seconds
+- **Parallel (after concurry):** ~16 seconds (48x faster)
 
-**What changed?** Just 2 lines:
-1. Add `@worker(mode='thread', max_workers=100)` decorator to your class.
-2. Replace direct result collection with `gather(futures)`
+**What changed?** Just 3 lines:
+1. Import concurry modules: `from concurry import worker, gather`
+2. Add `@worker(mode='thread', max_workers=100)` decorator to your class. All calls now return futures.
+3. Replace direct result collection with `gather(futures)`
 
-Your existing code structure, class design, and method signatures stay exactly the same. 
 No refactoring. No architectural changes.
+Your existing code structure, class design, and method signatures stay exactly the same. 
 
 
 ## 🚀 Installation
@@ -71,23 +72,19 @@ No refactoring. No architectural changes.
 
 ```bash
 pip install concurry
-
 pip install "concurry[ray]"  # Ray support for distributed workers
-
-pip install "concurry[all]"  # Development install
+pip install "concurry[all]"  # Install all dependencies
 ```
 
 ---
 
 ## Why Concurry?
 
-
-#### The Problem
-
 Python's concurrency landscape is fragmented. Threading, asyncio, multiprocessing, and Ray all have different APIs, behaviors, and gotchas. 
 **Concurry translates all execution modes** with a consistent, elegant interface that works the same way everywhere.
 
-**Before concurry:**
+#### Without concurry
+
 ```python
 # Different APIs for different backends
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
@@ -116,13 +113,14 @@ future = ray_task.remote(arg)
 result = ray.get(future)
 ```
 
-With concurry: One interface. Multiple execution modes. Zero headaches.
-```diff
+#### With concurry
+
+```python
 import time
 import random
 from concurry import worker, gather
 
-+ @worker
+@worker
 class DataProcessor:
     def __init__(self, multiplier: int):
         self.multiplier = multiplier
@@ -131,27 +129,24 @@ class DataProcessor:
         time.sleep(random.randint(1,3))  # Simulate calculation 
         return value * self.multiplier
 
-# Same code, different backends - just change one parameter!
-# worker = DataProcessor.options(mode="thread", max_workers=1).init(10)   # Thread
-# worker = DataProcessor.options(mode="thread", max_workers=100).init(10)  # Thread Pool
-# worker = DataProcessor.options(mode="process", max_workers=10).init(10) # Process Pool
-# worker = DataProcessor.options(mode="ray", max_workers=10).init(10)     # Ray (distributed!)
-# worker = DataProcessor.options(mode="asyncio").init(10)                 # Asyncio
-# worker = DataProcessor.options(mode="sync").init(10)                    # Sync mode (for testing)
+## Same code, different backends - just change one parameter!
+# worker = DataProcessor.options(mode="thread", max_workers=1).init(10)    # Thread
+worker = DataProcessor.options(mode="thread", max_workers=100).init(10)    # Thread Pool
+# worker = DataProcessor.options(mode="process", max_workers=10).init(10)  # Process Pool
+# worker = DataProcessor.options(mode="ray", max_workers=10).init(10)      # Ray (distributed!)
+# worker = DataProcessor.options(mode="asyncio").init(10)                  # Asyncio
+# worker = DataProcessor.options(mode="sync").init(10)                     # Sync mode (for testing)
 
 # Instant submission, non-blocking:
 futures = []
-for i in range(1_000):
+for i in range(1_000):  # 1000 tasks
     futures.append(worker.compute(i))
-- results = [future.result() for future in futures]  # Boring! 🥱 
-+ # gather() blocks till all results are fetched. Progress bars are included.
-+ results = gather(futures, progress=True)
-
-+ # ALTERNATE: use gather(iter=True) to stream results as they finish. 
-+ for result in gather(futures, iter=True, progress=True):
-+     print(result)
+# gather(...) blocks till all results are fetched. Progress bars are included.
+results = gather(futures, progress=True)
 worker.stop()
 ```
+
+One interface. Multiple execution modes. Zero headaches.
 
 ---
 
@@ -160,8 +155,8 @@ worker.stop()
 ### 🎭 Actor-Based Workers
 Stateful workers that run across all backends with a unified API.
 
-```diff
-+ @worker(mode="thread", max_workers=1)
+```python
+@worker(mode="thread", max_workers=1)
 class Counter:
     def __init__(self):
         self.count = 0
@@ -171,9 +166,9 @@ class Counter:
         return self.count
 
 # State is isolated per worker
-+ counter1 = Counter()
-+ counter2 = Counter()
-+ counter3 = Counter.options(mode="process")
+counter1 = Counter()  # Create a stateful thread
+counter2 = Counter()  # Create a stateful thread
+counter3 = Counter.options(mode="process").init()  # Create a stateful process
 print(counter1.increment().result())  # 1
 print(counter1.increment().result())  # 2
 print(counter2.increment().result())  # 1
@@ -205,7 +200,7 @@ Full validation support with Pydantic BaseModel inheritance and decorators.
 from pydantic import BaseModel, validate_call
 
 @worker
-class ValidatedWorker:
+class ValidatedWorker(BaseModel):
     multiplier: int 
     
     @validate_call
@@ -213,7 +208,10 @@ class ValidatedWorker:
         return x * self.multiplier
 
 # Automatic type coercion and validation
-worker = ValidatedWorker.options(mode="ray").init(multiplier="5")  # str→int coercion
+# Automatic type coercion and validation
+worker = ValidatedWorker.options(mode="thread").init(multiplier="5")  # str→int coercion
+print(worker.compute(1).result())      # 5
+print(worker.compute("a string").result())  # ValidationError
 ```
 
 ### 🚦 Rate Limiting
@@ -254,7 +252,7 @@ class LLMWorker:
             return result
 
 # Pool of 20 workers with shared rate limits
-pool = LLMWorker.options(max_workers=20).init(model="gpt-4o-mini", temperature=0.7)
+pool = LLMWorker.options(max_workers=20).init(model="gpt-5-nano", temperature=0.7)
 
 # Limits automatically enforced across all 20 workers
 prompts = [f"What is {i} + {i}?" for i in range(1000)]
@@ -268,111 +266,111 @@ pool.stop()
 ### 🔁 Intelligent Retry Mechanisms
 Exponential backoff, exception filtering, output validation, and automatic resource release between retries.
 
-```diff
+```python
 # Retry on transient errors with exponential backoff
 worker = LLMWorker.options(
     max_workers=20,
-+    num_retries=5,  
-+    retry_algorithm="exponential",
-+    retry_on=[ConnectionError, TimeoutError],
-+    retry_until=lambda result: result.get("status") == "ok"
-).init(model="gpt-4o-mini", temperature=0.7)
-
-# Automatically retries up to 5 times on failure
+    # Automatically retries up to 5 times on ConnectionError or TimeoutError:
+    num_retries=5,  
+    retry_algorithm="exponential",
+    retry_on=[ConnectionError, TimeoutError],
+).init(model="gpt-5-nano", temperature=0.7)
 ```
 
 ### ⚡ First-Class Async Support
 AsyncIO workers route async methods to an event loop and sync methods to a dedicated thread for optimal performance (10-50x speedup for I/O).
 
 ```python
-@worker
+import asyncio
+import aiohttp
+from concurry import worker, async_gather
+
+@worker(mode="asyncio")
 class AsyncAPIWorker:
     def __init__(self, base_url: str):
         self.base_url = base_url
     
-    async def fetch(self, endpoint: str) -> dict:
+    async def fetch(self, endpoint: str) -> bytes:
         """Async method - runs in event loop."""
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{self.base_url}/{endpoint}") as resp:
-                return await resp.json()
+                return await resp.read()  # Read binary content
     
     async def fetch_many(self, endpoints: list) -> list:
         """Fetch multiple URLs concurrently."""
         tasks = [self.fetch(ep) for ep in endpoints]
-        return await asyncio.gather(*tasks)
+        return await async_gather(*tasks)
 
-worker = AsyncAPIWorker.options(mode="asyncio").init()
-# concurrent requests instead of sequential!
-result = worker.fetch_many(urls).result()
+worker = AsyncAPIWorker(base_url="https://picsum.photos")
+# Fetch 50 random 256x256 images
+urls = [
+    '256' for i in range(50)
+]
+# Concurrent requests instead of sequential!
+images = worker.fetch_many(urls).result()
+
+# Show the images
+from IPython.display import display, Image
+for image in images:
+    display(Image(image))
 ```
 
-
-### 🎯 Automatic Future Unwrapping
-Pass futures between workers seamlessly. Concurry automatically unwraps them - even with zero-copy optimization for Ray.
-
-```python
-# Producer creates futures
-producer = DataSource.options(mode="thread").init()
-data_future = producer.get_data()
-
-# Consumer automatically unwraps the future
-consumer = DataProcessor.options(mode="process").init()
-result = consumer.process(data_future).result()  # Auto-unwrapped!
-```
-
-### 📊 Progress Tracking
-Beautiful progress bars with state indicators, automatic style detection, and rich customization.
+### 🎯 Automatic DAG-like Pipelines with Mixed Execution Modes
+Chain workers with different execution modes seamlessly. Futures are automatically unwrapped, enabling heterogeneous pipelines without blocking.
 
 ```python
-from concurry import ProgressBar
+from concurry import worker, gather
+import pandas as pd
 
-for item in ProgressBar(items, desc="Processing"):
-    process(item)
-# Shows: Processing: 100%|██████████| 1000/1000 [00:05<00:00] ✓ Complete
-```
+@worker(mode="thread", max_workers=100)  # I/O-bound: read from disk/network
+class DataLoader:
+    def load_csv(self, path: str) -> pd.DataFrame:
+        return pd.read_csv(path)
 
-### Worker Pool with Context Manager
+@worker(mode="process", max_workers=10)  # CPU-bound: heavy computation
+class DataProcessor:
+    def process(self, df: pd.DataFrame) -> pd.DataFrame:
+        # Expensive operations: feature engineering, aggregations, etc.
+        return df.groupby('category').agg({'value': ['mean', 'std', 'count']})
 
-```python
-from concurry import Worker
+@worker(mode="thread", max_workers=100)  # I/O-bound: write to disk/database  
+class DataWriter:
+    def save(self, df: pd.DataFrame, path: str) -> str:
+        df.to_parquet(path)
+        return f"Saved to {path}"
 
-class DataProcessor(Worker):
-    def process(self, x: int) -> int:
-        return x ** 2
+# Create workers with different execution modes
+loader = DataLoader()
+processor = DataProcessor()
+writer = DataWriter()
 
-# Context manager automatically cleans up all workers
-with DataProcessor.options(mode="thread", max_workers=5).init() as pool:
-    futures = [pool.process(i) for i in range(100)]
-    results = [f.result() for f in futures]
-# All workers automatically stopped here
-```
+# Chain operations: each step automatically unwraps the previous future
+files = [
+    f'data_{i}.csv' for i in range(1000)
+]
+results = []
+for i, file in enumerate(files):
+    df_future = loader.load_csv(file)                # Returns future immediately
+    processed_future = processor.process(df_future)  # Auto-unwraps df_future 
+    result_future = writer.save(processed_future, f'output_{i}.parquet')  # Auto-unwraps processed_future
+    results.append(result_future)
 
-### TaskWorker for Arbitrary Functions
-
-```python
-from concurry import TaskWorker
-
-worker = TaskWorker.options(mode="process").init()
-
-# Submit any function
-future = worker.submit(lambda x: x ** 2, 42)
-print(future.result())  # 1764
-
-# Use map() for batch processing
-results = list(worker.map(lambda x: x * 2, range(10)))
-print(results)  # [0, 2, 4, 6, 8, 10, 12, 14, 16, 18]
-
-worker.stop()
+# All 1000 files processed in parallel, each through the full pipeline
+outputs = gather(results)  # ['Saved to output_0.parquet', 'Saved to output_1.parquet', ...]
+# Cleanup
+loader.stop()
+processor.stop()
+writer.stop()
 ```
 
 ### Distributed Computing on a Ray cluster
-Here's an example of running 96 BERT models in just a few lines of code:
+Here's an example of running inference on 96 BERT models in just a few lines of code:
 
 ```python
 import ray
 from concurry import worker, gather
 
-ray.init()
+ray.init(ignore_reinit_error=True)
 
 @worker
 class DistributedProcessor:
@@ -382,7 +380,7 @@ class DistributedProcessor:
     def predict(self, data: list) -> list:
         return self.model.predict(data)
 
-# 96 Ray actors across your cluster, each using half a GPU
+# 96 Ray actors across your cluster, each using 0.5 GPU and 2 CPUs
 pool = DistributedProcessor.options(
     mode="ray",
     max_workers=96,
@@ -390,15 +388,42 @@ pool = DistributedProcessor.options(
         num_cpus=2,
         num_gpus=0.5
     )
-).init(model_name="bert-large")
+).init(model_name="bert-base-uncased")
 
 # Distribute work across entire cluster
-batches = [data[i:i+32] for i in range(0, len(data), 32)]
-futures = [pool.predict(batch) for batch in batches]  # Instant submission 
+batch_size = 32
+batches = [data[i:i+batch_size] for i in range(0, len(data), batch_size)]
+futures = [pool.predict(batch) for batch in batches]  # Instant submission, non-blocking
 results = gather(futures)
-
+# Cleanup Ray actors
 pool.stop()
-ray.shutdown()
+```
+
+
+### 🎬 @task Decorator for Quick Parallelization
+
+Parallelize any function with a single decorator; no worker class needed:
+
+```python
+from concurry import task, gather
+import numpy as np
+
+@task(mode="process", max_workers=4)  # CPU-bound funcion: use processes or ray
+def matrix_multiply(matrix_size: int) -> float:
+    """Heavy computation: matrix multiplication."""
+    A = np.random.rand(matrix_size, matrix_size)
+    B = np.random.rand(matrix_size, matrix_size)
+    C = np.dot(A, B)  # Expensive operation
+    return np.sum(C)
+# matrix_multiply is now a worker instance!
+
+# Process 20 matrices in parallel (each 3000x3000)
+matrix_sizes = [3000] * 20
+futures = [matrix_multiply(size) for size in matrix_sizes] 
+results = gather(futures, progress=True)  # Parallel execution across 4 CPUs
+
+print(f"Computed {len(results)} matrix multiplications")
+matrix_multiply.stop()  # Cleanup worker pool
 ```
 
 ---

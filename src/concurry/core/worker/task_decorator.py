@@ -18,8 +18,14 @@ def task(
 ) -> Callable:
     """Decorator to create a TaskWorker bound to a function.
 
-    This decorator automatically creates and initializes a TaskWorker with the
-    decorated function, enabling easy parallelization without manual worker management.
+    This decorator **transforms** the decorated function into a `TaskWorker` instance.
+    The original function is bound to this worker.
+
+    **Crucial Behavior**:
+    1. The decorated symbol is **no longer a function**, but a **TaskWorker instance**.
+    2. Calling the decorated symbol invokes `worker.submit()`, returning a `Future`.
+    3. You **must** call `.stop()` on the decorated symbol to clean up resources.
+    4. All worker configuration (e.g., `mode`) is **required** here to initialize the worker.
 
     Args:
         mode: Execution mode (sync, thread, process, asyncio, ray).
@@ -37,17 +43,17 @@ def task(
             ```python
             from concurry import task
 
+            # process_item becomes a TaskWorker instance
             @task(mode="thread", max_workers=4)
             def process_item(x):
                 return x ** 2
 
-            # Call like a function (returns future)
+            # Call like a function -> actually calls worker.submit()
             future = process_item(10)
             result = future.result()  # 100
 
-            # Or use submit/map explicitly
-            future = process_item.submit(10)
-            results = list(process_item.map(range(10)))
+            # Explicitly STOP the worker when done
+            process_item.stop()
             ```
 
         With Limits:

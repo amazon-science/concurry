@@ -161,13 +161,31 @@ class TaskWorkerPoolMixin:
 
 ### 4. @task Decorator
 
-The `@task` decorator simplifies TaskWorker creation:
+The `@task` decorator is a transformation tool that **replaces** the defined function with a fully initialized `TaskWorker` instance.
+
+**Conceptual Transformation**:
+```python
+# User writes:
+@task(mode="thread", max_workers=4)
+def my_func(x):
+    return x + 1
+
+# Decorator executes (conceptually):
+_original_func = my_func
+my_func = TaskWorker.options(mode="thread", max_workers=4).init(fn=_original_func)
+```
+
+**Implications**:
+1. `my_func` is now a `TaskWorker` object, not a function.
+2. `my_func(10)` calls `TaskWorker.__call__(10)`, which calls `TaskWorker.submit(10)`.
+3. Configuration parameters like `mode` must be passed to `@task` because they are needed to *construct* the worker immediately.
+4. The worker must be stopped using `my_func.stop()`.
 
 ```python
 @validate
 def task(
     *,
-    mode: ExecutionMode = ExecutionMode.Sync,
+    mode: ExecutionMode,
     on_demand: Union[bool, _NO_ARG_TYPE] = _NO_ARG,
     **kwargs: Any,
 ) -> Callable:
@@ -187,12 +205,12 @@ def task(
 
 2. **Limits Forwarding** (if applicable):
    - Use `morphic.get_fn_args()` to inspect function signature
-   - If function has a `limits` parameter, inject `worker.limits`
+   - If function has a `limits` parameter AND `limits` are provided in `@task`, inject `worker.limits`
    - Otherwise, skip injection
 
 3. **Worker Creation**:
    ```python
-   builder = TaskWorker.options(mode=mode, on_demand=on_demand, **kwargs)
+   builder = TaskWorker.options(mode=mode, on_demand=on_demand, limits=limits, **kwargs)
    worker = builder.init(fn=decorated_function)
    ```
 

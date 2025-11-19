@@ -183,9 +183,7 @@ def test_pool_feature(self, pool_mode):
 ---
 
 ## Handling Mode-Specific Behavior
-
-### NEVER Skip Tests Due to Failures
-
+### NEVER Skip Tests Due to Failures in a certain execution mode
 **Critical Rule**: If a test fails for certain execution modes, **DO NOT skip it**. These are important edge cases that must be handled.
 
 ❌ **WRONG Approach:**

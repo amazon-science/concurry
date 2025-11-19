@@ -1,19 +1,49 @@
 # Task Decorator
 
-The `@task` decorator provides a convenient way to parallelize functions without manual worker management. It automatically creates and initializes a `TaskWorker` bound to your function, enabling easy parallelization with minimal code.
+The `@task` decorator provides a convenient way to parallelize functions without manual worker management. It automatically transforms your function into a fully initialized `TaskWorker` instance, enabling easy parallelization with minimal code.
+
+While providing this convenience, it is important to understand that **the decorated symbol is no longer a standard function**.
+
+**Crucially:**
+1. The decorated "function" is a **TaskWorker instance**.
+2. Calling it invokes the worker's `submit()` method, returning a `Future` (unless `blocking=True`).
+3. **By default, it creates a new worker for every call** (On-Demand mode).
+4. You must manage its lifecycle (e.g., call `.stop()`) to clean up resources.
 
 ## Signature
 
 ```python
-@task(*, mode: ExecutionMode = ExecutionMode.Sync, on_demand: bool = <config>, **kwargs)
+@task(*, mode: ExecutionMode, on_demand: bool = <config>, **kwargs)
 ```
 
 **Parameters:**
-- `mode`: Execution mode (sync, thread, process, asyncio, ray). Defaults to `ExecutionMode.Sync`.
+- `mode`: Execution mode (sync, thread, process, asyncio, ray). **Required**.
 - `on_demand`: Create workers on-demand. If not specified, uses `global_config.defaults.task_decorator_on_demand` (defaults to `True`). Automatically set to `False` for Sync and Asyncio modes.
 - `**kwargs`: All other `Worker.options()` parameters (blocking, max_workers, limits, retry configuration, etc.)
 
 **Note**: All parameters must be passed as keyword arguments (enforced by `*` in signature).
+
+## Default On-Demand Behavior
+
+By default, the `@task` decorator sets `on_demand=True` (except for Sync/Asyncio modes).
+
+**What this means:**
+- **Zero Idle Resources**: No threads, processes, or Ray actors exist when you are not calling the function.
+- **Per-Call Creation**: Every time you call `my_task(x)`, a **new worker** is spun up, executes the task, and shuts down.
+- **Startup Overhead**: There is a latency cost for creating the worker (low for threads, higher for processes/Ray).
+
+**When to change it:**
+If you are calling the function frequently (high throughput) or require low latency, set `on_demand=False` and `max_workers=N` to use a **persistent worker pool** instead.
+
+```python
+# Default: New thread created for EVERY call (Good for infrequent tasks)
+@task(mode="thread")
+def infrequent_job(x): ...
+
+# Persistent Pool: 4 threads stay alive (Good for high throughput)
+@task(mode="thread", max_workers=4, on_demand=False)
+def frequent_job(x): ...
+```
 
 ## Basic Usage
 
@@ -22,15 +52,21 @@ The `@task` decorator provides a convenient way to parallelize functions without
 ```python
 from concurry import task
 
+# @task creates a TaskWorker instance named 'process_item'
+# The original function is bound internally
 @task(mode="thread", max_workers=4)
 def process_item(x):
     return x ** 2
 
+# process_item is now a TaskWorker instance!
+print(type(process_item))  # <class 'concurry.core.worker.task_worker.TaskThreadWorkerProxyPool'>
+
 # Call like a regular function (returns a Future)
+# This actually calls process_item.submit(10)
 future = process_item(10)
 result = future.result()  # 100
 
-# Use submit() explicitly
+# Use submit() explicitly (same as above)
 future = process_item.submit(10)
 result = future.result()
 
@@ -38,7 +74,8 @@ result = future.result()
 results = list(process_item.map(range(10)))
 # [0, 1, 4, 9, 16, 25, 36, 49, 64, 81]
 
-# Clean up when done
+# CRITICAL: You must stop the worker when done!
+# Since 'process_item' is a worker, it has a .stop() method
 process_item.stop()
 ```
 
@@ -80,10 +117,10 @@ def distributed_task(data):
 ```python
 @task(
     mode="thread",
-    max_workers=10,              # Pool size
+    max_workers=10,                 # Pool size
     load_balancing="least_active",  # Load balancing strategy
-    on_demand=True,              # Create workers on-demand
-    max_queued_tasks=100,        # Submission queue limit
+    on_demand=True,                 # Create workers on-demand
+    max_queued_tasks=100,           # Submission queue limit
 )
 def configured_task(x):
     return x * 2
@@ -142,7 +179,7 @@ results = list(compute.map(
 
 ### Automatic Limits Forwarding
 
-The decorator automatically forwards limits to functions that accept a `limits` parameter:
+The decorator automatically forwards limits to functions that accept a `limits` parameter when `limits` are provided:
 
 ```python
 from concurry import task, RateLimit
@@ -232,36 +269,43 @@ async def async_process(url):
 result = async_process("https://example.com").result()
 ```
 
-## Worker Lifecycle
+## Worker Lifecycle and Cleanup
 
-### Manual Cleanup
+Because the decorated function *is* a worker, you must manage its lifecycle just like any other worker.
+
+### Explicit Stopping (Recommended)
+
+Always call `.stop()` on the decorated function when you are done with it to release resources (threads, processes, Ray actors).
+
+```python
+@task(mode="process", max_workers=4)
+def heavy_compute(x):
+    return x * x
+
+try:
+    # Use the worker
+    results = list(heavy_compute.map(range(100)))
+finally:
+    # STOP the worker!
+    heavy_compute.stop()
+```
+
+### Context Manager (Best Practice)
+
+Since `TaskWorker` supports the context manager protocol, you can use `with` on the decorated function itself:
 
 ```python
 @task(mode="thread")
-def process(x):
-    return x * 2
+def fetch_url(url):
+    return requests.get(url).text
 
-# Use the worker
-results = [process(i).result() for i in range(10)]
+# The worker is active only within this block
+with fetch_url:
+    # fetch_url is the worker instance
+    future = fetch_url("http://example.com")
+    print(future.result())
 
-# Manually stop when done
-process.stop()
-```
-
-### Automatic Cleanup
-
-The decorator adds a `__del__` method for automatic cleanup when the decorated function goes out of scope, but explicit cleanup is recommended:
-
-```python
-def main():
-    @task(mode="thread")
-    def process(x):
-        return x * 2
-    
-    results = [process(i).result() for i in range(10)]
-    # Worker automatically cleaned up when function goes out of scope
-
-main()  # process.__del__() called here
+# Worker is automatically stopped here
 ```
 
 ## Best Practices

@@ -90,7 +90,9 @@ result = future.result()
 # Flow:
 1. TaskWorker.submit() calls self._execute_task(fn, args, kwargs)
 2. WorkerProxy._execute_task checks if retry_config exists:
-   if self.retry_config is not None and self.retry_config.num_retries > 0:
+   if self.retry_config is not None and (
+       self.retry_config.num_retries > 0 or self.retry_config.retry_until is not None
+   ):
        result = execute_with_retry_auto(fn, args, kwargs, retry_config, context)
    else:
        result = fn(*args, **kwargs)
@@ -692,7 +694,9 @@ def _execute_task(self, fn, *args, **kwargs):
     else:
         method_config = self.retry_configs.get("*")
     
-    if method_config is not None and method_config.num_retries > 0:
+    if method_config is not None and (
+        method_config.num_retries > 0 or method_config.retry_until is not None
+    ):
         result = execute_with_retry_auto(fn, args, kwargs, method_config, context)
     else:
         result = fn(*args, **kwargs)
@@ -1257,7 +1261,9 @@ def submit(self, fn, *args, **kwargs):
 # In worker proxy (e.g., sync_worker.py)
 def _execute_task(self, fn, *args, **kwargs):
     """Private method - applies retry logic HERE."""
-    if self.retry_config is not None and self.retry_config.num_retries > 0:
+    if self.retry_config is not None and (
+        self.retry_config.num_retries > 0 or self.retry_config.retry_until is not None
+    ):
         context = {
             "method_name": fn.__name__ if hasattr(fn, "__name__") else "anonymous_function",
             "worker_class_name": "TaskWorker",
@@ -1336,7 +1342,9 @@ Ray TaskWorker uses special pattern to serialize `RetryConfig`:
 
 ```python
 # In ray_worker.py _execute_task
-if self.retry_config is not None and self.retry_config.num_retries > 0:
+if self.retry_config is not None and (
+    self.retry_config.num_retries > 0 or self.retry_config.retry_until is not None
+):
     import cloudpickle
     
     original_fn = fn
@@ -1373,23 +1381,30 @@ For regular worker methods (not TaskWorker), Ray actors are created with pre-wra
 
 ### Zero Overhead When Disabled
 
-**Goal**: When `num_retries=0`, retry logic should have **zero performance impact**.
+**Goal**: When retry features are not used, retry logic should have **zero performance impact**.
 
 **Implementation**:
 
 1. **WorkerBuilder Short-Circuit**:
    ```python
-   def _create_retry_config(self) -> Optional[Any]:
-       if self.num_retries == 0:
+   def _create_retry_configs(self) -> Optional[Dict[str, RetryConfig]]:
+       # Skip creating configs if no retry features are used
+       if self._all_retries_zero() and self._no_retry_until_set():
            return None  # Don't create RetryConfig
        
-       return RetryConfig(...)
+       # Create configs for methods that need retry logic
+       # (either num_retries > 0 or retry_until is set)
+       return self._build_configs()
    ```
 
 2. **Wrapper Creation Short-Circuit**:
    ```python
-   def _create_worker_wrapper(worker_cls, limits, retry_config, for_ray):
-       has_retry = retry_config is not None and retry_config.num_retries > 0
+   def _create_worker_wrapper(worker_cls, limits, retry_configs, for_ray):
+       # Check if retry logic is needed: num_retries > 0 OR retry_until is set
+       has_retry = retry_configs is not None and any(
+           cfg is not None and (cfg.num_retries > 0 or cfg.retry_until is not None)
+           for cfg in retry_configs.values()
+       )
        
        if not has_retry:
            # Return simple wrapper (only sets limits)
@@ -1401,8 +1416,10 @@ For regular worker methods (not TaskWorker), Ray actors are created with pre-wra
 3. **TaskWorker Short-Circuit**:
    ```python
    def _execute_task(self, fn, *args, **kwargs):
-       if self.retry_config is not None and self.retry_config.num_retries > 0:
-           # Apply retry logic
+       if self.retry_config is not None and (
+           self.retry_config.num_retries > 0 or self.retry_config.retry_until is not None
+       ):
+           # Apply retry logic (for retries OR validation)
            result = execute_with_retry_auto(...)
        else:
            # Direct execution - no retry overhead
@@ -1411,8 +1428,11 @@ For regular worker methods (not TaskWorker), Ray actors are created with pre-wra
 
 **Performance Impact**:
 
-- `num_retries=0`: No `__getattribute__` override, direct method calls
+- `num_retries=0` AND `retry_until=None`: No `__getattribute__` override, direct method calls, zero overhead
+- `num_retries=0` BUT `retry_until` set: Minimal overhead for validation (~1-2 µs per call)
 - `num_retries>0`: One `__getattribute__` intercept + retry wrapper overhead (~1-2 µs per call)
+
+**Important**: Setting `retry_until` validators requires wrapping methods even with `num_retries=0`, since validation must occur on the initial attempt.
 
 ### Caching Wrapped Methods
 
@@ -1822,22 +1842,39 @@ def test_basic_retry(self, worker_mode):
 
 ## Common Pitfalls
 
-### 1. Forgetting to Set num_retries
+### 1. Forgetting to Set num_retries (for Retries)
 
-**Problem**: Creating `RetryConfig` but not setting `num_retries > 0`.
+**Problem**: Creating `RetryConfig` for retries but not setting `num_retries > 0`.
 
 ```python
 config = RetryConfig(retry_algorithm=RetryAlgorithm.Exponential)
 # num_retries defaults to 0 → no retries!
 ```
 
-**Solution**: Always explicitly set `num_retries`:
+**Solution**: Always explicitly set `num_retries` when you want retries:
 
 ```python
 config = RetryConfig(
     num_retries=3,
     retry_algorithm=RetryAlgorithm.Exponential
 )
+```
+
+**Important Exception**: If you ONLY want output validation without retries (validate the initial attempt), `num_retries=0` is correct:
+
+```python
+# Valid use case: validate initial attempt without retries
+worker = MyWorker.options(
+    mode="thread",
+    num_retries=0,  # No retries - just validate once
+    retry_until=lambda result, **ctx: result > 0  # Validation on initial attempt
+).init()
+
+try:
+    result = worker.get_value().result()
+except RetryValidationError:
+    # Validation failed on first attempt, no retries occurred
+    pass
 ```
 
 ### 2. Closure Capture in Process/Ray

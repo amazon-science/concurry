@@ -430,8 +430,9 @@ def test_per_method_retries():
 - Per-method configs: O(1) dict lookup per method call (~1 microsecond)
 
 **Memory**:
-- One `RetryConfig` instance per method with retries
-- Methods with `num_retries=0` have no config instance
+- One `RetryConfig` instance per method with retry logic enabled
+- Methods with `num_retries=0` AND `retry_until=None` have no config instance
+- Methods with `retry_until` set have a config instance even with `num_retries=0`
 - Typical overhead: 2-10 KB per worker
 
 **Recommendations**:
@@ -641,6 +642,51 @@ worker = LLMWorker.options(
 # Will retry up to 5 times until result has required fields
 result = worker.generate_json("Generate user data").result()
 ```
+
+### Validation Without Retries
+
+You can use `retry_until` with `num_retries=0` to validate the output of a single attempt without retrying:
+
+```python
+class APIWorker(Worker):
+    def fetch_user(self, user_id: int) -> dict:
+        """Fetch user data from API."""
+        return requests.get(f"{self.api_url}/users/{user_id}").json()
+
+def validate_user_data(result, **ctx):
+    """Ensure user data has required fields."""
+    return (
+        isinstance(result, dict) and
+        "id" in result and
+        "name" in result and
+        "email" in result
+    )
+
+worker = APIWorker.options(
+    mode="thread",
+    num_retries=0,  # No retries - validate once
+    retry_until=validate_user_data  # Validate the initial response
+).init()
+
+try:
+    user = worker.fetch_user(123).result()
+    print(f"Valid user: {user['name']}")
+except RetryValidationError as e:
+    # Validation failed on first (and only) attempt
+    print(f"Invalid user data received: {e.validation_errors}")
+```
+
+**Use Cases**:
+- **Fail-fast validation**: Ensure API responses have required structure before proceeding
+- **Data quality checks**: Validate outputs meet minimum quality thresholds
+- **Type safety**: Ensure returned data matches expected schema
+- **Early error detection**: Catch malformed responses immediately
+
+**Benefits over manual validation**:
+- Consistent error handling via `RetryValidationError`
+- Access to validation context (method name, arguments, etc.)
+- Can combine with per-method configuration for different validation per method
+- Reuse existing `retry_until` validators
 
 ### Multiple Validators
 
@@ -998,8 +1044,9 @@ result = fetch_with_fallback(worker, "data_key")
 
 ### Retry Overhead
 
-- **No overhead when disabled** (`num_retries=0`, the default)
-- **Minimal overhead on success** (~microseconds for retry config check)
+- **No overhead when disabled** (`num_retries=0` AND `retry_until=None`, the default)
+- **Minimal overhead for validation only** (`num_retries=0` with `retry_until` set: ~1-2 µs per call)
+- **Minimal overhead on success with retries** (`num_retries>0`: ~1-2 µs for retry config check)
 - **Overhead on retry**: Wait time + re-execution time
 - **Actor-side retries**: No round-trip overhead between retries
 

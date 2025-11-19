@@ -208,6 +208,48 @@ worker = MyWorker.options(mode="ray").init(name="test", value=10)
 # Result: ValueError or serialization errors
 ```
 
+**Problem 3: Internal Method Calls Bypassing Retry Logic**
+
+When BaseModel workers have methods that internally call other methods with retry configuration, those internal calls could bypass retry validation:
+
+```python
+from concurry import worker, async_gather
+from pydantic import BaseModel
+from typing import List, Dict, Any
+
+@worker(mode="asyncio")
+class LLM(BaseModel):
+    model_name: str
+    
+    async def call_llm(self, prompt: str) -> Dict[str, Any]:
+        """Single LLM call with validation."""
+        response = await litellm.acompletion(
+            model=self.model_name, 
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return {"response": response.choices[0].message.content}
+    
+    async def call_batch(self, prompts: List[str]) -> List[str]:
+        """Batch calls - internally calls call_llm()."""
+        tasks = [self.call_llm(prompt) for prompt in prompts]
+        results = await async_gather(tasks)
+        return [r["response"] for r in results]
+
+# Configure with retry_until for call_llm
+llm = LLM.options(
+    mode="asyncio",
+    num_retries={"*": 0, "call_llm": 0},
+    retry_until={
+        "*": None, 
+        "call_llm": lambda result, **ctx: validate_json(result["response"])
+    }
+).init(model_name="gpt-4")
+
+# PROBLEM: When call_batch() internally calls call_llm(),
+# the validator wasn't being invoked on internal calls!
+# Result: Invalid responses slip through validation
+```
+
 #### How the Composition Wrapper Solves These Problems
 
 Instead of using inheritance, the composition wrapper creates a **plain Python class** that holds the Typed/BaseModel worker internally and delegates only user-defined methods:
@@ -240,6 +282,7 @@ class MyWorker_CompositionWrapper(Worker):
 3. **Transparent to Users**: Workers behave identically, validation still works
 4. **Consistent Behavior**: Same code path for all modes (sync, thread, process, asyncio, ray)
 5. **Performance Optimized**: Method delegation uses captured closures to avoid repeated `getattr()` calls
+6. **Internal Call Validation**: Methods called internally by other methods still go through retry/validation logic
 
 #### When is the Composition Wrapper Applied?
 
@@ -430,6 +473,94 @@ class WorkerWithLimitsAndRetry(worker_cls):
 ```
 
 **Why `object.__setattr__`?** Bypasses Pydantic's frozen model validation, allowing us to inject `limits` after construction.
+
+**Step 5: Internal Method Call Retry Wrapping**:
+
+To ensure internal method calls go through retry logic, the wrapper dynamically modifies `_wrapped_instance`'s class:
+
+```python
+# In WorkerWithLimitsAndRetry.__init__:
+def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    
+    # Cache composition flag for performance (critical in Ray)
+    _is_composition = hasattr(self, "_wrapped_instance")
+    object.__setattr__(self, "_is_composition_wrapper", _is_composition)
+    
+    # CRITICAL FIX: Replace _wrapped_instance's class with retry-aware version
+    if _is_composition:
+        original_instance = self._wrapped_instance
+        original_class = type(original_instance)
+        
+        class WrappedInstanceWithRetry(original_class):
+            def __getattribute__(self, name: str):
+                """Apply retry wrapping to method calls."""
+                attr = super().__getattribute__(name)
+                
+                # Apply retry logic (same as WorkerWithLimitsAndRetry)
+                if (
+                    has_retry
+                    and not name.startswith("_")
+                    and callable(attr)
+                    and not isinstance(attr, type)
+                ):
+                    # Get retry config for this method
+                    if name in retry_configs:
+                        method_config = retry_configs[name]
+                    else:
+                        method_config = retry_configs.get("*")
+                    
+                    if method_config is None:
+                        return attr
+                    if method_config.num_retries == 0 and method_config.retry_until is None:
+                        return attr
+                    
+                    # Wrap with retry logic
+                    wrapped = create_retry_wrapper(
+                        attr, method_config, name, original_class.__name__
+                    )
+                    return wrapped
+                
+                return attr
+        
+        # Replace instance's class (Python allows this!)
+        original_instance.__class__ = WrappedInstanceWithRetry
+```
+
+**Why This Matters:**
+
+When a method like `call_batch()` internally calls `call_llm()`, the call goes through:
+
+1. `CompositionWrapper.call_batch()` → delegates to `_wrapped_instance.call_batch()`
+2. Inside `call_batch()`: `self.call_llm()` → goes through `WrappedInstanceWithRetry.__getattribute__`
+3. Retry wrapper applied → validation occurs → `RetryValidationError` raised if validation fails
+
+**Without this fix**, internal calls would go directly to the unwrapped method, bypassing retry/validation entirely.
+
+**Example Scenario:**
+
+```python
+@worker(mode="asyncio")
+class LLM(BaseModel):
+    async def call_llm(self, prompt: str) -> dict:
+        """Validated method."""
+        response = await api_call(prompt)
+        return {"response": response}
+    
+    async def call_batch(self, prompts: List[str]) -> List[dict]:
+        """Internally calls call_llm()."""
+        tasks = [self.call_llm(p) for p in prompts]  # ← Internal calls
+        return await async_gather(tasks)
+
+llm = LLM.options(
+    num_retries={"*": 0, "call_llm": 0},
+    retry_until={"*": None, "call_llm": validator}
+).init()
+
+# When call_batch() calls call_llm() internally:
+# ✅ With Step 5: validator runs, RetryValidationError raised if invalid
+# ❌ Without Step 5: validator skipped, invalid data returned
+```
 
 #### Behavior and Edge Cases
 

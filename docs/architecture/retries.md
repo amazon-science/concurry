@@ -34,6 +34,10 @@ This document describes the design, implementation, and maintenance guidelines f
 │  │    • __getattribute__ intercepts calls (sync/thread/process)  │  │
 │  │    • Pre-wrapped methods at class level (Ray)                 │  │
 │  │                                                                 │  │
+│  │  For BaseModel/Typed workers (via composition wrapper):        │  │
+│  │    • _wrapped_instance has retry-aware __getattribute__       │  │
+│  │    • Ensures internal method calls go through retry logic     │  │
+│  │                                                                 │  │
 │  │  For TaskWorker (via _execute_task):                          │  │
 │  │    • Retry applied directly in proxy's _execute_task method   │  │
 │  └───────────────────────────────────────────────────────────────┘  │
@@ -419,6 +423,105 @@ if for_ray and has_retry:
 Ray's `ray.remote()` performs signature inspection and method wrapping at actor creation time. When `__getattribute__` is used, Ray's inspection sees a generic callable (the wrapper) instead of the actual method signature, causing `TypeError: too many positional arguments`.
 
 Pre-wrapping at the class level ensures Ray sees the correct signatures during actor creation.
+
+##### Strategy 3: Wrapped Instance for BaseModel/Typed Workers
+
+For workers inheriting from `BaseModel` or `Typed`, a composition wrapper is used. To ensure internal method calls go through retry logic, the `_wrapped_instance`'s class is dynamically replaced:
+
+```python
+# In WorkerWithLimitsAndRetry.__init__:
+if hasattr(self, "_wrapped_instance"):
+    # Replace _wrapped_instance's class with retry-aware version
+    original_instance = self._wrapped_instance
+    original_class = type(original_instance)
+    
+    class WrappedInstanceWithRetry(original_class):
+        def __getattribute__(self, name: str):
+            """Apply retry wrapping to all method accesses."""
+            attr = super().__getattribute__(name)
+            
+            # Only wrap public callable methods with retry config
+            if (
+                has_retry
+                and not name.startswith("_")
+                and callable(attr)
+                and not isinstance(attr, type)
+            ):
+                # Get retry config for this specific method
+                if name in retry_configs:
+                    method_config = retry_configs[name]
+                else:
+                    method_config = retry_configs.get("*")
+                
+                # Skip if no config or (num_retries=0 and no retry_until)
+                if method_config is None:
+                    return attr
+                if method_config.num_retries == 0 and method_config.retry_until is None:
+                    return attr
+                
+                # Wrap with retry logic
+                wrapped = create_retry_wrapper(
+                    attr,
+                    method_config,
+                    method_name=name,
+                    worker_class_name=original_class.__name__,
+                )
+                return wrapped
+            
+            return attr
+    
+    # Replace the instance's class (Python allows this!)
+    original_instance.__class__ = WrappedInstanceWithRetry
+```
+
+**Why This Is Needed:**
+
+BaseModel workers use the composition pattern. When a method like `call_batch()` internally calls `call_llm()`:
+
+- **Without this fix**: `self.call_llm()` → direct method access on unwrapped instance → **NO retry logic applied**
+- **With this fix**: `self.call_llm()` → goes through `WrappedInstanceWithRetry.__getattribute__` → **retry logic applied**
+
+**Critical for Validation:**
+
+This ensures `retry_until` validators are called even when `num_retries=0`, catching invalid outputs on internal method calls.
+
+**Example Scenario:**
+
+```python
+from concurry import worker, async_gather
+from pydantic import BaseModel
+
+@worker(mode="asyncio")
+class LLM(BaseModel):
+    model_name: str
+    
+    async def call_llm(self, prompt: str) -> dict:
+        """Single LLM call - has retry_until validation."""
+        response = await api_call(prompt)
+        return {"response": response}
+    
+    async def call_batch(self, prompts: List[str]) -> List[dict]:
+        """Batch calls - internally calls call_llm()."""
+        tasks = [self.call_llm(p) for p in prompts]  # ← Internal calls
+        return await async_gather(tasks)
+
+llm = LLM.options(
+    mode="asyncio",
+    num_retries={"*": 0, "call_llm": 0},  # No retries, just validation
+    retry_until={
+        "*": None,
+        "call_llm": lambda result, **ctx: validate_json(result["response"])
+    }
+).init(model_name="gpt-4")
+
+# When call_batch() internally calls call_llm():
+# ✅ Strategy 3 applied: validator runs, RetryValidationError raised if invalid
+# ❌ Without Strategy 3: validator skipped, invalid data silently returned
+```
+
+**Key Insight:**
+
+The composition wrapper's delegating methods (`call_batch`) use `getattr(self._wrapped_instance, method_name)` to access methods on the wrapped instance. By replacing `_wrapped_instance`'s class with `WrappedInstanceWithRetry`, all method accesses (including internal calls) go through the retry-aware `__getattribute__`, ensuring consistent retry behavior.
 
 #### create_retry_wrapper
 

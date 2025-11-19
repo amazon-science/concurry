@@ -10,12 +10,12 @@ alwaysApply: true
 - **Configured in**: `tests/conftest.py` via `pytest_configure` hook
 - **Default**: 60 seconds per test
 - **Method**: Thread-based timeout (compatible with Ray and multiprocessing)
-- **Override**: Use `pytest --timeout=120` to change timeout
+- **Override**: Use `pytest --timeout=120` to change timeout. NEVER make it less than 60.
 - **Disable**: Use `pytest --timeout=0` to disable timeout
 - **On Timeout**: Full stack trace is displayed for debugging
 - **Behavior**: Timeout marks test as **FAILED** but **continues to next test** (non-fatal)
 
-**Why 60 seconds?**: Most tests should complete in < 10 seconds. The 60-second timeout catches hanging tests (deadlocks, infinite loops, semaphore issues) while allowing slower integration tests to complete.
+**Why 60 seconds?**: Most tests should complete in < 60 seconds. The 60-second timeout catches hanging tests (deadlocks, infinite loops, semaphore issues) while allowing slower integration tests to complete.
 
 **Important**: Timeouts do NOT stop the entire test suite! When a test times out:
 1. The test is marked as **FAILED** with timeout information
@@ -37,27 +37,55 @@ File "/path/to/future.py", line 456, in result
 
 ## Running Tests
 
-**NEVER use `-q` (quiet mode) or `--tb=line` when debugging issues**, as these suppress important output.
+**Standard pytest command format**:
 
-**Recommended pytest commands**:
-- `pytest tests/file.py -vs` - Verbose, no capture (best for debugging multiple tests)
-- `pytest tests/file.py -xvs` - Stop on first failure, verbose, no capture (best for debugging single issue)
-- `pytest tests/file.py -v` - Verbose output showing all test names
-- `pytest tests/file.py --tb=short` - Short traceback format (good for CI)
-
-**Important about `-x` flag**:
-- **WITH `-x`**: Stops on **first failure** (including timeouts) - use when debugging one specific issue
-- **WITHOUT `-x`**: Continues after failures/timeouts - use to identify **all** failing tests in one run
-
-**AVOID**:
-- `pytest -q` - Suppresses output, makes debugging impossible
-- `pytest --tb=line` - Only shows one line per failure, hides context
-- `pytest -qq` - Ultra-quiet mode, completely useless for debugging
-
-**For timeout issues**: Run without `-x` to see all timeouts in one run:
 ```bash
-pytest tests/file.py -v  # Will show ALL tests that timeout
+pytest --full-trace -rf <test-dir-or-file-or-test-name>
 ```
+
+**What is `<test-dir-or-file-or-test-name>`?**
+
+This is the pytest target specifying what to test. It can be:
+
+- **A directory**: `tests/core/retry/` - Run all tests in the directory
+- **A specific file**: `tests/core/retry/test_worker_retry.py` - Run all tests in the file
+- **A specific test class**: `tests/core/retry/test_worker_retry.py::TestBasicRetries` - Run all tests in the class
+- **A specific test method**: `tests/core/retry/test_worker_retry.py::TestBasicRetries::test_retry_success_after_failures` - Run a single test
+- **A specific parametrized test**: `tests/core/retry/test_worker_retry.py::TestBasicRetries::test_retry_success_after_failures[thread]` - Run one specific parameter variant
+
+**Examples**:
+```bash
+# Run all retry tests
+pytest --full-trace -rf tests/core/retry/
+
+# Run a specific test file
+pytest --full-trace -rf tests/core/retry/test_worker_retry.py
+
+# Run a specific test class
+pytest --full-trace -rf tests/core/retry/test_worker_retry.py::TestBasicRetries
+
+# Run a specific test method
+pytest --full-trace -rf tests/core/retry/test_worker_retry.py::TestBasicRetries::test_retry_success_after_failures
+
+# Run a specific parametrized variant
+pytest --full-trace -rf 'tests/core/retry/test_worker_retry.py::TestBasicRetries::test_retry_success_after_failures[thread]'
+```
+
+**What do the flags mean?**:
+- `--full-trace`: Show complete traceback information for errors (helps with debugging)
+- `-rf`: Report extra summary info for failed tests (r = report, f = failed)
+
+**Optional flags you can add**:
+- `-x`: Stop on first failure (useful when debugging one specific issue)
+- `-v`: Verbose output showing all test names
+- `-s`: Disable output capture (shows print statements in real-time)
+- `--timeout=300`: Set custom timeout (default is 60s from conftest.py)
+
+**CRITICAL - NEVER DO THIS**:
+- ❌ `pytest -q` - Suppresses output, makes debugging impossible
+- ❌ `pytest --tb=line` - Only shows one line per failure, hides context
+- ❌ `pytest -qq` - Ultra-quiet mode, completely useless for debugging
+- ❌ `pytest ... 2>&1 | tail` - Hides progress and real-time output
 
 ## Pytest Fixtures from conftest.py
 

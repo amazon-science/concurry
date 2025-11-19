@@ -54,11 +54,13 @@ class RetryValidationError(Exception):
         self.validation_errors = validation_errors
         self.method_name = method_name
 
+        all_results_str = "".join([f"Attempt {i + 1}:\n{result}\n" for i, result in enumerate(all_results)])
+
         # Create informative error message
         message = (
             f"Validation failed for method '{method_name}' after {attempts} attempts.\n"
             f"Validation errors: {validation_errors}\n"
-            f"Results from all attempts: {all_results}"
+            f"Results from all attempts:\n{all_results_str}"
         )
         super().__init__(message)
 

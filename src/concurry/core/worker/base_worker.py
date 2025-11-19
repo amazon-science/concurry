@@ -623,21 +623,22 @@ def _create_composition_wrapper(worker_cls: Type) -> Type:
             continue
 
         # Create a delegating method (async if original is async)
-        # OPTIMIZATION: Capture the unbound method from the original class to avoid
-        # repeated getattr() calls. This is critical for performance in tight loops.
-        def make_method(method_name, is_async, unbound_method):
+        # CRITICAL: Use getattr() to go through __getattribute__ on wrapped instance
+        # This ensures retry logic and other wrapping is applied to internal method calls
+        def make_method(method_name, is_async):
             """Create a method that delegates to the wrapped instance.
 
-            Uses the captured unbound method and binds it directly to _wrapped_instance
-            to avoid slow getattr() lookup on every call.
+            Uses getattr() to access methods on _wrapped_instance, which ensures
+            that __getattribute__ is called and retry/limits logic is applied.
             """
 
             if is_async:
 
                 async def async_delegating_method(self, *args, **kwargs):
-                    # Fast path: Call unbound method with wrapped instance directly
-                    # This avoids getattr() overhead (~200ns per call saved)
-                    return await unbound_method(self._wrapped_instance, *args, **kwargs)
+                    # Use getattr to go through __getattribute__ on wrapped instance
+                    # This ensures retry wrapping is applied to internal method calls
+                    method = getattr(self._wrapped_instance, method_name)
+                    return await method(*args, **kwargs)
 
                 async_delegating_method.__name__ = method_name
                 async_delegating_method.__qualname__ = f"CompositionWrapper.{method_name}"
@@ -645,9 +646,10 @@ def _create_composition_wrapper(worker_cls: Type) -> Type:
             else:
 
                 def delegating_method(self, *args, **kwargs):
-                    # Fast path: Call unbound method with wrapped instance directly
-                    # This avoids getattr() overhead (~200ns per call saved)
-                    return unbound_method(self._wrapped_instance, *args, **kwargs)
+                    # Use getattr to go through __getattribute__ on wrapped instance
+                    # This ensures retry wrapping is applied to internal method calls
+                    method = getattr(self._wrapped_instance, method_name)
+                    return method(*args, **kwargs)
 
                 delegating_method.__name__ = method_name
                 delegating_method.__qualname__ = f"CompositionWrapper.{method_name}"
@@ -659,8 +661,7 @@ def _create_composition_wrapper(worker_cls: Type) -> Type:
         is_async_method = inspect.iscoroutinefunction(attr)
 
         # Add the delegating method to the wrapper class
-        # Pass the unbound method to avoid getattr() on every call
-        setattr(CompositionWrapper, attr_name, make_method(attr_name, is_async_method, attr))
+        setattr(CompositionWrapper, attr_name, make_method(attr_name, is_async_method))
 
     # Set wrapper class name for debugging
     CompositionWrapper.__name__ = f"{worker_cls.__name__}_CompositionWrapper"
@@ -817,6 +818,61 @@ def _create_worker_wrapper(
             # Call parent __init__ first to properly initialize Pydantic models
             super().__init__(*args, **kwargs)
 
+            # Cache whether this is a composition wrapper (CRITICAL for Ray performance)
+            # This check determines if retry wrapping should be skipped at this level
+            # (because _wrapped_instance already has retry wrapping applied)
+            # Caching avoids expensive type() introspection on every method access
+            _is_composition = hasattr(self, "_wrapped_instance")
+            object.__setattr__(self, "_is_composition_wrapper", _is_composition)
+
+            # CRITICAL FIX: If this is a composition wrapper, replace _wrapped_instance
+            # with a wrapped version that has retry logic applied
+            if _is_composition:
+                # The composition wrapper created _wrapped_instance from the original class
+                # We need to replace it with an instance that has __getattribute__ retry wrapping
+
+                # Get the original instance
+                original_instance = self._wrapped_instance
+
+                # Create a simple wrapper class with retry logic for this instance
+                original_class = type(original_instance)
+
+                class WrappedInstanceWithRetry(original_class):
+                    def __getattribute__(self, name: str):
+                        """Apply retry wrapping to method calls."""
+                        attr = super().__getattribute__(name)
+
+                        # Same retry wrapping logic as WorkerWithLimitsAndRetry
+                        if (
+                            has_retry
+                            and not name.startswith("_")
+                            and callable(attr)
+                            and not isinstance(attr, type)
+                        ):
+                            if name in retry_configs:
+                                method_config = retry_configs[name]
+                            else:
+                                method_config = retry_configs.get("*")
+
+                            if method_config is None:
+                                return attr
+                            if method_config.num_retries == 0 and method_config.retry_until is None:
+                                return attr
+
+                            wrapped = create_retry_wrapper(
+                                attr,
+                                method_config,
+                                method_name=name,
+                                worker_class_name=original_class.__name__,
+                            )
+                            return wrapped
+
+                        return attr
+
+                # Replace the instance's class (Python allows this!)
+                original_instance.__class__ = WrappedInstanceWithRetry
+                # _wrapped_instance is now an instance with retry-wrapped __getattribute__
+
             # Always set limits (may be empty)
             # If limits is a list, create LimitSet and wrap in LimitPool (inside actor/process)
             if isinstance(limits, list):
@@ -847,22 +903,35 @@ def _create_worker_wrapper(
             # Get the attribute using parent's __getattribute__
             attr = super().__getattribute__(name)
 
-            # Only wrap public methods if retry is configured AND not for Ray
+            # CRITICAL: If this is a composition wrapper, skip retry wrapping at this level
+            # because _wrapped_instance already has retry wrapping applied
+            # This prevents double-wrapping which would cause validators to be called multiple times
+            # Use cached flag for performance (critical in Ray where type() is expensive)
+            is_composition = False
+            if name != "_is_composition_wrapper":  # Avoid recursion on the flag itself
+                try:
+                    is_composition = super().__getattribute__("_is_composition_wrapper")
+                except AttributeError:
+                    # Flag not set yet (during __init__), check if _wrapped_instance exists
+                    # Use super().__getattribute__ directly to avoid recursion through hasattr()
+                    try:
+                        super().__getattribute__("_wrapped_instance")
+                        is_composition = True
+                    except AttributeError:
+                        is_composition = False
+
+            # Only wrap public methods if retry is configured AND not for Ray AND not a composition wrapper
             # (Ray mode uses pre-wrapped methods at class level)
             if (
                 has_retry
                 and not for_ray
+                and not is_composition  # Skip if composition wrapper
                 and not name.startswith("_")
                 and callable(attr)
                 and not isinstance(attr, type)
             ):
                 # For composition wrappers (Typed/BaseModel), infrastructure methods
                 # are already filtered out - only user-defined methods are exposed
-
-                # Check if this method has already been wrapped
-                # (to avoid double-wrapping on repeated access)
-                if hasattr(attr, "__wrapped_with_retry__"):
-                    return attr
 
                 # Get retry config for this method
                 # If method explicitly configured (even if None for 0 retries), use that
@@ -880,15 +949,16 @@ def _create_worker_wrapper(
                     return attr
 
                 # Wrap the method with retry logic
+                # Note: This creates a new wrapper on every access, but that's okay because:
+                # 1. The wrapper is lightweight (just adds retry logic)
+                # 2. It's only created when the method is actually called
+                # 3. Python's bound method mechanism already creates new objects on each access
                 wrapped = create_retry_wrapper(
                     attr,
                     method_config,
                     method_name=name,
                     worker_class_name=worker_cls.__name__,
                 )
-
-                # Mark as wrapped to avoid double-wrapping
-                wrapped.__wrapped_with_retry__ = True
 
                 return wrapped
 
@@ -963,7 +1033,6 @@ def _create_worker_wrapper(
                                 bound_method, args, kwargs, method_retry_config, context
                             )
 
-                        async_method_wrapper.__wrapped_with_retry__ = True
                         return async_method_wrapper
                     else:
 
@@ -978,7 +1047,6 @@ def _create_worker_wrapper(
                                 bound_method, args, kwargs, method_retry_config, context
                             )
 
-                        sync_method_wrapper.__wrapped_with_retry__ = True
                         return sync_method_wrapper
 
                 wrapped = make_wrapped_method(attr, attr_name, method_config)

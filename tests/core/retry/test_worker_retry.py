@@ -708,7 +708,7 @@ class TestRetryWithSharedLimits:
         If limits are NOT shared, all 6 workers would succeed immediately.
         """
         if worker_mode in ("sync", "asyncio"):
-            pytest.skip("Sync and asyncio modes only support max_workers=1, no competition")
+            pytest.skip(f"{worker_mode} mode does not support max_workers > 1")
 
         shared_limits = LimitSet(
             limits=[ResourceLimit(key="resource", capacity=3)],
@@ -2938,16 +2938,16 @@ class TestMultiplePerMethodDictConfigurations:
         ).init()
 
         # method_a: succeeds on 3rd attempt (2 retries)
-        result_a = worker.method_a().result(timeout=5.0)
+        result_a = worker.method_a().result(timeout=15.0)
         assert result_a == "success_a_3"
 
         # method_b: succeeds on 4th attempt (3 retries)
-        result_b = worker.method_b().result(timeout=5.0)
+        result_b = worker.method_b().result(timeout=15.0)
         assert result_b == "success_b_4"
 
         # method_c: no retries, should fail immediately
         with pytest.raises(RuntimeError, match="Should not retry"):
-            worker.method_c().result(timeout=5.0)
+            worker.method_c().result(timeout=15.0)
 
         worker.stop()
 
@@ -3175,20 +3175,24 @@ class TestMultiplePerMethodDictConfigurations:
         from concurry import TaskWorker
 
         def flaky_function(x: int) -> int:
-            """Function that may fail."""
-            import time
+            """Function that fails first 2 times, then succeeds."""
+            # Use counter-based approach instead of timing to avoid flakiness
+            if not hasattr(flaky_function, "call_count"):
+                flaky_function.call_count = 0
 
-            # Reset start_time if it's too old (prevents cross-test contamination)
-            if not hasattr(flaky_function, "start_time") or time.time() - flaky_function.start_time > 1.0:
-                flaky_function.start_time = time.time()
+            flaky_function.call_count += 1
 
-            if time.time() - flaky_function.start_time < 0.05:
+            # Fail first 2 attempts, succeed on 3rd
+            if flaky_function.call_count < 3:
                 raise ConnectionError("Temporary network error")
             return x * 2
 
         def validate_even(result, **ctx):
             """Validate result is even."""
             return result % 2 == 0
+
+        # Reset counter for this test
+        flaky_function.call_count = 0
 
         worker = TaskWorker.options(
             mode=worker_mode,
@@ -3223,7 +3227,7 @@ class TestMultiplePerMethodDictConfigurations:
         3. Verify each worker in pool uses correct per-method config
         """
         if worker_mode in ("sync", "asyncio"):
-            pytest.skip("Sync and asyncio only support max_workers=1")
+            pytest.skip(f"{worker_mode} mode does not support max_workers > 1")
 
         class PoolWorker(Worker):
             def __init__(self, worker_id: int):

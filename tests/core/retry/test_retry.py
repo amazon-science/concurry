@@ -1,8 +1,11 @@
 """Unit tests for retry utilities."""
 
 import pytest
+from functools import partial
+from typing import Dict, Any, List
 
-from concurry import global_config
+from pydantic import BaseModel
+from concurry import Worker, worker, async_gather, global_config
 from concurry.core.retry import (
     RetryAlgorithm,
     RetryConfig,
@@ -447,3 +450,297 @@ class TestRetryValidationError:
         assert error.method_name == "test_method"
         assert "test_method" in str(error)
         assert "3 attempts" in str(error)
+
+
+class TestInternalAsyncCallsWithValidation:
+    """Test internal async method calls with retry_until validation.
+
+    This tests the scenario where one worker method calls another worker method
+    internally, and the inner method has validation that can fail.
+    This mimics the user's scenario: call_batch() -> self.call_llm()
+    """
+
+    def test_internal_call_validation_failure_num_retries_zero(self):
+        """Test that validation failure in internal call raises exception (num_retries=0).
+
+        Scenario:
+        - Worker has two async methods: inner() and outer()
+        - outer() calls self.inner() internally
+        - inner() has num_retries=0 and retry_until validation
+        - When validation fails, RetryValidationError should propagate through outer()
+
+        This tests the exact scenario the user reported.
+        """
+
+        class TestWorker(Worker):
+            async def inner(self, value: int) -> dict:
+                """Inner method that returns a dict."""
+                return {"value": value, "status": "pending"}
+
+            async def outer(self, value: int) -> dict:
+                """Outer method that calls inner internally."""
+                # This mimics call_batch calling self.call_llm
+                result = await self.inner(value)
+                return result
+
+        def validate_status(result, **ctx):
+            """Validator that requires status='success'."""
+            return result.get("status") == "success"
+
+        worker = TestWorker.options(
+            mode="asyncio",
+            num_retries={"*": 0, "inner": 0},
+            retry_until={"*": None, "inner": validate_status},
+        ).init()
+
+        try:
+            # Call outer, which internally calls inner
+            # inner's validation will fail (status='pending' not 'success')
+            with pytest.raises(RetryValidationError) as exc_info:
+                worker.outer(42).result()
+
+            # Verify exception details
+            error = exc_info.value
+            assert error.attempts == 1  # num_retries=0 means 1 attempt
+            assert error.method_name == "inner"
+            assert len(error.all_results) == 1
+            assert error.all_results[0] == {"value": 42, "status": "pending"}
+        finally:
+            worker.stop()
+
+    def test_internal_call_validation_failure_with_retries(self):
+        """Test that validation failure in internal call retries correctly.
+
+        Same as above but with num_retries>0 to verify retries work.
+        """
+
+        call_count = [0]
+
+        class TestWorker(Worker):
+            async def inner(self, value: int) -> dict:
+                """Inner method that succeeds on 3rd call."""
+                call_count[0] += 1
+                if call_count[0] < 3:
+                    return {"value": value, "status": "pending"}
+                return {"value": value, "status": "success"}
+
+            async def outer(self, value: int) -> dict:
+                """Outer method that calls inner internally."""
+                result = await self.inner(value)
+                return result
+
+        def validate_status(result, **ctx):
+            """Validator that requires status='success'."""
+            return result.get("status") == "success"
+
+        worker = TestWorker.options(
+            mode="asyncio",
+            num_retries={"*": 0, "inner": 5},  # inner can retry
+            retry_until={"*": None, "inner": validate_status},
+            retry_wait={"*": 1.0, "inner": 0.01},  # Fast retries for testing
+            retry_algorithm="linear",
+            retry_jitter=0,
+        ).init()
+
+        try:
+            # Call outer, which internally calls inner
+            # inner will fail validation twice, succeed on 3rd attempt
+            result = worker.outer(42).result()
+
+            # Should get successful result after retries
+            assert result == {"value": 42, "status": "success"}
+            assert call_count[0] == 3
+        finally:
+            worker.stop()
+
+    def test_async_gather_multiple_internal_calls_one_fails(self):
+        """Test async_gather with multiple internal calls where one fails validation.
+
+        This is the EXACT scenario the user reported:
+        - call_batch() uses async_gather([self.call_llm(p) for p in prompts])
+        - One of the call_llm() calls fails validation
+        - Exception should propagate through async_gather
+        """
+
+        class TestWorker(Worker):
+            async def inner(self, value: int) -> dict:
+                """Inner method that returns a dict."""
+                # Value 42 will fail validation, others succeed
+                if value == 42:
+                    return {"value": value, "status": "pending"}
+                return {"value": value, "status": "success"}
+
+            async def batch_process(self, values: list) -> list:
+                """Batch method that calls inner multiple times via async_gather."""
+                # This mimics call_batch calling self.call_llm multiple times
+                tasks = [self.inner(v) for v in values]
+                results = await async_gather(tasks)
+                return results
+
+        def validate_status(result, **ctx):
+            """Validator that requires status='success'."""
+            return result.get("status") == "success"
+
+        worker = TestWorker.options(
+            mode="asyncio",
+            num_retries={"*": 0, "inner": 0},
+            retry_until={"*": None, "inner": validate_status},
+        ).init()
+
+        try:
+            # Call batch_process with values [1, 2, 42, 3]
+            # The call with value=42 will fail validation
+            with pytest.raises(RetryValidationError) as exc_info:
+                worker.batch_process([1, 2, 42, 3]).result()
+
+            # Verify exception is from the failing call
+            error = exc_info.value
+            assert error.method_name == "inner"
+            assert error.attempts == 1
+            assert error.all_results[0]["value"] == 42
+            assert error.all_results[0]["status"] == "pending"
+        finally:
+            worker.stop()
+
+    def test_async_gather_all_pass_validation(self):
+        """Test async_gather with multiple internal calls where all pass validation.
+
+        Positive test case: all calls succeed validation.
+        """
+
+        class TestWorker(Worker):
+            async def inner(self, value: int) -> dict:
+                """Inner method that returns a dict."""
+                return {"value": value, "status": "success"}
+
+            async def batch_process(self, values: list) -> list:
+                """Batch method that calls inner multiple times via async_gather."""
+                tasks = [self.inner(v) for v in values]
+                results = await async_gather(tasks)
+                return results
+
+        def validate_status(result, **ctx):
+            """Validator that requires status='success'."""
+            return result.get("status") == "success"
+
+        worker = TestWorker.options(
+            mode="asyncio",
+            num_retries={"*": 0, "inner": 0},
+            retry_until={"*": None, "inner": validate_status},
+        ).init()
+
+        try:
+            # All calls should pass validation
+            results = worker.batch_process([1, 2, 3, 4]).result()
+
+            # Verify all results returned successfully
+            assert len(results) == 4
+            assert all(r["status"] == "success" for r in results)
+            assert [r["value"] for r in results] == [1, 2, 3, 4]
+        finally:
+            worker.stop()
+
+    def test_async_gather_multiple_failures_first_raises(self):
+        """Test async_gather where multiple calls fail, but first exception is raised.
+
+        When multiple tasks fail, async_gather (with return_exceptions=False)
+        should raise the first exception encountered.
+        """
+
+        class TestWorker(Worker):
+            async def inner(self, value: int) -> dict:
+                """Inner method that returns a dict."""
+                # Values 10, 20, 30 will fail validation
+                if value in [10, 20, 30]:
+                    return {"value": value, "status": "pending"}
+                return {"value": value, "status": "success"}
+
+            async def batch_process(self, values: list) -> list:
+                """Batch method that calls inner multiple times via async_gather."""
+                tasks = [self.inner(v) for v in values]
+                results = await async_gather(tasks)
+                return results
+
+        def validate_status(result, **ctx):
+            """Validator that requires status='success'."""
+            return result.get("status") == "success"
+
+        worker = TestWorker.options(
+            mode="asyncio",
+            num_retries={"*": 0, "inner": 0},
+            retry_until={"*": None, "inner": validate_status},
+        ).init()
+
+        try:
+            # Multiple calls will fail validation
+            # async_gather should raise exception from one of them
+            with pytest.raises(RetryValidationError) as exc_info:
+                worker.batch_process([1, 10, 20, 30, 2]).result()
+
+            # Verify exception is raised
+            error = exc_info.value
+            assert error.method_name == "inner"
+            assert error.attempts == 1
+            # The failing value should be one of [10, 20, 30]
+            assert error.all_results[0]["value"] in [10, 20, 30]
+        finally:
+            worker.stop()
+
+    def test_basemodel_worker_decorator_with_partial_validator(self):
+        """Test EXACT user scenario: @worker decorator + BaseModel + partial() validator.
+
+        This is the exact scenario the user reported that exposed the composition
+        wrapper bug where internal method calls bypassed retry validation.
+
+        Key elements that trigger the bug (now fixed):
+        - @worker(mode="asyncio") decorator
+        - BaseModel inheritance (triggers composition wrapper)
+        - partial() validator with num_retries=0
+        - Internal method calls via async_gather
+        """
+
+        def validator_with_threshold(result, threshold: int, **kw) -> bool:
+            """Validator that checks if result value > threshold."""
+            if isinstance(result, dict) and "value" in result:
+                value = result["value"]
+            else:
+                value = result
+            return value > threshold
+
+        @worker(mode="asyncio")
+        class LLMWorker(BaseModel):
+            """Mimics user's LLM worker with BaseModel."""
+
+            multiplier: int
+
+            async def call_llm(self, x: int) -> Dict[str, Any]:
+                """Mimics user's call_llm - returns a dict."""
+                result = x * self.multiplier
+                return {"value": result, "response": f"Result is {result}"}
+
+            async def call_batch(self, values: List[int]) -> List[Dict[str, Any]]:
+                """Mimics user's call_batch - calls call_llm via async_gather."""
+                tasks = [self.call_llm(v) for v in values]
+                results = await async_gather(tasks)
+                return results
+
+        # Create worker with partial() validator - EXACT user configuration
+        llm = LLMWorker.options(
+            num_retries={"*": 0, "call_llm": 0},
+            retry_until={"*": None, "call_llm": partial(validator_with_threshold, threshold=15)},
+        ).init(multiplier=2)
+
+        try:
+            # Values: 5*2=10 (FAIL: < 15), 10*2=20 (PASS: > 15), 8*2=16 (PASS: > 15)
+            # Should raise RetryValidationError for the first failing value
+            with pytest.raises(RetryValidationError) as exc_info:
+                llm.call_batch([5, 10, 8]).result()
+
+            # Verify exception details
+            error = exc_info.value
+            assert error.method_name == "call_llm"
+            assert error.attempts == 1  # num_retries=0
+            assert error.all_results[0]["value"] == 10  # 5*2=10 failed validation
+
+        finally:
+            llm.stop()

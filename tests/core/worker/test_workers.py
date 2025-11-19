@@ -466,11 +466,11 @@ class TestFutureInterface:
         Note: Asyncio with time.sleep() has race conditions. Use asyncio.sleep() for real async work.
         """
         w = SimpleWorker.options(mode=worker_mode).init(10)
-        future = w.sleep_and_return(2.0, 42)
 
         # Sync mode completes immediately, so no timeout
         if worker_mode == "sync":
             # For sync mode, the future is already done
+            future = w.sleep_and_return(2.0, 42)
             result = future.result(timeout=0.1)
             assert result == 42
         elif worker_mode == "asyncio":
@@ -478,13 +478,28 @@ class TestFutureInterface:
             # in the event loop thread, so timeout behavior is unreliable.
             # This is expected - use asyncio.sleep() for proper async behavior.
             pytest.skip("Blocking sleep in asyncio worker has race conditions")
-        else:
+        elif worker_mode == "ray":
+            # Ray has significant scheduling overhead (1-2s), use shorter sleep and longer timeouts
             # Should timeout if we don't wait long enough
+            future1 = w.sleep_and_return(0.5, 42)
             with pytest.raises(TimeoutError):
-                future.result(timeout=0.5)
+                future1.result(timeout=0.1)
 
-            # But should succeed with longer timeout
-            result = future.result(timeout=3.0)
+            # Create a fresh future for the second attempt - should succeed with longer timeout
+            # Allow 5 seconds to account for Ray's scheduling overhead
+            future2 = w.sleep_and_return(0.5, 42)
+            result = future2.result(timeout=5.0)
+            assert result == 42
+        else:
+            # Thread/Process modes have minimal overhead
+            # Should timeout if we don't wait long enough
+            future1 = w.sleep_and_return(1.0, 42)
+            with pytest.raises(TimeoutError):
+                future1.result(timeout=0.3)
+
+            # Create a fresh future for the second attempt - should succeed with longer timeout
+            future2 = w.sleep_and_return(1.0, 42)
+            result = future2.result(timeout=2.0)
             assert result == 42
 
         w.stop()

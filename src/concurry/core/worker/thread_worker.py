@@ -182,7 +182,10 @@ class ThreadWorkerProxy(WorkerProxy):
                                 "*"
                             )
 
-                        if submit_retry_config is not None and submit_retry_config.num_retries > 0:
+                        # Apply retry logic if configured (num_retries > 0 or retry_until is set)
+                        if submit_retry_config is not None and (
+                            submit_retry_config.num_retries > 0 or submit_retry_config.retry_until is not None
+                        ):
                             context = {
                                 "method_name": fn.__name__
                                 if hasattr(fn, "__name__")

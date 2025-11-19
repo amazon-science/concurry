@@ -743,8 +743,10 @@ def _create_worker_wrapper(
     # Determine if we need to apply any wrapping
     # Note: limits is now always provided (may be empty list or empty LimitSet)
     has_limits = limits is not None
+    # Check if retry logic is needed: either num_retries > 0 OR retry_until is set
     has_retry = retry_configs is not None and any(
-        cfg is not None and cfg.num_retries > 0 for cfg in retry_configs.values()
+        cfg is not None and (cfg.num_retries > 0 or cfg.retry_until is not None)
+        for cfg in retry_configs.values()
     )
 
     # If no retry, we still need to wrap to set limits attribute
@@ -870,8 +872,11 @@ def _create_worker_wrapper(
                 else:
                     method_config = retry_configs.get("*")
 
-                # Skip wrapping if no config or num_retries=0
-                if method_config is None or method_config.num_retries == 0:
+                # Skip wrapping if no config or (num_retries=0 and no retry_until)
+                # We need to wrap even with num_retries=0 if retry_until is set for validation
+                if method_config is None:
+                    return attr
+                if method_config.num_retries == 0 and method_config.retry_until is None:
                     return attr
 
                 # Wrap the method with retry logic
@@ -933,8 +938,11 @@ def _create_worker_wrapper(
                 else:
                     method_config = retry_configs.get("*")
 
-                # Skip wrapping if no config or num_retries=0
-                if method_config is None or method_config.num_retries == 0:
+                # Skip wrapping if no config or (num_retries=0 and no retry_until)
+                # We need to wrap even with num_retries=0 if retry_until is set for validation
+                if method_config is None:
+                    continue
+                if method_config.num_retries == 0 and method_config.retry_until is None:
                     continue
 
                 # Create a wrapper method that applies retry logic
@@ -1171,18 +1179,24 @@ class WorkerBuilder(Typed):
         """Create per-method RetryConfig objects from retry parameters.
 
         Returns:
-            Dict mapping method names to RetryConfig instances (or None for num_retries=0),
-            or None if all num_retries=0.
+            Dict mapping method names to RetryConfig instances (or None for num_retries=0 and no retry_until),
+            or None if all num_retries=0 and no retry_until validators.
             Always includes "*" key for default config.
         """
-        # Fast path: if num_retries is 0 (single value), no retry
+        # Fast path: if num_retries is 0 (single value) and no retry_until, no retry
         if not isinstance(self.num_retries, dict) and self.num_retries == 0:
-            return None
+            # Check if retry_until is set - if so, we still need retry logic for validation
+            if self.retry_until is None:
+                return None
 
-        # Check if dict with all zeros
+        # Check if dict with all zeros and no retry_until
         if isinstance(self.num_retries, dict):
             if all(v == 0 for v in self.num_retries.values()):
-                return None
+                # Check if any retry_until is set
+                if self.retry_until is None or (
+                    isinstance(self.retry_until, dict) and all(v is None for v in self.retry_until.values())
+                ):
+                    return None
 
         # Build per-method configs
         result = {}
@@ -1226,12 +1240,13 @@ class WorkerBuilder(Typed):
                 retry_jitter = self.retry_jitter
                 retry_until = self.retry_until
 
-            # Skip if num_retries is 0 for this method
-            if num_retries == 0:
+            # Skip if num_retries is 0 AND no retry_until validator for this method
+            if num_retries == 0 and retry_until is None:
                 result[method_name] = None
                 continue
 
             # Create RetryConfig for this method
+            # Even with num_retries=0, we create config if retry_until is set for validation
             result[method_name] = RetryConfig(
                 num_retries=num_retries,
                 retry_on=retry_on if retry_on is not None else [Exception],

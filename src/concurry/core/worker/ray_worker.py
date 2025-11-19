@@ -293,7 +293,10 @@ class RayWorkerProxy(WorkerProxy):
         if self.retry_configs is not None:
             submit_retry_config = self.retry_configs.get("submit") or self.retry_configs.get("*")
 
-        if submit_retry_config is not None and submit_retry_config.num_retries > 0:
+        # Apply retry logic if configured (num_retries > 0 or retry_until is set)
+        if submit_retry_config is not None and (
+            submit_retry_config.num_retries > 0 or submit_retry_config.retry_until is not None
+        ):
             # Wrap the function with retry logic before making it remote
             # Important: Serialize retry_config to avoid Pydantic pickling issues with Ray
             import cloudpickle

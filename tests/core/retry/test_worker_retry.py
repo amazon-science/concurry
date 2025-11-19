@@ -2604,3 +2604,811 @@ class TestPerMethodRetryConfiguration:
         assert result == 20
 
         worker.stop()
+
+
+class TestRetryUntilWithZeroRetries:
+    """Test that retry_until validation works even with num_retries=0.
+
+    This is a critical edge case: users should be able to validate output
+    on the initial attempt (no retries) and get RetryValidationError if
+    validation fails.
+    """
+
+    def test_retry_until_with_zero_retries_validation_fails(self, worker_mode):
+        """Test that retry_until validator runs even with num_retries=0.
+
+        When num_retries=0 but retry_until is configured, the validator
+        should still run on the initial attempt. If validation fails,
+        RetryValidationError should be raised.
+
+        Steps:
+        1. Create worker with num_retries=0 and a failing validator
+        2. Call method that returns a value
+        3. Validator should run and fail
+        4. Verify RetryValidationError is raised with 1 attempt
+        """
+
+        def always_fails_validator(result, **ctx):
+            """Validator that always returns False."""
+            return False
+
+        class SimpleWorker(Worker):
+            def get_value(self) -> int:
+                return 42
+
+        worker = SimpleWorker.options(
+            mode=worker_mode,
+            num_retries=0,  # No retries
+            retry_until=always_fails_validator,  # But validation should still run
+        ).init()
+
+        # Should raise RetryValidationError after 1 attempt (initial, no retries)
+        with pytest.raises(RetryValidationError) as exc_info:
+            worker.get_value().result(timeout=5)
+
+        # Verify it was only 1 attempt (initial attempt, no retries)
+        assert exc_info.value.attempts == 1
+        assert len(exc_info.value.all_results) == 1
+        assert exc_info.value.all_results[0] == 42
+        assert len(exc_info.value.validation_errors) == 1
+
+        worker.stop()
+
+    def test_retry_until_with_zero_retries_validation_succeeds(self, worker_mode):
+        """Test that retry_until validator runs and can succeed with num_retries=0.
+
+        Steps:
+        1. Create worker with num_retries=0 and a passing validator
+        2. Call method that returns a valid value
+        3. Validator should run and pass
+        4. Verify result is returned successfully
+        """
+
+        def always_passes_validator(result, **ctx):
+            """Validator that always returns True."""
+            return True
+
+        class SimpleWorker(Worker):
+            def get_value(self) -> int:
+                return 42
+
+        worker = SimpleWorker.options(
+            mode=worker_mode,
+            num_retries=0,
+            retry_until=always_passes_validator,
+        ).init()
+
+        result = worker.get_value().result(timeout=5)
+        assert result == 42
+
+        worker.stop()
+
+    def test_retry_until_with_zero_retries_conditional_validation(self, worker_mode):
+        """Test conditional validator with num_retries=0.
+
+        Steps:
+        1. Create worker with num_retries=0 and conditional validator
+        2. Call method with value that fails validation
+        3. Verify RetryValidationError
+        4. Call method with value that passes validation
+        5. Verify success
+        """
+
+        def greater_than_50_validator(result, **ctx):
+            """Validator that checks if result > 50."""
+            return result > 50
+
+        class SimpleWorker(Worker):
+            def get_value(self, value: int) -> int:
+                return value
+
+        worker = SimpleWorker.options(
+            mode=worker_mode,
+            num_retries=0,
+            retry_until=greater_than_50_validator,
+        ).init()
+
+        # Should fail validation (30 < 50)
+        with pytest.raises(RetryValidationError) as exc_info:
+            worker.get_value(30).result(timeout=5)
+
+        assert exc_info.value.attempts == 1
+        assert exc_info.value.all_results[0] == 30
+
+        # Should pass validation (60 > 50)
+        result = worker.get_value(60).result(timeout=5)
+        assert result == 60
+
+        worker.stop()
+
+    def test_retry_until_with_zero_retries_taskworker(self, worker_mode):
+        """Test that TaskWorker validates submitted functions with num_retries=0.
+
+        Steps:
+        1. Create TaskWorker with num_retries=0 and validator
+        2. Submit function that returns invalid result
+        3. Verify RetryValidationError
+        4. Submit function that returns valid result
+        5. Verify success
+        """
+
+        def is_even_validator(result, **ctx):
+            """Validator that checks if result is even."""
+            return result % 2 == 0
+
+        def compute(x: int) -> int:
+            return x
+
+        worker = TaskWorker.options(
+            mode=worker_mode,
+            num_retries=0,
+            retry_until=is_even_validator,
+        ).init()
+
+        # Should fail validation (odd number)
+        with pytest.raises(RetryValidationError) as exc_info:
+            worker.submit(compute, 7).result(timeout=5)
+
+        assert exc_info.value.attempts == 1
+        assert exc_info.value.all_results[0] == 7
+
+        # Should pass validation (even number)
+        result = worker.submit(compute, 8).result(timeout=5)
+        assert result == 8
+
+        worker.stop()
+
+    def test_retry_until_with_zero_retries_multiple_validators(self, worker_mode):
+        """Test multiple validators with num_retries=0.
+
+        All validators must pass for validation to succeed.
+
+        Steps:
+        1. Create worker with num_retries=0 and multiple validators
+        2. Call with value that fails first validator
+        3. Call with value that fails second validator
+        4. Call with value that passes all validators
+        """
+
+        def is_positive_validator(result, **ctx):
+            return result > 0
+
+        def is_even_validator(result, **ctx):
+            return result % 2 == 0
+
+        class SimpleWorker(Worker):
+            def get_value(self, value: int) -> int:
+                return value
+
+        worker = SimpleWorker.options(
+            mode=worker_mode,
+            num_retries=0,
+            retry_until=[is_positive_validator, is_even_validator],
+        ).init()
+
+        # Fails first validator (not positive)
+        with pytest.raises(RetryValidationError):
+            worker.get_value(-2).result(timeout=5)
+
+        # Fails second validator (not even)
+        with pytest.raises(RetryValidationError):
+            worker.get_value(3).result(timeout=5)
+
+        # Passes all validators (positive and even)
+        result = worker.get_value(4).result(timeout=5)
+        assert result == 4
+
+        worker.stop()
+
+    def test_retry_until_with_zero_retries_per_method(self, worker_mode):
+        """Test per-method configuration with num_retries=0 and retry_until.
+
+        Steps:
+        1. Create worker with per-method num_retries=0 and validators
+        2. Verify different methods have different validators
+        """
+
+        def always_fails(result, **ctx):
+            return False
+
+        def always_passes(result, **ctx):
+            return True
+
+        class MultiMethodWorker(Worker):
+            def method_a(self) -> int:
+                return 1
+
+            def method_b(self) -> int:
+                return 2
+
+        worker = MultiMethodWorker.options(
+            mode=worker_mode,
+            num_retries={"*": 0, "method_a": 0, "method_b": 0},
+            retry_until={"*": always_passes, "method_a": always_fails},
+        ).init()
+
+        # method_a should fail validation
+        with pytest.raises(RetryValidationError):
+            worker.method_a().result(timeout=5)
+
+        # method_b should pass validation (uses "*" default)
+        result = worker.method_b().result(timeout=5)
+        assert result == 2
+
+        worker.stop()
+
+    def test_retry_until_validator_receives_context(self, worker_mode):
+        """Test that validator receives correct context even with num_retries=0.
+
+        Steps:
+        1. Create worker with validator that checks context
+        2. Verify validator can access and use context fields
+        3. Verify validation works correctly based on context
+        """
+
+        def context_checking_validator(result, attempt, elapsed_time, method_name, **ctx):
+            """Validator that checks context fields are present and valid."""
+            # Verify all expected context fields are present
+            assert isinstance(result, int), f"result should be int, got {type(result)}"
+            assert isinstance(attempt, int), f"attempt should be int, got {type(attempt)}"
+            assert isinstance(elapsed_time, (int, float)), (
+                f"elapsed_time should be numeric, got {type(elapsed_time)}"
+            )
+            assert isinstance(method_name, str), f"method_name should be str, got {type(method_name)}"
+
+            # Verify values are reasonable
+            assert result == 42, f"result should be 42, got {result}"
+            assert attempt == 1, f"attempt should be 1 (first and only), got {attempt}"
+            assert elapsed_time >= 0, f"elapsed_time should be non-negative, got {elapsed_time}"
+            assert method_name == "test_method", f"method_name should be 'test_method', got {method_name}"
+
+            # Pass validation
+            return True
+
+        class SimpleWorker(Worker):
+            def test_method(self) -> int:
+                return 42
+
+        worker = SimpleWorker.options(
+            mode=worker_mode,
+            num_retries=0,
+            retry_until=context_checking_validator,
+        ).init()
+
+        # This will raise AssertionError from validator if context is wrong
+        result = worker.test_method().result(timeout=5)
+        assert result == 42
+
+        worker.stop()
+
+
+class TestMultiplePerMethodDictConfigurations:
+    """Test scenarios where multiple retry parameters use dict-based per-method configuration.
+
+    This ensures that different retry parameters can have independent per-method
+    configurations and they all work together correctly.
+    """
+
+    def test_multiple_dicts_num_retries_and_retry_on(self, worker_mode):
+        """Test num_retries and retry_on both as dicts with different method configs.
+
+        Steps:
+        1. Configure num_retries and retry_on as dicts with different method overrides
+        2. Verify each method uses its specific retry count and exception filter
+        3. Check that methods with different configs behave independently
+        """
+
+        class MultiConfigWorker(Worker):
+            def __init__(self):
+                self.attempt_a = 0
+                self.attempt_b = 0
+                self.attempt_c = 0
+
+            def method_a(self) -> str:
+                """Retries on ValueError, max 3 retries."""
+                self.attempt_a += 1
+                if self.attempt_a < 3:
+                    raise ValueError("Retry me")
+                return f"success_a_{self.attempt_a}"
+
+            def method_b(self) -> str:
+                """Retries on TypeError, max 5 retries."""
+                self.attempt_b += 1
+                if self.attempt_b < 4:
+                    raise TypeError("Retry me too")
+                return f"success_b_{self.attempt_b}"
+
+            def method_c(self) -> str:
+                """No retries, should fail immediately."""
+                self.attempt_c += 1
+                raise RuntimeError("Should not retry")
+
+        worker = MultiConfigWorker.options(
+            mode=worker_mode,
+            num_retries={
+                "*": 0,
+                "method_a": 3,
+                "method_b": 5,
+            },
+            retry_on={
+                "*": [Exception],
+                "method_a": [ValueError],
+                "method_b": [TypeError],
+            },
+        ).init()
+
+        # method_a: succeeds on 3rd attempt (2 retries)
+        result_a = worker.method_a().result(timeout=5.0)
+        assert result_a == "success_a_3"
+
+        # method_b: succeeds on 4th attempt (3 retries)
+        result_b = worker.method_b().result(timeout=5.0)
+        assert result_b == "success_b_4"
+
+        # method_c: no retries, should fail immediately
+        with pytest.raises(RuntimeError, match="Should not retry"):
+            worker.method_c().result(timeout=5.0)
+
+        worker.stop()
+
+    def test_multiple_dicts_all_retry_params(self, worker_mode):
+        """Test all retry parameters as dicts with different method configs.
+
+        Steps:
+        1. Configure num_retries, retry_on, retry_until, retry_algorithm, retry_wait all as dicts
+        2. Each method has different settings for multiple parameters
+        3. Verify each method uses its specific configuration correctly
+        """
+
+        class ComplexWorker(Worker):
+            def __init__(self):
+                self.attempt_a = 0
+                self.attempt_b = 0
+                self.attempt_c = 0
+
+            def method_a(self) -> int:
+                """3 retries, ValueError only, linear backoff, result > 2."""
+                self.attempt_a += 1
+                if self.attempt_a < 2:
+                    raise ValueError("Retry")
+                return self.attempt_a
+
+            def method_b(self) -> int:
+                """5 retries, TypeError only, exponential backoff, result > 3."""
+                self.attempt_b += 1
+                if self.attempt_b < 3:
+                    raise TypeError("Retry")
+                return self.attempt_b
+
+            def method_c(self) -> int:
+                """No retries, should fail immediately."""
+                self.attempt_c += 1
+                raise RuntimeError("No retry")
+
+        def validate_gt_2(result, **ctx):
+            return result > 2
+
+        def validate_gt_3(result, **ctx):
+            return result > 3
+
+        worker = ComplexWorker.options(
+            mode=worker_mode,
+            num_retries={
+                "*": 0,
+                "method_a": 3,
+                "method_b": 5,
+            },
+            retry_on={
+                "*": [Exception],
+                "method_a": [ValueError],
+                "method_b": [TypeError],
+            },
+            retry_until={
+                "*": None,
+                "method_a": validate_gt_2,
+                "method_b": validate_gt_3,
+            },
+            retry_algorithm={
+                "*": RetryAlgorithm.Linear,
+                "method_a": RetryAlgorithm.Linear,
+                "method_b": RetryAlgorithm.Exponential,
+            },
+            retry_wait={
+                "*": 0.01,
+                "method_a": 0.01,
+                "method_b": 0.01,
+            },
+        ).init()
+
+        # method_a: needs 3 attempts (exception on 1, validation fail on 2, success on 3)
+        result_a = worker.method_a().result(timeout=5.0)
+        assert result_a == 3
+
+        # method_b: needs 4 attempts (exception on 1-2, validation fail on 3, success on 4)
+        result_b = worker.method_b().result(timeout=5.0)
+        assert result_b == 4
+
+        # method_c: no retries
+        with pytest.raises(RuntimeError, match="No retry"):
+            worker.method_c().result(timeout=5.0)
+
+        worker.stop()
+
+    def test_mixed_dict_and_single_values(self, worker_mode):
+        """Test mixing dict-based and single-value retry parameters.
+
+        Steps:
+        1. Configure some parameters as dicts (per-method) and others as single values
+        2. Verify dict parameters respect method-specific settings
+        3. Verify single-value parameters apply uniformly to all methods
+        """
+
+        class MixedWorker(Worker):
+            def __init__(self):
+                self.attempt_a = 0
+                self.attempt_b = 0
+
+            def method_a(self) -> str:
+                """3 retries on ValueError, uses global retry_wait."""
+                self.attempt_a += 1
+                if self.attempt_a < 3:
+                    raise ValueError("Retry")
+                return f"success_a_{self.attempt_a}"
+
+            def method_b(self) -> str:
+                """5 retries on TypeError, uses global retry_wait."""
+                self.attempt_b += 1
+                if self.attempt_b < 4:
+                    raise TypeError("Retry")
+                return f"success_b_{self.attempt_b}"
+
+        worker = MixedWorker.options(
+            mode=worker_mode,
+            num_retries={
+                "*": 1,
+                "method_a": 3,
+                "method_b": 5,
+            },
+            retry_on={
+                "*": [Exception],
+                "method_a": [ValueError],
+                "method_b": [TypeError],
+            },
+            retry_wait=0.01,  # Single value - applies to all
+            retry_algorithm=RetryAlgorithm.Linear,  # Single value - applies to all
+            retry_jitter=0,  # Single value - applies to all
+        ).init()
+
+        result_a = worker.method_a().result(timeout=5.0)
+        assert result_a == "success_a_3"
+
+        result_b = worker.method_b().result(timeout=5.0)
+        assert result_b == "success_b_4"
+
+        worker.stop()
+
+    def test_complex_validation_and_exception_filters_per_method(self, worker_mode):
+        """Test complex per-method retry_on and retry_until configurations.
+
+        Steps:
+        1. Configure different validators and exception filters per method
+        2. Method A: custom exception filter + custom validator
+        3. Method B: different exception filter + different validator
+        4. Verify each method uses its specific filters and validators
+        """
+
+        class ValidationWorker(Worker):
+            def __init__(self):
+                self.attempt_a = 0
+                self.attempt_b = 0
+
+            def method_a(self) -> dict:
+                """Custom filter + validator."""
+                self.attempt_a += 1
+                if self.attempt_a == 1:
+                    raise ValueError("retriable_error")  # Should retry
+                # On attempt 2, will return successfully
+                return {"value": self.attempt_a, "status": "ok"}
+
+            def method_b(self) -> dict:
+                """Different filter + different validator."""
+                self.attempt_b += 1
+                if self.attempt_b < 2:
+                    raise TypeError("network_error")
+                return {"value": self.attempt_b, "code": 200}
+
+        def filter_a(exception, **ctx):
+            """Only retry ValueError with 'retriable' in message."""
+            return isinstance(exception, ValueError) and "retriable" in str(exception)
+
+        def filter_b(exception, **ctx):
+            """Only retry TypeError with 'network' in message."""
+            return isinstance(exception, TypeError) and "network" in str(exception)
+
+        def validate_a(result, **ctx):
+            """Validate method_a result."""
+            return isinstance(result, dict) and result.get("status") == "ok"
+
+        def validate_b(result, **ctx):
+            """Validate method_b result."""
+            return isinstance(result, dict) and result.get("code") == 200
+
+        worker = ValidationWorker.options(
+            mode=worker_mode,
+            num_retries={
+                "*": 0,
+                "method_a": 5,
+                "method_b": 5,
+            },
+            retry_on={
+                "*": [Exception],
+                "method_a": filter_a,
+                "method_b": filter_b,
+            },
+            retry_until={
+                "*": None,
+                "method_a": validate_a,
+                "method_b": validate_b,
+            },
+            retry_wait=0.01,
+        ).init()
+
+        # method_a: retries on attempt 1 (retriable), succeeds on attempt 2
+        result_a = worker.method_a().result(timeout=5.0)
+        assert result_a["status"] == "ok"
+        assert result_a["value"] == 2  # Took 2 attempts (1 retry)
+
+        # method_b: retries on attempt 1, succeeds on attempt 2
+        result_b = worker.method_b().result(timeout=5.0)
+        assert result_b["code"] == 200
+
+        worker.stop()
+
+    def test_per_method_with_taskworker_multiple_params(self, worker_mode):
+        """Test TaskWorker with multiple dict-based retry parameters.
+
+        Steps:
+        1. Configure TaskWorker with num_retries, retry_on, retry_until all as dicts
+        2. Use "submit" as method name for configuration
+        3. Verify submitted functions use the configured retry behavior
+        """
+        from concurry import TaskWorker
+
+        def flaky_function(x: int) -> int:
+            """Function that may fail."""
+            import time
+
+            # Reset start_time if it's too old (prevents cross-test contamination)
+            if not hasattr(flaky_function, "start_time") or time.time() - flaky_function.start_time > 1.0:
+                flaky_function.start_time = time.time()
+
+            if time.time() - flaky_function.start_time < 0.05:
+                raise ConnectionError("Temporary network error")
+            return x * 2
+
+        def validate_even(result, **ctx):
+            """Validate result is even."""
+            return result % 2 == 0
+
+        worker = TaskWorker.options(
+            mode=worker_mode,
+            num_retries={
+                "*": 0,
+                "submit": 5,
+            },
+            retry_on={
+                "*": [Exception],
+                "submit": [ConnectionError],
+            },
+            retry_until={
+                "*": None,
+                "submit": validate_even,
+            },
+            retry_wait=0.01,
+        ).init()
+
+        # Should retry on ConnectionError and validate result
+        future = worker.submit(flaky_function, 5)
+        result = future.result(timeout=5.0)
+        assert result == 10
+
+        worker.stop()
+
+    def test_worker_pool_with_multiple_dict_params(self, worker_mode):
+        """Test worker pool where workers use multiple dict-based retry params.
+
+        Steps:
+        1. Create pool with multiple dict-based retry parameters
+        2. Submit tasks to different methods
+        3. Verify each worker in pool uses correct per-method config
+        """
+        if worker_mode in ("sync", "asyncio"):
+            pytest.skip("Sync and asyncio only support max_workers=1")
+
+        class PoolWorker(Worker):
+            def __init__(self, worker_id: int):
+                self.worker_id = worker_id
+                self.attempt_a = 0
+                self.attempt_b = 0
+
+            def method_a(self, x: int) -> dict:
+                """3 retries on ValueError."""
+                self.attempt_a += 1
+                if self.attempt_a < 2:
+                    raise ValueError("Retry")
+                return {"worker_id": self.worker_id, "method": "a", "value": x, "attempts": self.attempt_a}
+
+            def method_b(self, x: int) -> dict:
+                """5 retries on TypeError."""
+                self.attempt_b += 1
+                if self.attempt_b < 3:
+                    raise TypeError("Retry")
+                return {"worker_id": self.worker_id, "method": "b", "value": x, "attempts": self.attempt_b}
+
+        pool = PoolWorker.options(
+            mode=worker_mode,
+            max_workers=3,
+            num_retries={
+                "*": 0,
+                "method_a": 3,
+                "method_b": 5,
+            },
+            retry_on={
+                "*": [Exception],
+                "method_a": [ValueError],
+                "method_b": [TypeError],
+            },
+            retry_wait=0.01,
+        ).init(worker_id=0)
+
+        # Submit tasks to both methods
+        futures_a = [pool.method_a(i) for i in range(5)]
+        futures_b = [pool.method_b(i) for i in range(5)]
+
+        results_a = [f.result(timeout=5.0) for f in futures_a]
+        results_b = [f.result(timeout=5.0) for f in futures_b]
+
+        # Verify results
+        for result in results_a:
+            assert result["method"] == "a"
+            assert result["attempts"] >= 2  # At least 1 retry
+
+        for result in results_b:
+            assert result["method"] == "b"
+            assert result["attempts"] >= 3  # At least 2 retries
+
+        pool.stop()
+
+    def test_three_dicts_num_retries_retry_wait_retry_algorithm(self, worker_mode):
+        """Test num_retries, retry_wait, retry_algorithm all as dicts.
+
+        Steps:
+        1. Configure three different retry parameters as dicts
+        2. Each method gets different retry count, wait time, and algorithm
+        3. Verify timing and retry counts match expected behavior
+        """
+        import time
+
+        class TimingWorker(Worker):
+            def __init__(self):
+                self.attempt_a = 0
+                self.attempt_b = 0
+                self.start_a = None
+                self.start_b = None
+
+            def method_a(self) -> str:
+                """2 retries, 0.05s wait, linear backoff."""
+                if self.start_a is None:
+                    self.start_a = time.time()
+                self.attempt_a += 1
+                if self.attempt_a < 2:
+                    raise ValueError("Retry")
+                return "success_a"
+
+            def method_b(self) -> str:
+                """3 retries, 0.02s wait, exponential backoff."""
+                if self.start_b is None:
+                    self.start_b = time.time()
+                self.attempt_b += 1
+                if self.attempt_b < 3:
+                    raise ValueError("Retry")
+                return "success_b"
+
+        worker = TimingWorker.options(
+            mode=worker_mode,
+            num_retries={
+                "*": 0,
+                "method_a": 2,
+                "method_b": 3,
+            },
+            retry_wait={
+                "*": 0.01,
+                "method_a": 0.05,
+                "method_b": 0.02,
+            },
+            retry_algorithm={
+                "*": RetryAlgorithm.Linear,
+                "method_a": RetryAlgorithm.Linear,
+                "method_b": RetryAlgorithm.Exponential,
+            },
+            retry_on=[ValueError],
+            retry_jitter=0,  # Disable jitter for predictable timing
+        ).init()
+
+        # method_a: 2 attempts (1 retry), linear: 0.05s wait
+        start = time.time()
+        result_a = worker.method_a().result(timeout=5.0)
+        elapsed_a = time.time() - start
+        assert result_a == "success_a"
+        # Should have waited ~0.05s (1 retry * 0.05s * 1)
+        assert elapsed_a >= 0.04  # Allow some slack
+
+        # method_b: 3 attempts (2 retries), exponential: 0.02s, 0.04s waits
+        start = time.time()
+        result_b = worker.method_b().result(timeout=5.0)
+        elapsed_b = time.time() - start
+        assert result_b == "success_b"
+        # Should have waited ~0.02 + 0.04 = 0.06s
+        assert elapsed_b >= 0.05  # Allow some slack
+
+        worker.stop()
+
+    def test_per_method_with_limits_multiple_dict_params(self, worker_mode):
+        """Test per-method retry with limits and multiple dict parameters.
+
+        Steps:
+        1. Create worker with resource limits
+        2. Configure multiple dict-based retry parameters
+        3. Verify limits are released between retries for each method
+        4. Verify different methods use different retry configs
+        """
+        from concurry import ResourceLimit
+
+        class LimitedMultiWorker(Worker):
+            def __init__(self):
+                self.attempt_a = 0
+                self.attempt_b = 0
+
+            def method_a(self) -> str:
+                """3 retries, ValueError only."""
+                with self.limits.acquire(requested={"resources": 1}) as acq:
+                    self.attempt_a += 1
+                    if self.attempt_a < 3:
+                        raise ValueError("Retry")
+                    acq.update(usage={"resources": 1})
+                    return "success_a"
+
+            def method_b(self) -> str:
+                """5 retries, TypeError only."""
+                with self.limits.acquire(requested={"resources": 1}) as acq:
+                    self.attempt_b += 1
+                    if self.attempt_b < 4:
+                        raise TypeError("Retry")
+                    acq.update(usage={"resources": 1})
+                    return "success_b"
+
+        worker = LimitedMultiWorker.options(
+            mode=worker_mode,
+            num_retries={
+                "*": 0,
+                "method_a": 3,
+                "method_b": 5,
+            },
+            retry_on={
+                "*": [Exception],
+                "method_a": [ValueError],
+                "method_b": [TypeError],
+            },
+            retry_wait=0.01,
+            limits=[ResourceLimit(key="resources", capacity=1)],
+        ).init()
+
+        result_a = worker.method_a().result(timeout=5.0)
+        assert result_a == "success_a"
+
+        result_b = worker.method_b().result(timeout=5.0)
+        assert result_b == "success_b"
+
+        # Test completed successfully - limits were properly managed (no deadlocks occurred)
+
+        worker.stop()

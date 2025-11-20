@@ -225,8 +225,12 @@ class TestSharedLimitSets:
         )
 
         # Verify both workers reference the same LimitSet instance
-        w1 = Counter.options(mode=worker_mode, limits=shared_limits).init()
-        w2 = Counter.options(mode=worker_mode, limits=shared_limits).init()
+        if worker_mode == "thread":
+            w1 = Counter.options(mode=worker_mode, max_workers=30, limits=shared_limits).init()
+            w2 = Counter.options(mode=worker_mode, max_workers=30, limits=shared_limits).init()
+        else:
+            w1 = Counter.options(mode=worker_mode, limits=shared_limits).init()
+            w2 = Counter.options(mode=worker_mode, limits=shared_limits).init()
 
         # Make calls and verify they complete
         futures = []
@@ -281,8 +285,8 @@ class TestSharedLimitSets:
         )
 
         # Create two process workers sharing the same limits
-        w1 = ResourceWorker.options(mode="process", limits=shared_limits).init(worker_id=1)
-        w2 = ResourceWorker.options(mode="process", limits=shared_limits).init(worker_id=2)
+        w1 = ResourceWorker.options(mode="process", max_workers=4, limits=shared_limits).init(worker_id=1)
+        w2 = ResourceWorker.options(mode="process", max_workers=4, limits=shared_limits).init(worker_id=2)
 
         # Submit 6 tasks total (3 from each worker) simultaneously
         start_time = time.time()
@@ -350,8 +354,8 @@ class TestSharedLimitSets:
         limits_list = [CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)]
 
         # Create two workers - each will have separate limits
-        w1 = Counter.options(mode="thread", limits=limits_list).init()
-        w2 = Counter.options(mode="thread", limits=limits_list).init()
+        w1 = Counter.options(mode="thread", max_workers=30, limits=limits_list).init()
+        w2 = Counter.options(mode="thread", max_workers=30, limits=limits_list).init()
 
         # Make calls - should complete successfully
         futures = []
@@ -397,7 +401,6 @@ class TestRayWorkerLimits:
             def hold_resource(self, task_id: int) -> dict:
                 """Acquire resource, hold for 1 second, return timing info."""
                 import time
-                import sys
 
                 start = time.time()
                 with self.limits.acquire(requested={"resource": 1}):
@@ -420,7 +423,7 @@ class TestRayWorkerLimits:
         # Need 6 actors because Ray actors execute methods serially (one at a time)
         workers = []
         for i in range(6):
-            w = ResourceWorker.options(mode="ray", limits=shared_limits).init(worker_id=i)
+            w = ResourceWorker.options(mode="ray", max_workers=0, limits=shared_limits).init(worker_id=i)
             workers.append(w)
 
         # Submit 6 tasks (one to each worker) simultaneously
@@ -561,6 +564,7 @@ class TestMixedLimitTypes:
         # Create Ray worker with CallLimit
         w = APIWorker.options(
             mode="ray",
+            max_workers=0,
             limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=5)],
         ).init()
 
@@ -646,7 +650,7 @@ class TestLimitValidation:
         with pytest.raises(
             ValueError, match="InMemorySharedLimitSet is not compatible with worker mode 'Processes'"
         ):
-            DummyWorker.options(mode="process", limits=limits).init()
+            DummyWorker.options(mode="process", max_workers=4, limits=limits).init()
 
     def test_list_of_limits_creates_appropriate_limitset(self):
         """Test that list of Limits creates appropriate LimitSet for worker mode."""
@@ -670,13 +674,13 @@ class TestLimitValidation:
         limits_list = [CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)]
 
         # Thread worker should get InMemorySharedLimitSet wrapped in LimitPool
-        w_thread = DummyWorker.options(mode="thread", limits=limits_list).init()
+        w_thread = DummyWorker.options(mode="thread", max_workers=30, limits=limits_list).init()
         # Call process() which will verify limits inside the worker
         w_thread.process().result()
         w_thread.stop()
 
         # Process worker should also get appropriate LimitSet wrapped in LimitPool
-        w_process = DummyWorker.options(mode="process", limits=limits_list).init()
+        w_process = DummyWorker.options(mode="process", max_workers=4, limits=limits_list).init()
         # Call process() which will verify limits inside the worker
         w_process.process().result()
         w_process.stop()
@@ -710,8 +714,12 @@ class TestSharedLimitSetsWithConfig:
         )
 
         # Create multiple workers with shared limits
-        worker1 = APIWorker.options(mode=worker_mode, limits=shared_limits).init()
-        worker2 = APIWorker.options(mode=worker_mode, limits=shared_limits).init()
+        if worker_mode == "thread":
+            worker1 = APIWorker.options(mode=worker_mode, max_workers=30, limits=shared_limits).init()
+            worker2 = APIWorker.options(mode=worker_mode, max_workers=30, limits=shared_limits).init()
+        else:
+            worker1 = APIWorker.options(mode=worker_mode, limits=shared_limits).init()
+            worker2 = APIWorker.options(mode=worker_mode, limits=shared_limits).init()
 
         # Both workers should see the same config
         result1 = worker1.call_api().result()
@@ -746,8 +754,8 @@ class TestSharedLimitSetsWithConfig:
         )
 
         # Create multiple process workers
-        worker1 = APIWorker.options(mode="process", limits=shared_limits).init()
-        worker2 = APIWorker.options(mode="process", limits=shared_limits).init()
+        worker1 = APIWorker.options(mode="process", max_workers=4, limits=shared_limits).init()
+        worker2 = APIWorker.options(mode="process", max_workers=4, limits=shared_limits).init()
 
         # Both workers should see the same config
         result1 = worker1.call_api().result()
@@ -784,8 +792,8 @@ class TestSharedLimitSetsWithConfig:
         )
 
         # Create multiple Ray workers
-        worker1 = APIWorker.options(mode="ray", limits=shared_limits).init()
-        worker2 = APIWorker.options(mode="ray", limits=shared_limits).init()
+        worker1 = APIWorker.options(mode="ray", max_workers=0, limits=shared_limits).init()
+        worker2 = APIWorker.options(mode="ray", max_workers=0, limits=shared_limits).init()
 
         # Both workers should see the same config
         result1 = worker1.call_api().result()
@@ -829,8 +837,12 @@ class TestSharedLimitSetsWithConfig:
             config={"region": "us-west-2"},
         )
 
-        worker1 = APIWorker.options(mode=worker_mode, limits=shared_limits).init()
-        worker2 = APIWorker.options(mode=worker_mode, limits=shared_limits).init()
+        if worker_mode == "thread":
+            worker1 = APIWorker.options(mode=worker_mode, max_workers=30, limits=shared_limits).init()
+            worker2 = APIWorker.options(mode=worker_mode, max_workers=30, limits=shared_limits).init()
+        else:
+            worker1 = APIWorker.options(mode=worker_mode, limits=shared_limits).init()
+            worker2 = APIWorker.options(mode=worker_mode, limits=shared_limits).init()
 
         # Worker 1 modifies its acquisition's config
         result1 = worker1.modify_config().result()
@@ -964,7 +976,18 @@ class TestSharedLimitAcquisitionTracking:
         # Create 4 workers
         workers = []
         for i in range(4):
-            w = TrackingWorker.options(mode=worker_mode, limits=shared_limits).init(worker_id=i)
+            if worker_mode == "thread":
+                w = TrackingWorker.options(mode=worker_mode, max_workers=30, limits=shared_limits).init(
+                    worker_id=i
+                )
+            elif worker_mode == "process":
+                w = TrackingWorker.options(mode=worker_mode, max_workers=4, limits=shared_limits).init(
+                    worker_id=i
+                )
+            else:  # ray
+                w = TrackingWorker.options(mode=worker_mode, max_workers=0, limits=shared_limits).init(
+                    worker_id=i
+                )
             workers.append(w)
 
         # Submit 4 tasks, each holding for 1 second
@@ -1098,7 +1121,18 @@ class TestSharedLimitAcquisitionTracking:
         # Create 6 workers
         workers = []
         for i in range(6):
-            w = TrackingWorker.options(mode=worker_mode, limits=shared_limits).init(worker_id=i)
+            if worker_mode == "thread":
+                w = TrackingWorker.options(mode=worker_mode, max_workers=30, limits=shared_limits).init(
+                    worker_id=i
+                )
+            elif worker_mode == "process":
+                w = TrackingWorker.options(mode=worker_mode, max_workers=4, limits=shared_limits).init(
+                    worker_id=i
+                )
+            else:  # ray
+                w = TrackingWorker.options(mode=worker_mode, max_workers=0, limits=shared_limits).init(
+                    worker_id=i
+                )
             workers.append(w)
 
         # Submit 6 tasks, each holding for 1 second
@@ -1223,7 +1257,18 @@ class TestSharedLimitAcquisitionTracking:
         # Create 4 workers
         workers = []
         for i in range(4):
-            w = TrackingWorker.options(mode=worker_mode, limits=shared_limits).init(worker_id=i)
+            if worker_mode == "thread":
+                w = TrackingWorker.options(mode=worker_mode, max_workers=30, limits=shared_limits).init(
+                    worker_id=i
+                )
+            elif worker_mode == "process":
+                w = TrackingWorker.options(mode=worker_mode, max_workers=4, limits=shared_limits).init(
+                    worker_id=i
+                )
+            else:  # ray
+                w = TrackingWorker.options(mode=worker_mode, max_workers=0, limits=shared_limits).init(
+                    worker_id=i
+                )
             workers.append(w)
 
         # Submit tasks with staggered hold times

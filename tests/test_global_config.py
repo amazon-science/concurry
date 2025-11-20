@@ -68,7 +68,7 @@ class TestGlobalConfig:
     def test_config_get_defaults_method(self):
         """Test get_defaults() method."""
         thread_defaults = global_config.get_defaults(ExecutionMode.Threads)
-        assert thread_defaults.max_workers == 30
+        assert thread_defaults.max_workers == 1
         assert thread_defaults.max_queued_tasks == None
         assert thread_defaults.load_balancing == LoadBalancingAlgorithm.RoundRobin
         assert thread_defaults.load_balancing_on_demand == LoadBalancingAlgorithm.Random

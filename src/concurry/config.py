@@ -270,7 +270,7 @@ _ASYNCIO_DEFAULTS = ExecutionModeDefaults(
 )
 
 _THREADS_DEFAULTS = ExecutionModeDefaults(
-    max_workers=30,
+    max_workers=1,
     max_queued_tasks=None,
     worker_command_queue_timeout=0.1,
     pool_on_demand_cleanup_timeout=5.0,
@@ -278,7 +278,7 @@ _THREADS_DEFAULTS = ExecutionModeDefaults(
 )
 
 _PROCESSES_DEFAULTS = ExecutionModeDefaults(
-    max_workers=4,
+    max_workers=1,
     max_queued_tasks=100,
     worker_result_queue_timeout=30.0,
     worker_result_queue_cleanup_timeout=1.0,

@@ -106,13 +106,14 @@ In production, you want to maximize resource usage and handle transient failures
 ```python
 # config/prod.py
 from concurry import global_config
+import multiprocessing as mp
 
 def configure_prod():
     """Setup for high-throughput production."""
     # Aggressive parallelism
     global_config.thread.max_workers = 50
-    global_config.process.max_workers = 8  # Matches CPU cores
-    global_config.ray.max_workers = 0      # Unlimited (auto-scaling)
+    global_config.process.max_workers = mp.cpu_count()  # Matches CPU cores
+    global_config.ray.max_workers = 0      # Unlimited (auto-scaling using Ray)
     
     # Robustness
     global_config.defaults.num_retries = 3
@@ -161,8 +162,8 @@ def concurry_config():
 | :--- | :--- | :--- |
 | `defaults.num_retries` | `0` | Number of retries for failed tasks. |
 | `defaults.retry_wait` | `1.0` | Seconds to wait before retry. |
-| `thread.max_workers` | `30` | Max threads in the pool. |
-| `process.max_workers` | `None` | Max processes (None = CPU count). |
+| `thread.max_workers` | `1` | Max threads in the pool. |
+| `process.max_workers` | `1` | Max processes in the pool. |
 | `ray.max_workers` | `0` | Max Ray actors (0 = unlimited). |
 | `defaults.blocking` | `False` | If True, `future.result()` is called immediately. |
 

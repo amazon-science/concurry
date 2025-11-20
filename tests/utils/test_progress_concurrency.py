@@ -339,7 +339,14 @@ class TestProgressBarWithConcurryWorkers:
             time.sleep(0.01)
             return x * x
 
-        worker = TaskWorker.options(mode=worker_mode).init(fn=square)
+        if worker_mode == "thread":
+            worker = TaskWorker.options(mode=worker_mode, max_workers=30).init(fn=square)
+        elif worker_mode == "process":
+            worker = TaskWorker.options(mode=worker_mode, max_workers=4).init(fn=square)
+        elif worker_mode == "ray":
+            worker = TaskWorker.options(mode=worker_mode, max_workers=0).init(fn=square)
+        else:
+            worker = TaskWorker.options(mode=worker_mode).init(fn=square)
 
         # Use progress bar with map
         results = list(worker.map(range(20), progress=True))
@@ -360,7 +367,14 @@ class TestProgressBarWithConcurryWorkers:
             time.sleep(0.01)
             return x * 2
 
-        worker = TaskWorker.options(mode=worker_mode).init(fn=double)
+        if worker_mode == "thread":
+            worker = TaskWorker.options(mode=worker_mode, max_workers=30).init(fn=double)
+        elif worker_mode == "process":
+            worker = TaskWorker.options(mode=worker_mode, max_workers=4).init(fn=double)
+        elif worker_mode == "ray":
+            worker = TaskWorker.options(mode=worker_mode, max_workers=0).init(fn=double)
+        else:
+            worker = TaskWorker.options(mode=worker_mode).init(fn=double)
 
         # Custom progress configuration
         progress_config = {
@@ -410,7 +424,14 @@ class TestProgressBarWithConcurryWorkers:
                 raise ValueError(f"Test exception at x={x}")
             return x * 2
 
-        worker = TaskWorker.options(mode=worker_mode).init(fn=failing_function)
+        if worker_mode == "thread":
+            worker = TaskWorker.options(mode=worker_mode, max_workers=30).init(fn=failing_function)
+        elif worker_mode == "process":
+            worker = TaskWorker.options(mode=worker_mode, max_workers=4).init(fn=failing_function)
+        elif worker_mode == "ray":
+            worker = TaskWorker.options(mode=worker_mode, max_workers=0).init(fn=failing_function)
+        else:
+            worker = TaskWorker.options(mode=worker_mode).init(fn=failing_function)
 
         with pytest.raises(ValueError, match="Test exception at x=10"):
             # This should fail when processing x=10

@@ -150,6 +150,14 @@ ray.init(
 )
 ```
 
+### Explicit `max_workers` Requirement (**CRITICAL**)
+
+- Every test must call `.options()` with an explicit `max_workers` argument for any execution mode that allows more than a single worker (`thread`, `process`, `ray`).
+- Always order the call as `Worker.options(mode=..., max_workers=..., ...)` so the requirement stays obvious in code review.
+- Hard-code the current defaults whenever the test depends on them: `thread → 30`, `process → 4`, `ray → 0`. (These values may change later; tests must keep declaring what they expect.)
+- Sync and asyncio workers must **omit** `max_workers` (they only support `1` and enforce it automatically).
+- Pools, decorated workers, task helpers, and any other helper that wraps `.options()` have to follow the same rule—if the mode supports multiple workers, pass `max_workers` explicitly in the helper.
+
 ### WORKER_MODES and POOL_MODES Constants
 
 Available for direct use when needed:

@@ -91,7 +91,14 @@ class TestWorkerBasics:
         3. Verifies result is 15 (10+5)
         4. Stops worker
         """
-        w = SimpleWorker.options(mode=worker_mode).init(10)
+        if worker_mode == "thread":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=30).init(10)
+        elif worker_mode == "process":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=4).init(10)
+        elif worker_mode == "ray":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=0).init(10)
+        else:
+            w = SimpleWorker.options(mode=worker_mode).init(10)
         future = w.add(5)
         result = future.result(timeout=15)
         assert result == 15
@@ -110,7 +117,14 @@ class TestWorkerBasics:
         - Sync/Ray: Fail immediately with AttributeError
         - Thread/Asyncio/Process: Return future that raises AttributeError
         """
-        w = SimpleWorker.options(mode=worker_mode).init(10)
+        if worker_mode == "thread":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=30).init(10)
+        elif worker_mode == "process":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=4).init(10)
+        elif worker_mode == "ray":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=0).init(10)
+        else:
+            w = SimpleWorker.options(mode=worker_mode).init(10)
 
         if worker_mode in ("sync", "ray"):
             # Sync and Ray modes should fail immediately
@@ -134,7 +148,14 @@ class TestWorkerBasics:
         5. Verifies get_value() returns 10 (original value)
         6. Stops worker
         """
-        w = SimpleWorker.options(mode=worker_mode).init(10)
+        if worker_mode == "thread":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=30).init(10)
+        elif worker_mode == "process":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=4).init(10)
+        elif worker_mode == "ray":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=0).init(10)
+        else:
+            w = SimpleWorker.options(mode=worker_mode).init(10)
 
         future1 = w.add(5)
         future2 = w.multiply(2)
@@ -155,7 +176,14 @@ class TestWorkerBasics:
         4. Verifies result is 15
         5. Stops worker
         """
-        w = SimpleWorker.options(mode=worker_mode, blocking=True).init(10)
+        if worker_mode == "thread":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=30, blocking=True).init(10)
+        elif worker_mode == "process":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=4, blocking=True).init(10)
+        elif worker_mode == "ray":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=0, blocking=True).init(10)
+        else:
+            w = SimpleWorker.options(mode=worker_mode, blocking=True).init(10)
 
         result = w.add(5)
         # Should return result directly, not a future
@@ -172,7 +200,14 @@ class TestWorkerBasics:
         3. Verifies result is "Hello from TestBot"
         4. Stops worker
         """
-        w = DecoratedWorker.options(mode=worker_mode).init("TestBot")
+        if worker_mode == "thread":
+            w = DecoratedWorker.options(mode=worker_mode, max_workers=30).init("TestBot")
+        elif worker_mode == "process":
+            w = DecoratedWorker.options(mode=worker_mode, max_workers=4).init("TestBot")
+        elif worker_mode == "ray":
+            w = DecoratedWorker.options(mode=worker_mode, max_workers=0).init("TestBot")
+        else:
+            w = DecoratedWorker.options(mode=worker_mode).init("TestBot")
         future = w.greet()
         result = future.result(timeout=15)
         assert result == "Hello from TestBot"
@@ -190,7 +225,14 @@ class TestWorkerExceptions:
         3. Verifies ValueError is raised with "test error" message
         4. Stops worker
         """
-        w = SimpleWorker.options(mode=worker_mode).init(10)
+        if worker_mode == "thread":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=30).init(10)
+        elif worker_mode == "process":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=4).init(10)
+        elif worker_mode == "ray":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=0).init(10)
+        else:
+            w = SimpleWorker.options(mode=worker_mode).init(10)
         future = w.raise_error("test error")
 
         with pytest.raises(Exception) as exc_info:
@@ -211,7 +253,14 @@ class TestWorkerExceptions:
 
         Mode-specific: Sync/Ray fail immediately; others via future
         """
-        w = SimpleWorker.options(mode=worker_mode).init(10)
+        if worker_mode == "thread":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=30).init(10)
+        elif worker_mode == "process":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=4).init(10)
+        elif worker_mode == "ray":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=0).init(10)
+        else:
+            w = SimpleWorker.options(mode=worker_mode).init(10)
 
         if worker_mode in ("sync", "ray"):
             # Sync and Ray modes should fail immediately
@@ -237,7 +286,14 @@ class TestWorkerConcurrency:
         3. Verifies all results: 10+0, 10+1, 10+2, 10+3, 10+4
         4. Stops worker
         """
-        w = SimpleWorker.options(mode=worker_mode).init(10)
+        if worker_mode == "thread":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=30).init(10)
+        elif worker_mode == "process":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=4).init(10)
+        elif worker_mode == "ray":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=0).init(10)
+        else:
+            w = SimpleWorker.options(mode=worker_mode).init(10)
 
         # Submit multiple tasks
         futures = []
@@ -262,7 +318,14 @@ class TestWorkerConcurrency:
         5. Verifies elapsed >= 1.0s (all modes execute the sleep)
         6. Stops worker
         """
-        w = SimpleWorker.options(mode=worker_mode).init(10)
+        if worker_mode == "thread":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=30).init(10)
+        elif worker_mode == "process":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=4).init(10)
+        elif worker_mode == "ray":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=0).init(10)
+        else:
+            w = SimpleWorker.options(mode=worker_mode).init(10)
 
         # Start a task that takes 1 second
         start_time = time.time()
@@ -354,7 +417,14 @@ class TestWorkerLifecycle:
         3. Calls stop() on worker
         4. Attempts to call add(5) after stop, verifies RuntimeError raised
         """
-        w = SimpleWorker.options(mode=worker_mode).init(10)
+        if worker_mode == "thread":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=30).init(10)
+        elif worker_mode == "process":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=4).init(10)
+        elif worker_mode == "ray":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=0).init(10)
+        else:
+            w = SimpleWorker.options(mode=worker_mode).init(10)
 
         # Use the worker
         result = w.add(5).result(timeout=15)
@@ -376,7 +446,14 @@ class TestWorkerLifecycle:
         """
         workers = []
         for i in range(3):
-            w = SimpleWorker.options(mode=worker_mode).init(i)
+            if worker_mode == "thread":
+                w = SimpleWorker.options(mode=worker_mode, max_workers=30).init(i)
+            elif worker_mode == "process":
+                w = SimpleWorker.options(mode=worker_mode, max_workers=4).init(i)
+            elif worker_mode == "ray":
+                w = SimpleWorker.options(mode=worker_mode, max_workers=0).init(i)
+            else:
+                w = SimpleWorker.options(mode=worker_mode).init(i)
             workers.append(w)
 
         # Use all workers
@@ -399,7 +476,14 @@ class TestWorkerInitialization:
         2. Calls get_value(), verifies 42
         3. Stops worker
         """
-        w = SimpleWorker.options(mode=worker_mode).init(42)
+        if worker_mode == "thread":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=30).init(42)
+        elif worker_mode == "process":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=4).init(42)
+        elif worker_mode == "ray":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=0).init(42)
+        else:
+            w = SimpleWorker.options(mode=worker_mode).init(42)
         result = w.get_value().result(timeout=15)
         assert result == 42
         w.stop()
@@ -411,7 +495,14 @@ class TestWorkerInitialization:
         2. Calls get_value(), verifies 99
         3. Stops worker
         """
-        w = SimpleWorker.options(mode=worker_mode).init(value=99)
+        if worker_mode == "thread":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=30).init(value=99)
+        elif worker_mode == "process":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=4).init(value=99)
+        elif worker_mode == "ray":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=0).init(value=99)
+        else:
+            w = SimpleWorker.options(mode=worker_mode).init(value=99)
         result = w.get_value().result(timeout=15)
         assert result == 99
         w.stop()
@@ -423,7 +514,14 @@ class TestWorkerInitialization:
         2. Calls greet(), verifies "Hello from Alice"
         3. Stops worker
         """
-        w = DecoratedWorker.options(mode=worker_mode).init("Alice")
+        if worker_mode == "thread":
+            w = DecoratedWorker.options(mode=worker_mode, max_workers=30).init("Alice")
+        elif worker_mode == "process":
+            w = DecoratedWorker.options(mode=worker_mode, max_workers=4).init("Alice")
+        elif worker_mode == "ray":
+            w = DecoratedWorker.options(mode=worker_mode, max_workers=0).init("Alice")
+        else:
+            w = DecoratedWorker.options(mode=worker_mode).init("Alice")
         result = w.greet().result(timeout=15)
         assert result == "Hello from Alice"
         w.stop()
@@ -441,7 +539,14 @@ class TestFutureInterface:
         4. Verifies future.done() is True, result is 15
         5. Stops worker
         """
-        w = SimpleWorker.options(mode=worker_mode).init(10)
+        if worker_mode == "thread":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=30).init(10)
+        elif worker_mode == "process":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=4).init(10)
+        elif worker_mode == "ray":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=0).init(10)
+        else:
+            w = SimpleWorker.options(mode=worker_mode).init(10)
         future = w.add(5)
 
         # Wait for completion
@@ -465,7 +570,14 @@ class TestFutureInterface:
 
         Note: Asyncio with time.sleep() has race conditions. Use asyncio.sleep() for real async work.
         """
-        w = SimpleWorker.options(mode=worker_mode).init(10)
+        if worker_mode == "thread":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=30).init(10)
+        elif worker_mode == "process":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=4).init(10)
+        elif worker_mode == "ray":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=0).init(10)
+        else:
+            w = SimpleWorker.options(mode=worker_mode).init(10)
 
         # Sync mode completes immediately, so no timeout
         if worker_mode == "sync":
@@ -512,7 +624,14 @@ class TestFutureInterface:
         3. Verifies result() raises exception
         4. Stops worker
         """
-        w = SimpleWorker.options(mode=worker_mode).init(10)
+        if worker_mode == "thread":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=30).init(10)
+        elif worker_mode == "process":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=4).init(10)
+        elif worker_mode == "ray":
+            w = SimpleWorker.options(mode=worker_mode, max_workers=0).init(10)
+        else:
+            w = SimpleWorker.options(mode=worker_mode).init(10)
         future = w.raise_error("test exception")
 
         # Should raise when getting result
@@ -538,7 +657,14 @@ class TestTaskWorkerSubmit:
         def add(x, y):
             return x + y
 
-        w = TaskWorker.options(mode=worker_mode).init()
+        if worker_mode == "thread":
+            w = TaskWorker.options(mode=worker_mode, max_workers=30).init()
+        elif worker_mode == "process":
+            w = TaskWorker.options(mode=worker_mode, max_workers=4).init()
+        elif worker_mode == "ray":
+            w = TaskWorker.options(mode=worker_mode, max_workers=0).init()
+        else:
+            w = TaskWorker.options(mode=worker_mode).init()
         future = w.submit(add, 5, 10)
         result = future.result(timeout=15)
         assert result == 15
@@ -557,7 +683,14 @@ class TestTaskWorkerSubmit:
         def multiply(x, y, factor=1):
             return (x * y) * factor
 
-        w = TaskWorker.options(mode=worker_mode).init()
+        if worker_mode == "thread":
+            w = TaskWorker.options(mode=worker_mode, max_workers=30).init()
+        elif worker_mode == "process":
+            w = TaskWorker.options(mode=worker_mode, max_workers=4).init()
+        elif worker_mode == "ray":
+            w = TaskWorker.options(mode=worker_mode, max_workers=0).init()
+        else:
+            w = TaskWorker.options(mode=worker_mode).init()
         future = w.submit(multiply, 3, 4, factor=2)
         result = future.result(timeout=15)
         assert result == 24
@@ -566,7 +699,14 @@ class TestTaskWorkerSubmit:
     def test_submit_lambda(self, worker_mode):
         """Test submitting a lambda function."""
 
-        w = TaskWorker.options(mode=worker_mode).init()
+        if worker_mode == "thread":
+            w = TaskWorker.options(mode=worker_mode, max_workers=30).init()
+        elif worker_mode == "process":
+            w = TaskWorker.options(mode=worker_mode, max_workers=4).init()
+        elif worker_mode == "ray":
+            w = TaskWorker.options(mode=worker_mode, max_workers=0).init()
+        else:
+            w = TaskWorker.options(mode=worker_mode).init()
         future = w.submit(lambda x: x**2, 5)
         result = future.result(timeout=15)
         assert result == 25
@@ -578,7 +718,14 @@ class TestTaskWorkerSubmit:
         def failing_fn():
             raise ValueError("Task failed")
 
-        w = TaskWorker.options(mode=worker_mode).init()
+        if worker_mode == "thread":
+            w = TaskWorker.options(mode=worker_mode, max_workers=30).init()
+        elif worker_mode == "process":
+            w = TaskWorker.options(mode=worker_mode, max_workers=4).init()
+        elif worker_mode == "ray":
+            w = TaskWorker.options(mode=worker_mode, max_workers=0).init()
+        else:
+            w = TaskWorker.options(mode=worker_mode).init()
         future = w.submit(failing_fn)
 
         with pytest.raises(Exception) as exc_info:
@@ -593,7 +740,14 @@ class TestTaskWorkerSubmit:
         def compute(x):
             return x * 2
 
-        w = TaskWorker.options(mode=worker_mode).init()
+        if worker_mode == "thread":
+            w = TaskWorker.options(mode=worker_mode, max_workers=30).init()
+        elif worker_mode == "process":
+            w = TaskWorker.options(mode=worker_mode, max_workers=4).init()
+        elif worker_mode == "ray":
+            w = TaskWorker.options(mode=worker_mode, max_workers=0).init()
+        else:
+            w = TaskWorker.options(mode=worker_mode).init()
 
         futures = [w.submit(compute, i) for i in range(5)]
         results = [f.result(timeout=15) for f in futures]
@@ -607,7 +761,14 @@ class TestTaskWorkerSubmit:
         def add(x, y):
             return x + y
 
-        w = TaskWorker.options(mode=worker_mode, blocking=True).init()
+        if worker_mode == "thread":
+            w = TaskWorker.options(mode=worker_mode, max_workers=30, blocking=True).init()
+        elif worker_mode == "process":
+            w = TaskWorker.options(mode=worker_mode, max_workers=4, blocking=True).init()
+        elif worker_mode == "ray":
+            w = TaskWorker.options(mode=worker_mode, max_workers=0, blocking=True).init()
+        else:
+            w = TaskWorker.options(mode=worker_mode, blocking=True).init()
         result = w.submit(add, 10, 20)
 
         # Should return result directly, not a future
@@ -621,7 +782,14 @@ class TestTaskWorkerSubmit:
         def square(x):
             return x**2
 
-        w = TaskWorker.options(mode=worker_mode).init()
+        if worker_mode == "thread":
+            w = TaskWorker.options(mode=worker_mode, max_workers=30).init()
+        elif worker_mode == "process":
+            w = TaskWorker.options(mode=worker_mode, max_workers=4).init()
+        elif worker_mode == "ray":
+            w = TaskWorker.options(mode=worker_mode, max_workers=0).init()
+        else:
+            w = TaskWorker.options(mode=worker_mode).init()
         results = list(w.map(square, range(5)))
         assert results == [0, 1, 4, 9, 16]
         w.stop()
@@ -632,7 +800,14 @@ class TestTaskWorkerSubmit:
         def add(x, y):
             return x + y
 
-        w = TaskWorker.options(mode=worker_mode).init()
+        if worker_mode == "thread":
+            w = TaskWorker.options(mode=worker_mode, max_workers=30).init()
+        elif worker_mode == "process":
+            w = TaskWorker.options(mode=worker_mode, max_workers=4).init()
+        elif worker_mode == "ray":
+            w = TaskWorker.options(mode=worker_mode, max_workers=0).init()
+        else:
+            w = TaskWorker.options(mode=worker_mode).init()
         results = list(w.map(add, [1, 2, 3], [10, 20, 30]))
         assert results == [11, 22, 33]
         w.stop()
@@ -643,7 +818,14 @@ class TestTaskWorkerSubmit:
         def multiply(x, factor=2):
             return x * factor
 
-        w = TaskWorker.options(mode=worker_mode).init()
+        if worker_mode == "thread":
+            w = TaskWorker.options(mode=worker_mode, max_workers=30).init()
+        elif worker_mode == "process":
+            w = TaskWorker.options(mode=worker_mode, max_workers=4).init()
+        elif worker_mode == "ray":
+            w = TaskWorker.options(mode=worker_mode, max_workers=0).init()
+        else:
+            w = TaskWorker.options(mode=worker_mode).init()
         # Note: map() doesn't directly support passing kwargs to fn
         # This tests that the function's default kwargs work
         results = list(w.map(multiply, range(5)))
@@ -656,7 +838,14 @@ class TestTaskWorkerSubmit:
         def compute(x, y):
             return x**2 + y**2
 
-        w = TaskWorker.options(mode=worker_mode).init()
+        if worker_mode == "thread":
+            w = TaskWorker.options(mode=worker_mode, max_workers=30).init()
+        elif worker_mode == "process":
+            w = TaskWorker.options(mode=worker_mode, max_workers=4).init()
+        elif worker_mode == "ray":
+            w = TaskWorker.options(mode=worker_mode, max_workers=0).init()
+        else:
+            w = TaskWorker.options(mode=worker_mode).init()
         future = w.submit(compute, 3, 4)
         result = future.result(timeout=15)
 
@@ -665,7 +854,14 @@ class TestTaskWorkerSubmit:
 
     def test_lambda_task(self, worker_mode):
         """Test submitting lambda functions."""
-        w = TaskWorker.options(mode=worker_mode).init()
+        if worker_mode == "thread":
+            w = TaskWorker.options(mode=worker_mode, max_workers=30).init()
+        elif worker_mode == "process":
+            w = TaskWorker.options(mode=worker_mode, max_workers=4).init()
+        elif worker_mode == "ray":
+            w = TaskWorker.options(mode=worker_mode, max_workers=0).init()
+        else:
+            w = TaskWorker.options(mode=worker_mode).init()
 
         result = w.submit(lambda x: x * 10, 5).result(timeout=15)
         assert result == 50
@@ -674,7 +870,14 @@ class TestTaskWorkerSubmit:
 
     def test_multiple_tasks(self, worker_mode):
         """Test submitting multiple tasks to TaskWorker."""
-        w = TaskWorker.options(mode=worker_mode).init()
+        if worker_mode == "thread":
+            w = TaskWorker.options(mode=worker_mode, max_workers=30).init()
+        elif worker_mode == "process":
+            w = TaskWorker.options(mode=worker_mode, max_workers=4).init()
+        elif worker_mode == "ray":
+            w = TaskWorker.options(mode=worker_mode, max_workers=0).init()
+        else:
+            w = TaskWorker.options(mode=worker_mode).init()
 
         futures = [w.submit(lambda x: x**2, i) for i in range(5)]
         results = [f.result(timeout=15) for f in futures]
@@ -688,7 +891,14 @@ class TestTaskWorkerSubmit:
         def compute(x, y, multiplier=1):
             return (x + y) * multiplier
 
-        w = TaskWorker.options(mode=worker_mode).init()
+        if worker_mode == "thread":
+            w = TaskWorker.options(mode=worker_mode, max_workers=30).init()
+        elif worker_mode == "process":
+            w = TaskWorker.options(mode=worker_mode, max_workers=4).init()
+        elif worker_mode == "ray":
+            w = TaskWorker.options(mode=worker_mode, max_workers=0).init()
+        else:
+            w = TaskWorker.options(mode=worker_mode).init()
         result = w.submit(compute, 5, 10, multiplier=2).result(timeout=15)
 
         assert result == 30
@@ -696,7 +906,14 @@ class TestTaskWorkerSubmit:
 
     def test_blocking_mode(self, worker_mode):
         """Test TaskWorker in blocking mode."""
-        w = TaskWorker.options(mode=worker_mode, blocking=True).init()
+        if worker_mode == "thread":
+            w = TaskWorker.options(mode=worker_mode, max_workers=30, blocking=True).init()
+        elif worker_mode == "process":
+            w = TaskWorker.options(mode=worker_mode, max_workers=4, blocking=True).init()
+        elif worker_mode == "ray":
+            w = TaskWorker.options(mode=worker_mode, max_workers=0, blocking=True).init()
+        else:
+            w = TaskWorker.options(mode=worker_mode, blocking=True).init()
 
         result = w.submit(lambda x: x + 100, 7)
 
@@ -711,7 +928,14 @@ class TestTaskWorkerSubmit:
         def failing_task():
             raise ValueError("Task failed")
 
-        w = TaskWorker.options(mode=worker_mode).init()
+        if worker_mode == "thread":
+            w = TaskWorker.options(mode=worker_mode, max_workers=30).init()
+        elif worker_mode == "process":
+            w = TaskWorker.options(mode=worker_mode, max_workers=4).init()
+        elif worker_mode == "ray":
+            w = TaskWorker.options(mode=worker_mode, max_workers=0).init()
+        else:
+            w = TaskWorker.options(mode=worker_mode).init()
         future = w.submit(failing_task)
 
         with pytest.raises(Exception) as exc_info:
@@ -742,7 +966,14 @@ class TestTaskWorkerSubmit:
 
         for mode in modes:
             # Ray is initialized by conftest.py initialize_ray fixture
-            w = TaskWorker.options(mode=mode).init()
+            if mode == "thread":
+                w = TaskWorker.options(mode=mode, max_workers=30).init()
+            elif mode == "process":
+                w = TaskWorker.options(mode=mode, max_workers=4).init()
+            elif mode == "ray":
+                w = TaskWorker.options(mode=mode, max_workers=0).init()
+            else:
+                w = TaskWorker.options(mode=mode).init()
             result = w.submit(lambda x: x * 2, 5).result(timeout=15)
             assert result == 10
             w.stop()
@@ -805,7 +1036,14 @@ class TestAsyncFunctionSupport:
 
     def test_async_method_call(self, worker_mode):
         """Test calling async methods on workers."""
-        w = AsyncWorker.options(mode=worker_mode).init(10)
+        if worker_mode == "thread":
+            w = AsyncWorker.options(mode=worker_mode, max_workers=30).init(10)
+        elif worker_mode == "process":
+            w = AsyncWorker.options(mode=worker_mode, max_workers=4).init(10)
+        elif worker_mode == "ray":
+            w = AsyncWorker.options(mode=worker_mode, max_workers=0).init(10)
+        else:
+            w = AsyncWorker.options(mode=worker_mode).init(10)
         future = w.async_add(5)
         result = future.result(timeout=15)
         assert result == 15
@@ -813,7 +1051,14 @@ class TestAsyncFunctionSupport:
 
     def test_async_and_sync_methods(self, worker_mode):
         """Test that both async and sync methods work on same worker."""
-        w = AsyncWorker.options(mode=worker_mode).init(10)
+        if worker_mode == "thread":
+            w = AsyncWorker.options(mode=worker_mode, max_workers=30).init(10)
+        elif worker_mode == "process":
+            w = AsyncWorker.options(mode=worker_mode, max_workers=4).init(10)
+        elif worker_mode == "ray":
+            w = AsyncWorker.options(mode=worker_mode, max_workers=0).init(10)
+        else:
+            w = AsyncWorker.options(mode=worker_mode).init(10)
 
         # Call async method
         result1 = w.async_add(5).result(timeout=15)
@@ -831,7 +1076,14 @@ class TestAsyncFunctionSupport:
 
     def test_async_method_with_exception(self, worker_mode):
         """Test that exceptions in async methods are properly propagated."""
-        w = AsyncWorker.options(mode=worker_mode).init(10)
+        if worker_mode == "thread":
+            w = AsyncWorker.options(mode=worker_mode, max_workers=30).init(10)
+        elif worker_mode == "process":
+            w = AsyncWorker.options(mode=worker_mode, max_workers=4).init(10)
+        elif worker_mode == "ray":
+            w = AsyncWorker.options(mode=worker_mode, max_workers=0).init(10)
+        else:
+            w = AsyncWorker.options(mode=worker_mode).init(10)
         future = w.async_error()
 
         with pytest.raises(Exception) as exc_info:
@@ -849,7 +1101,14 @@ class TestAsyncFunctionSupport:
             await asyncio.sleep(0.01)
             return x**2 + y**2
 
-        w = TaskWorker.options(mode=worker_mode).init()
+        if worker_mode == "thread":
+            w = TaskWorker.options(mode=worker_mode, max_workers=30).init()
+        elif worker_mode == "process":
+            w = TaskWorker.options(mode=worker_mode, max_workers=4).init()
+        elif worker_mode == "ray":
+            w = TaskWorker.options(mode=worker_mode, max_workers=0).init()
+        else:
+            w = TaskWorker.options(mode=worker_mode).init()
         future = w.submit(async_compute, 3, 4)
         result = future.result(timeout=15)
         assert result == 25
@@ -866,7 +1125,14 @@ class TestAsyncFunctionSupport:
             await asyncio.sleep(0.01)
             return x**2
 
-        w = TaskWorker.options(mode=worker_mode).init()
+        if worker_mode == "thread":
+            w = TaskWorker.options(mode=worker_mode, max_workers=30).init()
+        elif worker_mode == "process":
+            w = TaskWorker.options(mode=worker_mode, max_workers=4).init()
+        elif worker_mode == "ray":
+            w = TaskWorker.options(mode=worker_mode, max_workers=0).init()
+        else:
+            w = TaskWorker.options(mode=worker_mode).init()
         future = w.submit(async_square, 7)
         result = future.result(timeout=15)
         assert result == 49
@@ -874,7 +1140,14 @@ class TestAsyncFunctionSupport:
 
     def test_multiple_async_calls(self, worker_mode):
         """Test multiple async method calls."""
-        w = AsyncWorker.options(mode=worker_mode).init(10)
+        if worker_mode == "thread":
+            w = AsyncWorker.options(mode=worker_mode, max_workers=30).init(10)
+        elif worker_mode == "process":
+            w = AsyncWorker.options(mode=worker_mode, max_workers=4).init(10)
+        elif worker_mode == "ray":
+            w = AsyncWorker.options(mode=worker_mode, max_workers=0).init(10)
+        else:
+            w = AsyncWorker.options(mode=worker_mode).init(10)
 
         # Submit multiple async tasks
         futures = []
@@ -891,7 +1164,14 @@ class TestAsyncFunctionSupport:
 
     def test_async_blocking_mode(self, worker_mode):
         """Test async methods in blocking mode."""
-        w = AsyncWorker.options(mode=worker_mode, blocking=True).init(10)
+        if worker_mode == "thread":
+            w = AsyncWorker.options(mode=worker_mode, max_workers=30, blocking=True).init(10)
+        elif worker_mode == "process":
+            w = AsyncWorker.options(mode=worker_mode, max_workers=4, blocking=True).init(10)
+        elif worker_mode == "ray":
+            w = AsyncWorker.options(mode=worker_mode, max_workers=0, blocking=True).init(10)
+        else:
+            w = AsyncWorker.options(mode=worker_mode, blocking=True).init(10)
 
         result = w.async_add(5)
         # Should return result directly, not a future

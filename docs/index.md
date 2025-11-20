@@ -145,7 +145,8 @@ Concurry follows best practices:
 - [Futures Guide](user-guide/futures.md) - Master the unified future interface
 - [Progress Guide](user-guide/progress.md) - Learn about progress tracking
 - [API Reference](api/index.md) - Detailed API documentation
-- [Examples](examples.md) - Real-world usage examples
+- [Quick Recipes](user-guide/getting-started.md#quick-recipes) - Common usage patterns
+- [Gallery](user-guide/gallery/index.md) - Production-ready examples
 
 ## Architecture
 

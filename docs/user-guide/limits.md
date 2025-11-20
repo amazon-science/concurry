@@ -2563,6 +2563,6 @@ pool = Worker.options(
 - [Retry Mechanisms Guide](retries.md) - Using retries with limits
 - [Worker Pools Guide](pools.md) - Shared limits across pools
 - [API Reference](../api/limits.md) - Detailed API documentation
-- [Examples](../examples.md) - More limit usage examples
+- [Quick Recipes](getting-started.md#quick-recipes) - More limit usage examples
 
 

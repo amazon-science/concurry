@@ -788,6 +788,6 @@ Now that you understand futures, explore other Concurry features:
 - [Workers Guide](workers.md) - Build stateful concurrent operations with the actor pattern
 - [Worker Pools Guide](pools.md) - Scale workers with automatic load balancing
 - [Progress Guide](progress.md) - Add beautiful progress tracking
-- [Examples](../examples.md) - See real-world usage patterns
+- [Quick Recipes](getting-started.md#quick-recipes) - See common usage patterns
 - [API Reference](../api/futures.md) - Detailed futures API documentation
 

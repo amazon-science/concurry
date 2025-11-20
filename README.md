@@ -64,7 +64,9 @@ responses = [llm.call_llm(prompt) for prompt in prompts]
 3. Replace direct result collection with `gather(futures)`
 
 No refactoring. No architectural changes.
-Your existing code structure, class design, and method signatures stay exactly the same. 
+Your existing code structure, class design, and method signatures stay exactly the same.
+
+> 💡 **Want a production-grade example?** Check out the [**Gallery: Comprehensive LLM with Structured Parsing**](https://amazon-science.github.io/concurry/user-guide/gallery/llm-with-structured-parsing/) - featuring async execution, multi-resource rate limiting, intelligent retries, and Pydantic validation! 
 
 
 ## 🚀 Installation
@@ -72,7 +74,7 @@ Your existing code structure, class design, and method signatures stay exactly t
 
 ```bash
 pip install concurry
-pip install "concurry[ray]"  # Ray support for distributed workers
+pip install "concurry[ray]"  # Ray support for distributed AI workloads
 pip install "concurry[all]"  # Install all dependencies
 ```
 
@@ -437,8 +439,9 @@ matrix_multiply.stop()  # Cleanup worker pool
   - [Retries](https://amazon-science.github.io/concurry/user-guide/retries/) - Retry mechanisms
   - [Futures](https://amazon-science.github.io/concurry/user-guide/futures/) - Unified future interface
   - [Progress](https://amazon-science.github.io/concurry/user-guide/progress/) - Progress tracking
+  - [**Gallery**](https://amazon-science.github.io/concurry/user-guide/gallery/) - **Production-ready examples & case studies**
 - **[API Reference](https://amazon-science.github.io/concurry/api/)** - Detailed API documentation
-- **[Examples](https://amazon-science.github.io/concurry/examples/)** - Real-world usage patterns
+- **[Quick Recipes](https://amazon-science.github.io/concurry/user-guide/getting-started/#quick-recipes)** - Common usage patterns
 - **[Contributing](CONTRIBUTING.md)** - How to contribute
 
 

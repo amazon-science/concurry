@@ -211,6 +211,6 @@ def wrap_future(future: Any) -> BaseFuture:
 ## See Also
 
 - [Futures User Guide](../user-guide/futures.md) - Learn how to use futures
-- [Examples](../examples.md) - See practical examples
+- [Quick Recipes](../user-guide/getting-started.md#quick-recipes) - See common usage patterns
 - [Progress API](progress.md) - Progress bar API reference
 

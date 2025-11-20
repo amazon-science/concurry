@@ -393,6 +393,6 @@ pbar = ProgressBar(total=100, color="#9c27b0")  # Purple
 ## See Also
 
 - [Progress User Guide](../user-guide/progress.md) - Learn how to use progress bars
-- [Examples](../examples.md) - See practical examples
+- [Quick Recipes](../user-guide/getting-started.md#quick-recipes) - See common usage patterns
 - [Futures API](futures.md) - Futures API reference
 

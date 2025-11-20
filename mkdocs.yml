@@ -14,12 +14,16 @@ nav:
     - Getting Started: user-guide/getting-started.md
     - Workers: user-guide/workers.md
     - Worker Pools: user-guide/pools.md
+    - Task Decorator: user-guide/task-decorator.md
     - Futures: user-guide/futures.md
     - Synchronization: user-guide/synchronization.md
     - Rate and Resource Limits: user-guide/limits.md
     - Automatic Retries: user-guide/retries.md
     - Progress Tracking: user-guide/progress.md
     - Configuration: user-guide/configuration.md
+    - Gallery:
+      - Overview: user-guide/gallery/index.md
+      - Comprehensive LLM with Structured Parsing: user-guide/gallery/llm-with-structured-parsing.md
   - API Reference:
     - Overview: api/index.md
     - Workers: api/workers.md
@@ -33,7 +37,6 @@ nav:
     - Retry System: architecture/retries.md
     - Synchronization System: architecture/synchronization.md
     - Configuration System: architecture/configuration.md
-  - Examples: examples.md
   - Contributing: contributing.md
   - Changelog: changelog.md
 

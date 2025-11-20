@@ -191,7 +191,8 @@ All Concurry APIs use standard Python exceptions:
 ## Next Steps
 
 - Browse the detailed API documentation for each module
-- Check out the [examples](../examples.md) for practical usage patterns
+- Check out the [Quick Recipes](../user-guide/getting-started.md#quick-recipes) for common usage patterns
+- See the [Gallery](../user-guide/gallery/index.md) for production-ready examples
 - Review the [user guide](../user-guide/getting-started.md) for comprehensive tutorials
 - Explore [Workers Guide](../user-guide/workers.md) for worker patterns
 - Learn about [Retry Mechanisms](../user-guide/retries.md) for fault tolerance

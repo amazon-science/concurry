@@ -521,16 +521,183 @@ print(f"Total tokens: {sum(r['tokens'] for r in responses)}")
 - 🧹 **Automatic cleanup** with context managers
 - ⚡ **Production-ready** with minimal code
 
+> 💡 **Want an even more comprehensive example?** Check out the [**Gallery: Comprehensive LLM with Structured Parsing**](gallery/llm-with-structured-parsing.md) - featuring async execution (10-50x faster!), multi-resource rate limiting, intelligent retries with validation, and structured output parsing with instructor!
+
+## Quick Recipes
+
+Here are common patterns for quick reference:
+
+### Recipe 1: API Worker with Retry and Rate Limiting
+
+```python
+from concurry import Worker, RateLimit
+from pydantic import BaseModel
+import requests
+
+class APIWorker(Worker, BaseModel):
+    base_url: str
+    
+    def fetch_data(self, endpoint: str) -> dict:
+        """Fetch data from API with automatic limit handling."""
+        with self.limits.acquire(requested={"requests": 1}) as acq:
+            response = requests.get(f"{self.base_url}/{endpoint}")
+            response.raise_for_status()
+            acq.update(usage={"requests": 1})
+            return response.json()
+
+# Create worker with retry and rate limiting
+worker = APIWorker.options(
+    mode="thread",
+    num_retries=3,
+    retry_algorithm="exponential",
+    retry_on=[requests.ConnectionError, requests.Timeout],
+    limits=[RateLimit(key="requests", window_seconds=60, capacity=100)]
+).init(base_url="https://api.example.com")
+
+# Fetch data - automatically retries on failure, respects rate limit
+data = worker.fetch_data("users/123").result()
+worker.stop()
+```
+
+### Recipe 2: Async API Scraper
+
+```python
+from concurry import Worker
+from pydantic import BaseModel
+import aiohttp
+
+class AsyncWebScraper(Worker, BaseModel):
+    timeout: int = 10
+    
+    async def fetch_url(self, url: str) -> dict:
+        """Fetch a single URL asynchronously."""
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=self.timeout) as response:
+                return {
+                    'url': url,
+                    'status': response.status,
+                    'content': await response.text()
+                }
+
+# Use asyncio mode for maximum async performance
+scraper = AsyncWebScraper.options(mode="asyncio").init(timeout=30)
+
+urls = ['https://example.com/page1', 'https://example.com/page2']
+futures = [scraper.fetch_url(url) for url in urls]
+results = [f.result() for f in futures]
+
+scraper.stop()
+```
+
+### Recipe 3: Using @task Decorator for Functions
+
+```python
+from concurry import task, gather
+import time
+
+@task(mode="process", max_workers=4)
+def expensive_computation(x: int) -> int:
+    """CPU-bound computation."""
+    time.sleep(0.1)
+    return x ** 2 + x ** 3
+
+# Submit multiple tasks
+futures = [expensive_computation(i) for i in range(10)]
+results = gather(futures)
+
+# Cleanup
+expensive_computation.stop()
+```
+
+### Recipe 4: Database Worker with Resource Limits
+
+```python
+from concurry import Worker, ResourceLimit
+from pydantic import BaseModel
+import psycopg2
+
+class DatabaseWorker(Worker, BaseModel):
+    connection_string: str
+    
+    def query(self, sql: str) -> list:
+        """Execute SQL query with connection pooling."""
+        with self.limits.acquire(requested={"connections": 1}) as acq:
+            conn = psycopg2.connect(self.connection_string)
+            try:
+                cursor = conn.cursor()
+                cursor.execute(sql)
+                result = cursor.fetchall()
+                acq.update(usage={"connections": 1})
+                return result
+            finally:
+                conn.close()
+
+# Pool of 20 workers sharing 10 database connections
+pool = DatabaseWorker.options(
+    mode="thread",
+    max_workers=20,
+    limits=[ResourceLimit(key="connections", capacity=10)]
+).init(connection_string="postgresql://localhost/mydb")
+
+queries = [f"SELECT * FROM users WHERE id = {i}" for i in range(100)]
+futures = [pool.query(q) for q in queries]
+results = [f.result() for f in futures]
+
+pool.stop()
+```
+
+### Recipe 5: Distributed Computing with Ray
+
+```python
+from concurry import Worker
+from pydantic import BaseModel
+import ray
+
+ray.init()
+
+class DistributedProcessor(Worker, BaseModel):
+    config: dict
+    
+    def process_batch(self, batch: list) -> dict:
+        """Process a batch of data."""
+        results = [item * 2 for item in batch]
+        return {"processed": len(results), "results": results}
+
+# Create a pool of Ray actors across the cluster
+pool = DistributedProcessor.options(
+    mode="ray",
+    max_workers=50,
+    actor_options={"num_cpus": 0.5}
+).init(config={"version": "1.0"})
+
+batches = [list(range(i*100, (i+1)*100)) for i in range(100)]
+futures = [pool.process_batch(batch) for batch in batches]
+results = [f.result() for f in futures]
+
+pool.stop()
+ray.shutdown()
+```
+
+---
+
 ## Next Steps
 
 Now that you understand the basics, continue your journey with:
 
-- [Workers Guide](workers.md) - **Start here** to learn the actor pattern and build stateful concurrent operations
+### Core Concepts
+- [Workers Guide](workers.md) - Learn the actor pattern and build stateful concurrent operations
 - [Worker Pools Guide](pools.md) - Scale workers with pools and load balancing
+- [Task Decorator Guide](task-decorator.md) - Parallelize functions with the @task decorator
+- [Futures Guide](futures.md) - Learn advanced future patterns
+- [Synchronization Guide](synchronization.md) - Master wait() and gather() for coordinating concurrent tasks
+
+### Production Features
 - [Limits Guide](limits.md) - Add resource and rate limiting to your workers
 - [Retry Mechanisms Guide](retries.md) - Make your workers fault-tolerant with automatic retries
-- [Futures Guide](futures.md) - Learn advanced future patterns
 - [Progress Guide](progress.md) - Master progress bar customization
-- [Examples](../examples.md) - See real-world usage patterns
+- [Configuration Guide](configuration.md) - Customize global defaults and execution modes
+
+### Examples & Reference
+- **[Gallery](gallery/index.md)** - **Production-ready examples** like [Comprehensive LLM with Structured Parsing](gallery/llm-with-structured-parsing.md)
 - [API Reference](../api/index.md) - Detailed API documentation
 

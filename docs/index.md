@@ -2,165 +2,64 @@
 
 ![Concurry](concurry-landscape.png)
 
-Welcome to **Concurry** - a unified, delightful Python concurrency library that simplifies parallel and asynchronous programming.
+Welcome to **Concurry** — the Python concurrency library designed to be **delightful**. 
 
-## What is Concurry?
+Concurry provides a unified, framework-agnostic interface for parallel and asynchronous programming. Whether you're using threading, multiprocessing, asyncio, or Ray, Concurry gives you a single, consistent API that just works.
 
-Concurry provides a consistent, framework-agnostic interface for working with concurrent operations in Python. Whether you're using threading, multiprocessing, asyncio, or Ray, Concurry gives you a unified API.
+## Concept Map: What do you want to build?
 
-## Key Features
+| I want to... | Use... | Why? |
+| :--- | :--- | :--- |
+| **Run API calls** in parallel | [**Workers**](user-guide/workers.md) (Thread mode) | I/O bound operations don't block the GIL. |
+| **Process data** (heavy CPU) | [**Workers**](user-guide/workers.md) (Process mode) | Bypasses the GIL to use all CPU cores. |
+| **Scale across machines** | [**Workers**](user-guide/workers.md) (Ray mode) | Seamlessly moves your local code to a cluster. |
+| **Process 1000s of items** | [**Worker Pools**](user-guide/pools.md) | Automatically load-balances tasks across workers. |
+| **Respect API Rate Limits** | [**Limits**](user-guide/limits.md) | Thread-safe, distributed rate limiting built-in. |
+| **Handle Flaky APIs** | [**Retries**](user-guide/retries.md) | Automatic exponential backoff and error handling. |
+| **Wait for multiple results** | [**Synchronization**](user-guide/synchronization.md) | Powerful `wait()` and `gather()` primitives. |
 
-- 🔄 **Unified Future Interface**: Work with futures from any framework (threading, asyncio, Ray) through a single, consistent API
-- 🎭 **Actor Pattern (Workers)**: Stateful, isolated workers that run across sync, thread, process, asyncio, and Ray backends with a unified interface
-- 🔁 **Automatic Retries**: Built-in retry mechanisms with exponential backoff, exception filtering, and output validation
-- 🚦 **Resource Limits**: Flexible rate limiting and resource management with shared limits across worker pools
-- 📊 **Beautiful Progress Bars**: Feature-rich progress tracking with tqdm integration, including success/failure states and customizable styling
-- 🎯 **Framework Agnostic**: Write code once, run it with any execution backend
-- 🚀 **High Performance**: Optimized implementation with < 2.5 µs initialization, minimal overhead (~1-2 µs wrapping), and efficient actor-side retries
-- 💡 **Intuitive API**: Clean, Pythonic interface that's easy to learn and use
-- 🛡️ **Type Safe**: Runtime validation ensures correct types at construction with clear error messages
+## Why Concurry?
 
-## Quick Start
-
-### Unified Futures
-
-```python
-from concurry.core.future import wrap_future
-import concurrent.futures
-
-# Works with any future type
-with concurrent.futures.ThreadPoolExecutor() as executor:
-    future = executor.submit(lambda: 42)
-    
-    # Wrap it in the unified interface
-    unified_future = wrap_future(future)
-    
-    # Consistent API across all future types
-    result = unified_future.result(timeout=5)
-    print(f"Result: {result}")
-```
-
-### Progress Tracking
+### 1. Unified Future Interface
+Stop writing different code for `asyncio.Future`, `concurrent.futures.Future`, and Ray `ObjectRef`. Concurry wraps them all in a single, consistent **[Unified Future](user-guide/futures.md)** interface.
 
 ```python
-from concurry.utils.progress import ProgressBar
-import time
-
-# Create a progress bar
-items = range(100)
-for item in ProgressBar(items, desc="Processing"):
-    time.sleep(0.01)  # Simulate work
-# Automatically shows success state when complete!
-
-# Or create a manual progress bar
-pbar = ProgressBar(total=100, desc="Manual Progress")
-for i in range(100):
-    # Do some work
-    time.sleep(0.01)
-    pbar.update(1)
-pbar.success("All done!")
+# Works with Thread, Process, Asyncio, AND Ray backends!
+result = future.result(timeout=5)
 ```
 
-### Worker Pattern
+### 2. The Actor Pattern made Simple
+Define a class, inherit from `Worker`, and you have a stateful actor that can run anywhere.
 
 ```python
 from concurry import Worker
 
 class DataProcessor(Worker):
-    def __init__(self, multiplier: int):
-        self.multiplier = multiplier
-        self.count = 0
-    
-    def process(self, value: int) -> int:
-        self.count += 1
-        return value * self.multiplier
+    def process(self, data):
+        return data * 2
 
-# Create worker in any execution mode
-worker = DataProcessor.options(mode="thread").init(multiplier=3)
-
-# Call methods (returns futures)
-future = worker.process(10)
-result = future.result()  # 30
-
-# State is maintained across calls
-future2 = worker.process(5)
-print(f"Processed {worker.count} items")  # Tracks state
-
-worker.stop()
-
-# Or use TaskWorker for quick task execution
-from concurry import TaskWorker
-
-task_worker = TaskWorker.options(mode="process").init()
-result = task_worker.submit(lambda x: x ** 2, 5).result()  # 25
-task_worker.stop()
+# Run efficiently on threads...
+worker = DataProcessor.options(mode="thread").init()
+# ...or move to a separate process...
+worker = DataProcessor.options(mode="process").init()
+# ...or scale to a cluster!
+worker = DataProcessor.options(mode="ray").init()
 ```
 
-## Why Choose Concurry?
+### 3. Production-Ready Features
+Concurry comes batteries-included with the tools you need for robust systems:
+*   🚦 **[Limits](user-guide/limits.md)**: Distributed rate limiting and resource semaphores.
+*   🔁 **[Retries](user-guide/retries.md)**: Smart retry logic with jitter and validation.
+*   📊 **[Progress](user-guide/progress.md)**: Beautiful, zero-config progress bars.
 
-### Unified Future Interface
+## Where to Start?
 
-Stop writing different code for different concurrency frameworks. Concurry's `BaseFuture` provides a consistent interface whether you're using:
+*   🚀 **[Getting Started](user-guide/getting-started.md)**: Build a high-performance LLM pipeline in 5 minutes.
+*   📚 **[User Guide](user-guide/workers.md)**: Deep dive into Workers, Pools, and more.
+*   🖼️ **[Gallery](user-guide/gallery/index.md)**: Real-world examples and recipes.
 
-- `concurrent.futures.Future`
-- `asyncio.Future`
-- Ray's `ObjectRef`
-- Custom futures
+---
 
-Built on frozen dataclasses for optimal performance:
-- **Fast**: < 2.5 µs initialization
-- **Type-safe**: Runtime validation at construction
-- **Thread-safe**: Lock-based synchronization where needed
-- **API-compatible**: Matches `concurrent.futures.Future` exactly
-
-### Beautiful Progress Tracking
-
-Get beautiful, informative progress bars with:
-
-- Automatic success/failure/stop indicators with color coding
-- Multiple styles (auto, notebook, standard, Ray)
-- Iterable wrapping for easy integration
-- Fine-grained control over updates
-- Customizable appearance
-
-### Clean Architecture
-
-Concurry follows best practices:
-
-- Type hints throughout
-- Comprehensive documentation
-- Well-tested codebase
-- Minimal dependencies
-
-## Next Steps
-
-- [Installation Guide](installation.md) - Get started with Concurry
-- [Getting Started](user-guide/getting-started.md) - Learn the basics
-- [Configuration Guide](user-guide/configuration.md) - Customize global defaults and tune performance
-- [Workers Guide](user-guide/workers.md) - Learn the actor pattern with Workers
-- [Worker Pools Guide](user-guide/pools.md) - Scale with worker pools
-- [Synchronization Guide](user-guide/synchronization.md) - Coordinate multiple futures with wait() and gather()
-- [Limits Guide](user-guide/limits.md) - Resource and rate limiting
-- [Retry Mechanisms Guide](user-guide/retries.md) - Automatic retry with backoff
-- [Futures Guide](user-guide/futures.md) - Master the unified future interface
-- [Progress Guide](user-guide/progress.md) - Learn about progress tracking
-- [API Reference](api/index.md) - Detailed API documentation
-- [Quick Recipes](user-guide/getting-started.md#quick-recipes) - Common usage patterns
-- [Gallery](user-guide/gallery/index.md) - Production-ready examples
-
-## Architecture
-
-Deep dives into Concurry's internal design and implementation:
-
-- [Configuration System](architecture/configuration.md) - How global configuration works
-- [Synchronization System](architecture/synchronization.md) - Design of wait() and gather() primitives
-
-## Community and Support
-
-- 🐛 [Report Issues](https://github.com/amazon-science/concurry/issues)
-- 💬 [Discussions](https://github.com/amazon-science/concurry/discussions)
-- 📖 [Documentation](https://amazon-science.github.io/concurry/)
-
-!!! tip "Pro Tip"
-    Check out the [Futures Guide](user-guide/futures.md) to see how Concurry can unify your concurrency code across different frameworks!
-
+### Community and Support
+*   🐛 [Report Issues](https://github.com/amazon-science/concurry/issues)
+*   💬 [Discussions](https://github.com/amazon-science/concurry/discussions)

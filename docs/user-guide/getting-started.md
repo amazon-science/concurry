@@ -1,703 +1,156 @@
 # Getting Started
 
-This guide will walk you through Concurry's core concepts using a practical example: **making batch LLM calls 50x faster**.
+This guide will walk you through Concurry's core concepts by solving a real-world problem: **making batch LLM calls 50x faster**.
 
 ## The Problem: Sequential Code is Slow
 
-Let's say you need to call an LLM API 1,000 times (e.g., evaluating AI-generated responses for safety). Sequential code is painfully slow:
+Imagine you have 1,000 prompts to send to an LLM API. A standard Python loop processes them one by one. If each call takes 1 second, your script takes **~16 minutes** to run.
+
+### ❌ The Slow Way (Sequential)
 
 ```python
-import litellm
+import time
 from tqdm import tqdm
 
-def call_llm(prompt: str, model: str, temperature: float) -> str:
-    """Call LLM API with a prompt."""
-    response = litellm.completion(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
-    )
-    return response.choices[0].message.content
+# Mock LLM client for demonstration
+class LLMClient:
+    def completion(self, prompt: str) -> str:
+        time.sleep(0.8)  # Simulate network latency
+        return f"Response to: {prompt}"
 
-# Load 1,000 prompts
-prompts = [...]  # Your prompts here
+client = LLMClient()
+prompts = [f"Prompt {i}" for i in range(100)]
 
-# ❌ Sequential: Call LLM one at a time
-model = "gpt-4o-mini"
-responses = []
-for prompt in tqdm(prompts, desc="Processing"):
-    response = call_llm(prompt, model, temperature=0.1)
-    responses.append(response)
+# Sequential execution: CPU sits idle 99% of the time waiting for network
+results = []
+for prompt in tqdm(prompts, desc="Sequential"):
+    results.append(client.completion(prompt))
 
-# Time: ~775 seconds (12+ minutes!) 😱
+# Total time: ~80 seconds
 ```
 
-**Why is this slow?** Each API call waits for the previous one to complete. Your CPU sits idle while waiting for network I/O.
+**Why is this bad?** Your CPU is doing nothing while waiting for the API to respond. We need **concurrency** to send multiple requests at once.
+
+---
 
 ## The Solution: Concurry Workers
 
-With Concurry, make all calls concurrently with just **3 lines of code changed**:
+With Concurry, we can turn this into a parallel pipeline with minimal changes. We wrap our logic in a `Worker` and run it in a **Thread Pool**.
+
+### ✅ The Fast Way (Concurrent)
 
 ```python
-from concurry import Worker
-from pydantic import BaseModel
+from concurry import worker
 from tqdm import tqdm
-import litellm
+import time
 
-# 1. Wrap your logic in a Worker class with Pydantic validation
-class LLM(Worker, BaseModel):
-    model: str
-    temperature: float
-    
-    def call_llm(self, prompt: str) -> str:
-        """Call LLM API with a prompt."""
-        response = litellm.completion(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=self.temperature,
-        )
-        return response.choices[0].message.content
+# 1. Decorate your class with @worker
+@worker(mode="thread")
+class LLMWorker:
+    def completion(self, prompt: str) -> str:
+        time.sleep(0.8)  # Simulate network latency
+        return f"Response to: {prompt}"
 
-# 2. Create a pool of workers instead of a single instance
-llm = LLM.options(
-    mode='thread',      # Use thread-based concurrency (great for I/O)
-    max_workers=100     # 100 concurrent calls
-).init(model="gpt-4o-mini", temperature=0.1)
+# 2. Initialize a POOL of workers
+# 'thread' mode is perfect for I/O tasks like API calls
+pool = LLMWorker.options(
+    max_workers=20  # Run 20 requests at once
+).init()
 
-# 3. Submit all tasks and collect results using futures
-futures = [llm.call_llm(prompt) for prompt in tqdm(prompts, desc="Submitting")]
-responses = [f.result() for f in tqdm(futures, desc="Collecting")]
+prompts = [f"Prompt {i}" for i in range(100)]
 
-# Time: ~16 seconds (50x faster!) 🚀
+# 3. Submit tasks (Returns "Futures" instantly)
+# This loop finishes in milliseconds because it's just queuing work
+futures = [pool.completion(prompt) for prompt in prompts]
+
+# 4. Collect results (Waits for completion)
+results = [f.result() for f in tqdm(futures, desc="Concurrent")]
+
+# Total time: ~4 seconds (20x speedup!)
+pool.stop()
 ```
 
-**What changed?**
-- Added `.options(mode='thread', max_workers=100).init(...)` → Creates a pool of 100 workers
-- Called `.result()` on futures → Waits for each task to complete
-- That's it! 50x speedup with minimal code changes.
+### What Just Happened?
 
-### Why Use Pydantic BaseModel?
+1.  **Worker Definition**: We defined `LLMWorker` using the `@worker` decorator. In Concurry, a **Worker** is an independent "actor" that runs in its own context (thread, process, or remote machine).
+2.  **Pool Creation**: `max_workers=20` spun up 20 threads.
+3.  **Submission**: Calling `pool.completion()` didn't block. It instantly returned a **Future** (a promise of a result).
+4.  **Collection**: `f.result()` blocked only until that specific task was done. Since 20 ran at once, the total time was slashed.
 
-While you *can* use plain Python classes, we **strongly recommend** using `pydantic.BaseModel` (or `morphic.Typed`):
+---
 
-```python
-# ✅ RECOMMENDED: Pydantic BaseModel catches errors early
-from pydantic import BaseModel
+## Mental Model: The Actor Pattern
 
-class LLM(Worker, BaseModel):
-    model: str              # Type validation at initialization
-    temperature: float
-    
-    def call_llm(self, prompt: str) -> str:
-        return litellm.completion(...)
+To use Concurry effectively, think in terms of **Actors**:
 
-# ❌ ERROR CAUGHT IMMEDIATELY: Wrong type for temperature
-llm = LLM.options(mode='thread').init(
-    model="gpt-4o-mini", 
-    temperature="not-a-number"  # Pydantic raises ValidationError immediately!
-)
+*   **Stateful**: Unlike simple functions, a Worker can hold state (database connections, loaded models) that persists across calls.
+*   **Isolated**: Each worker runs independently. A crash in one doesn't necessarily crash your main program.
+*   **Message Passing**: When you call `worker.method()`, you aren't running code immediately. You are sending a **message** to the worker's queue. The worker picks it up, processes it, and puts the result in the **Future**.
 
-# ⚠️ PLAIN CLASSES: Errors happen later, in worker threads/processes
-class PlainLLM(Worker):
-    def __init__(self, model: str, temperature: float):
-        self.model = model
-        self.temperature = temperature  # No validation!
-    
-    def call_llm(self, prompt: str) -> str:
-        return litellm.completion(...)
-
-# ❌ ERROR HAPPENS LATER: Fails inside worker thread when API call is made
-llm = PlainLLM.options(mode='thread').init(
-    model="gpt-4o-mini",
-    temperature="not-a-number"  # Silently accepted, fails later!
-)
+```text
+[Your Code]  --message (args)-->  [Queue]  -->  [Worker]
+     ^                                             |
+     |                                             |
+     └-------------<-- result via Future --<-------┘
 ```
 
-**Why this matters:**
-- ✅ **Early error detection**: Pydantic validates types during `.init()`, before any work starts
-- ✅ **Better error messages**: Get clear validation errors with field names, not cryptic API failures
-- ✅ **Easier debugging**: Errors at initialization are much easier to debug than errors in remote workers
-- ✅ **Data integrity**: Ensures all workers have valid configuration before executing tasks
-- ✅ **Works everywhere**: Fully compatible with all execution modes including Ray (automatic composition wrapper)
-
-**Concurrent/distributed errors are nightmare to debug**. A type error in a remote thread, process, or Ray actor is much harder to trace than a validation error at initialization. Pydantic's upfront validation saves hours of debugging time!
+---
 
 ## Installation
-
-First, install Concurry:
 
 ```bash
 pip install concurry
 ```
 
-For distributed computing with Ray:
+For distributed computing with Ray support:
 
 ```bash
-pip install concurry[ray]
-```
-
-## What Just Happened?
-
-Let's break down the key concepts:
-
-### 1. Workers: Stateful Concurrent Actors
-
-A **Worker** is a class that runs concurrently in the background. Think of it as a dedicated assistant that handles tasks for you:
-
-```python
-from pydantic import BaseModel
-
-class LLM(Worker, BaseModel):
-    model: str              # Worker state with validation
-    temperature: float
-    
-    def call_llm(self, prompt: str) -> str:
-        # This method runs in the background
-        return litellm.completion(...)
-```
-
-**Key points:**
-- Workers maintain validated state (e.g., `self.model`, `self.temperature`)
-- Each method call runs in the background
-- Workers are isolated - one worker's state doesn't affect another
-- Pydantic validates all fields during initialization
-
-### 2. Worker Pools: Parallel Execution
-
-When you use `.options(max_workers=100)`, Concurry creates a **pool** of 100 workers:
-
-```python
-llm = LLM.options(
-    mode='thread',      # How workers run (thread, process, asyncio, ray)
-    max_workers=100     # How many workers in the pool
-).init(model="gpt-4o-mini", temperature=0.1)
-```
-
-**What happens:**
-- Concurry creates 100 worker threads
-- Each worker can handle one API call at a time
-- 100 API calls can run concurrently
-- Load balancing automatically distributes work across workers
-
-### 3. Futures: Asynchronous Results
-
-When you call a worker method, you get a **future** - a placeholder for a result that will arrive later:
-
-```python
-# Submit a task - returns immediately with a future
-future = llm.call_llm("What is AI?")
-
-# Do other work here...
-
-# Get the result when you need it (blocks until complete)
-response = future.result()
-```
-
-**Common pattern:**
-```python
-# Submit all tasks first (fast - just queuing work)
-futures = [llm.call_llm(prompt) for prompt in prompts]
-
-# Collect results later (blocks until each completes)
-responses = [f.result() for f in futures]
-```
-
-This is why Concurry is fast: you submit all 1,000 tasks at once, and 100 workers process them concurrently!
-
-### 4. Unified Interface: One API, Multiple Backends
-
-The same code works across different execution modes:
-
-```python
-# Thread-based (great for I/O like API calls)
-llm = LLM.options(mode='thread', max_workers=100).init(...)
-
-# Process-based (great for CPU-heavy work)
-llm = LLM.options(mode='process', max_workers=8).init(...)
-
-# Async-based (even more I/O efficiency)
-llm = LLM.options(mode='asyncio').init(...)
-
-# Distributed with Ray (scale across machines!)
-llm = LLM.options(mode='ray', max_workers=1000).init(...)
-```
-
-**Just change one parameter**, and your code runs on different backends. No need to learn ThreadPoolExecutor, ProcessPoolExecutor, asyncio, and Ray separately!
-
-## Core Concepts
-
-Concurry provides powerful building blocks for production-grade concurrent systems:
-
-### 1. **Workers** - Stateful Concurrent Actors
-The core abstraction. Workers run in the background across sync, thread, process, asyncio, and Ray modes.
-
-### 2. **Worker Pools** - Automatic Load Balancing
-Scale to hundreds of workers with automatic work distribution and configurable load balancing strategies.
-
-### 3. **Limits** - Rate Limiting & Resource Control
-Enforce API rate limits, token budgets, and resource constraints across all workers with atomic multi-resource acquisition.
-
-### 4. **Retry Mechanisms** - Automatic Fault Tolerance
-Built-in exponential backoff, exception filtering, and output validation. Automatically retries failed tasks.
-
-### 5. **Unified Future Interface** - Framework-Agnostic Results
-Consistent API for working with futures from any framework (threading, asyncio, Ray, etc.)
-
-### 6. **Progress Tracking** - Beautiful Progress Bars
-Rich, color-coded progress bars with success/failure states that work in terminals and notebooks
-
-## Best Practices
-
-### 1. Choose the Right Execution Mode
-
-```python
-from pydantic import BaseModel
-
-# I/O-bound (API calls, database queries, file I/O)
-# → Use 'thread' mode with many workers
-class LLM(Worker, BaseModel):
-    model: str
-    temperature: float
-
-llm = LLM.options(mode='thread', max_workers=100).init(model="gpt-4o-mini", temperature=0.1)
-
-# CPU-bound (data processing, ML inference)
-# → Use 'process' mode with workers ≈ CPU cores
-class DataProcessor(Worker, BaseModel):
-    batch_size: int
-
-processor = DataProcessor.options(mode='process', max_workers=8).init(batch_size=1000)
-
-# Heavy I/O with async libraries (aiohttp, httpx)
-# → Use 'asyncio' mode for even better performance
-class AsyncAPI(Worker, BaseModel):
-    api_key: str
-
-api = AsyncAPI.options(mode='asyncio').init(api_key="sk-...")
-
-# Distributed across machines
-# → Use 'ray' mode for cluster computing (Pydantic workers fully supported!)
-class LargeModel(Worker, BaseModel):
-    model_path: str
-
-model = LargeModel.options(mode='ray', max_workers=1000).init(model_path="/path/to/model")
-```
-
-### 2. Always Clean Up Workers
-
-```python
-# ✅ Good: Use context managers for automatic cleanup
-with LLM.options(mode='thread', max_workers=100).init(...) as llm:
-    futures = [llm.call_llm(prompt) for prompt in prompts]
-    responses = [f.result() for f in futures]
-# Workers automatically stopped here
-
-# ⚠️ Or manually call stop()
-llm = LLM.options(mode='thread', max_workers=100).init(...)
-try:
-    futures = [llm.call_llm(prompt) for prompt in prompts]
-    responses = [f.result() for f in futures]
-finally:
-    llm.stop()  # Always clean up!
-```
-
-### 3. Handle Errors in Parallel Execution
-
-```python
-from concurrent.futures import TimeoutError
-
-# Collect results with error handling
-results = []
-errors = []
-
-for i, future in enumerate(futures):
-    try:
-        result = future.result(timeout=30)  # Set reasonable timeout
-        results.append(result)
-    except TimeoutError:
-        errors.append((i, "Timeout"))
-    except Exception as e:
-        errors.append((i, str(e)))
-
-print(f"Success: {len(results)}, Failed: {len(errors)}")
-```
-
-### 4. Use Worker State for Configuration
-
-```python
-from pydantic import BaseModel, Field
-
-# ✅ Good: Store validated configuration in worker state
-class LLM(Worker, BaseModel):
-    model: str
-    temperature: float = Field(ge=0.0, le=2.0)  # Validated constraints
-    max_tokens: int = Field(gt=0)  # Reused across all calls
-    
-    def call_llm(self, prompt: str) -> str:
-        return litellm.completion(
-            model=self.model,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens
-        )
-
-# ❌ Bad: Pass same config every time
-class BadLLM(Worker):
-    def call_llm(self, prompt: str, model: str, temperature: float) -> str:
-        # Wasteful - passing same values repeatedly
-        # No validation - errors happen during API call
-        return litellm.completion(...)
-```
-
-### 5. Submit All Tasks Before Collecting Results
-
-```python
-# ✅ Good: Submit all tasks first, then collect
-futures = [llm.call_llm(prompt) for prompt in prompts]  # Fast - just queuing
-responses = [f.result() for f in futures]  # Blocks as needed
-
-# ❌ Bad: Submit and wait one at a time
-responses = []
-for prompt in prompts:
-    future = llm.call_llm(prompt)
-    response = future.result()  # Blocks immediately - no parallelism!
-    responses.append(response)
-```
-
-## Adding Production Features
-
-Once you have the basics working, Concurry makes it easy to add production-grade features with minimal code:
-
-### Rate Limiting
-
-Protect your API from rate limit errors by enforcing limits across all workers:
-
-```python
-from concurry import Worker, RateLimit, CallLimit
-from pydantic import BaseModel
-
-class LLM(Worker, BaseModel):
-    model: str
-    temperature: float
-    
-    def call_llm(self, prompt: str) -> str:
-        # Rate limits automatically enforced
-        with self.limits.acquire(requested={"tokens": 1000}) as acq:
-            response = litellm.completion(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=self.temperature,
-            )
-            
-            # Report actual token usage for accurate limiting
-            tokens_used = response.usage.total_tokens
-            acq.update(usage={"tokens": tokens_used})
-            
-            return response.choices[0].message.content
-
-# Create pool with shared rate limits
-llm = LLM.options(
-    mode='thread',
-    max_workers=100,
-    limits=[
-        CallLimit(window_seconds=60, capacity=500),     # 500 calls/minute
-        RateLimit(key="tokens", window_seconds=60, capacity=50_000)  # 50k tokens/min
-    ]
-).init(model="gpt-4o-mini", temperature=0.1)
-
-# All 100 workers share the same rate limits
-futures = [llm.call_llm(prompt) for prompt in prompts]
-responses = [f.result() for f in futures]
-```
-
-### Automatic Retries
-
-Handle transient errors automatically with exponential backoff:
-
-```python
-import openai
-
-llm = LLM.options(
-    mode='thread',
-    max_workers=100,
-    
-    # Retry configuration
-    num_retries=5,                                      # Try up to 5 times
-    retry_algorithm="exponential",                       # Exponential backoff
-    retry_wait=1.0,                                      # Start with 1s wait
-    retry_on=[openai.RateLimitError, openai.APIConnectionError],  # Which errors to retry
-    retry_until=lambda r: len(r) > 10                   # Retry until output is valid
-).init(model="gpt-4o-mini", temperature=0.1)
-
-# Automatically retries on rate limits or connection errors
-futures = [llm.call_llm(prompt) for prompt in prompts]
-responses = [f.result() for f in futures]
-```
-
-### Progress Tracking
-
-Add beautiful progress bars to track your batch processing:
-
-```python
-from concurry.utils.progress import ProgressBar
-
-# Submit tasks with progress
-futures = []
-for prompt in ProgressBar(prompts, desc="Submitting"):
-    futures.append(llm.call_llm(prompt))
-
-# Collect results with progress
-responses = []
-for future in ProgressBar(futures, desc="Processing"):
-    responses.append(future.result())
-```
-
-### All Together: Production-Ready LLM Worker
-
-Combine all features for a robust production system:
-
-```python
-from concurry import Worker, RateLimit, CallLimit
-from concurry.utils.progress import ProgressBar
-from pydantic import BaseModel, Field
-import openai
-import litellm
-
-class ProductionLLM(Worker, BaseModel):
-    model: str
-    temperature: float = Field(ge=0.0, le=2.0)  # Validated temperature range
-    
-    def call_llm(self, prompt: str) -> dict:
-        """Call LLM with rate limiting and error handling."""
-        with self.limits.acquire(requested={"tokens": 2000}) as acq:
-            response = litellm.completion(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=self.temperature,
-            )
-            
-            # Report actual usage
-            tokens_used = response.usage.total_tokens
-            acq.update(usage={"tokens": tokens_used})
-            
-            return {
-                "text": response.choices[0].message.content,
-                "tokens": tokens_used
-            }
-
-# Production configuration
-llm = ProductionLLM.options(
-    # Execution
-    mode='thread',
-    max_workers=100,
-    
-    # Rate limiting (shared across all workers)
-    limits=[
-        CallLimit(window_seconds=60, capacity=500),
-        RateLimit(key="tokens", window_seconds=60, capacity=50_000)
-    ],
-    
-    # Automatic retries
-    num_retries=5,
-    retry_algorithm="exponential",
-    retry_wait=1.0,
-    retry_on=[openai.RateLimitError, openai.APIConnectionError]
-).init(model="gpt-4o-mini", temperature=0.1)
-
-# Process with progress tracking
-with llm:  # Auto-cleanup with context manager
-    futures = [llm.call_llm(p) for p in ProgressBar(prompts, desc="Submitting")]
-    responses = [f.result() for f in ProgressBar(futures, desc="Processing")]
-
-print(f"Processed {len(responses)} prompts")
-print(f"Total tokens: {sum(r['tokens'] for r in responses)}")
-```
-
-**What you get:**
-- 🚀 **50x faster** than sequential code
-- ✅ **Type validation** catches errors before they reach workers
-- 🚦 **Rate limiting** prevents API errors
-- 🔁 **Automatic retries** on transient failures
-- 📊 **Progress tracking** for visibility
-- 🧹 **Automatic cleanup** with context managers
-- ⚡ **Production-ready** with minimal code
-
-> 💡 **Want an even more comprehensive example?** Check out the [**Gallery: Comprehensive LLM with Structured Parsing**](gallery/llm-with-structured-parsing.md) - featuring async execution (10-50x faster!), multi-resource rate limiting, intelligent retries with validation, and structured output parsing with instructor!
-
-## Quick Recipes
-
-Here are common patterns for quick reference:
-
-### Recipe 1: API Worker with Retry and Rate Limiting
-
-```python
-from concurry import Worker, RateLimit
-from pydantic import BaseModel
-import requests
-
-class APIWorker(Worker, BaseModel):
-    base_url: str
-    
-    def fetch_data(self, endpoint: str) -> dict:
-        """Fetch data from API with automatic limit handling."""
-        with self.limits.acquire(requested={"requests": 1}) as acq:
-            response = requests.get(f"{self.base_url}/{endpoint}")
-            response.raise_for_status()
-            acq.update(usage={"requests": 1})
-            return response.json()
-
-# Create worker with retry and rate limiting
-worker = APIWorker.options(
-    mode="thread",
-    num_retries=3,
-    retry_algorithm="exponential",
-    retry_on=[requests.ConnectionError, requests.Timeout],
-    limits=[RateLimit(key="requests", window_seconds=60, capacity=100)]
-).init(base_url="https://api.example.com")
-
-# Fetch data - automatically retries on failure, respects rate limit
-data = worker.fetch_data("users/123").result()
-worker.stop()
-```
-
-### Recipe 2: Async API Scraper
-
-```python
-from concurry import Worker
-from pydantic import BaseModel
-import aiohttp
-
-class AsyncWebScraper(Worker, BaseModel):
-    timeout: int = 10
-    
-    async def fetch_url(self, url: str) -> dict:
-        """Fetch a single URL asynchronously."""
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=self.timeout) as response:
-                return {
-                    'url': url,
-                    'status': response.status,
-                    'content': await response.text()
-                }
-
-# Use asyncio mode for maximum async performance
-scraper = AsyncWebScraper.options(mode="asyncio").init(timeout=30)
-
-urls = ['https://example.com/page1', 'https://example.com/page2']
-futures = [scraper.fetch_url(url) for url in urls]
-results = [f.result() for f in futures]
-
-scraper.stop()
-```
-
-### Recipe 3: Using @task Decorator for Functions
-
-```python
-from concurry import task, gather
-import time
-
-@task(mode="process", max_workers=4)
-def expensive_computation(x: int) -> int:
-    """CPU-bound computation."""
-    time.sleep(0.1)
-    return x ** 2 + x ** 3
-
-# Submit multiple tasks
-futures = [expensive_computation(i) for i in range(10)]
-results = gather(futures)
-
-# Cleanup
-expensive_computation.stop()
-```
-
-### Recipe 4: Database Worker with Resource Limits
-
-```python
-from concurry import Worker, ResourceLimit
-from pydantic import BaseModel
-import psycopg2
-
-class DatabaseWorker(Worker, BaseModel):
-    connection_string: str
-    
-    def query(self, sql: str) -> list:
-        """Execute SQL query with connection pooling."""
-        with self.limits.acquire(requested={"connections": 1}) as acq:
-            conn = psycopg2.connect(self.connection_string)
-            try:
-                cursor = conn.cursor()
-                cursor.execute(sql)
-                result = cursor.fetchall()
-                acq.update(usage={"connections": 1})
-                return result
-            finally:
-                conn.close()
-
-# Pool of 20 workers sharing 10 database connections
-pool = DatabaseWorker.options(
-    mode="thread",
-    max_workers=20,
-    limits=[ResourceLimit(key="connections", capacity=10)]
-).init(connection_string="postgresql://localhost/mydb")
-
-queries = [f"SELECT * FROM users WHERE id = {i}" for i in range(100)]
-futures = [pool.query(q) for q in queries]
-results = [f.result() for f in futures]
-
-pool.stop()
-```
-
-### Recipe 5: Distributed Computing with Ray
-
-```python
-from concurry import Worker
-from pydantic import BaseModel
-import ray
-
-ray.init()
-
-class DistributedProcessor(Worker, BaseModel):
-    config: dict
-    
-    def process_batch(self, batch: list) -> dict:
-        """Process a batch of data."""
-        results = [item * 2 for item in batch]
-        return {"processed": len(results), "results": results}
-
-# Create a pool of Ray actors across the cluster
-pool = DistributedProcessor.options(
-    mode="ray",
-    max_workers=50,
-    actor_options={"num_cpus": 0.5}
-).init(config={"version": "1.0"})
-
-batches = [list(range(i*100, (i+1)*100)) for i in range(100)]
-futures = [pool.process_batch(batch) for batch in batches]
-results = [f.result() for f in futures]
-
-pool.stop()
-ray.shutdown()
+pip install "concurry[ray]"
 ```
 
 ---
 
-## Next Steps
+## Roadmap: Choose Your Adventure
 
-Now that you understand the basics, continue your journey with:
+Now that you've seen the basics, where should you go next?
 
-### Core Concepts
-- [Workers Guide](workers.md) - Learn the actor pattern and build stateful concurrent operations
-- [Worker Pools Guide](pools.md) - Scale workers with pools and load balancing
-- [Task Decorator Guide](task-decorator.md) - Parallelize functions with the @task decorator
-- [Futures Guide](futures.md) - Learn advanced future patterns
-- [Synchronization Guide](synchronization.md) - Master wait() and gather() for coordinating concurrent tasks
+| I want to... | Go to... |
+| :--- | :--- |
+| **Understand how Workers operate** (Thread vs Process) | [**Workers Guide**](workers.md) |
+| **Scale to thousands of tasks** using Pools | [**Worker Pools**](pools.md) |
+| **Prevent API rate limit errors** | [**Limits Guide**](limits.md) |
+| **Handle crashes and network glitches** | [**Retries Guide**](retries.md) |
+| **Learn about the Unified Future** | [**Futures Guide**](futures.md) |
 
-### Production Features
-- [Limits Guide](limits.md) - Add resource and rate limiting to your workers
-- [Retry Mechanisms Guide](retries.md) - Make your workers fault-tolerant with automatic retries
-- [Progress Guide](progress.md) - Master progress bar customization
-- [Configuration Guide](configuration.md) - Customize global defaults and execution modes
+### Quick Recipes
 
-### Examples & Reference
-- **[Gallery](gallery/index.md)** - **Production-ready examples** like [Comprehensive LLM with Structured Parsing](gallery/llm-with-structured-parsing.md)
-- [API Reference](../api/index.md) - Detailed API documentation
+**Heavy CPU Calculation?**
+Use `mode="process"` to bypass the Python GIL.
+```python
+@worker(mode="process")
+class MathWorker: ...
 
+w = MathWorker.options(max_workers=4).init()
+```
+
+**Strict API Limits?**
+Add a shared Rate Limit.
+```python
+from concurry import worker, RateLimit
+
+@worker(mode="thread")
+class APIWorker: ...
+
+pool = APIWorker.options(
+    limits=[RateLimit(key="api", capacity=5, window_seconds=1)]
+).init()
+```
+
+**Running on a Cluster?**
+Just switch the mode.
+```python
+@worker(mode="ray")
+class DataWorker: ...
+
+w = DataWorker.init()
+```

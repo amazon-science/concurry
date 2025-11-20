@@ -110,6 +110,13 @@ Then open http://127.0.0.1:8000 in your browser.
 
 ### Writing Documentation
 
+We follow strict standards for "Textbook Quality" documentation. Please read our [Documentation Standards](architecture/documentation_standards.md) before contributing.
+
+Key tenets:
+- **Problem-First**: Start with the user's pain point.
+- **Zero-Friction**: Runnable examples, explicit imports.
+- **Delightful Tone**: Professional but encouraging.
+
 - Use Google-style docstrings for all public APIs
 - Include type hints in function signatures
 - Provide examples in docstrings where appropriate

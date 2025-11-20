@@ -1,421 +1,178 @@
 # Global Configuration
 
-Concurry provides a powerful global configuration system that allows you to customize default behavior across all execution modes. This eliminates the need to repeatedly specify the same parameters and makes it easy to tune performance for your specific use case.
+**Configure Concurry to adapt to your environment—from local debugging to production scaling.**
 
-## Overview
+## The Problem: "It works on my machine"
 
-The configuration system has two levels:
+Hardcoding values like `max_workers=10` or `num_retries=3` scattered throughout your codebase creates a mess:
+*   **Dev**: You want verbose logging and synchronous execution for debugging.
+*   **Test**: You want deterministic behavior and zero retries to catch bugs fast.
+*   **Prod**: You want massive parallelism, aggressive retries, and quiet logging.
 
-1. **Global defaults** - Apply to all execution modes unless overridden
-2. **Mode-specific overrides** - Take precedence for a specific execution mode (sync, asyncio, thread, process, ray)
+If you hardcode these values, you have to change code to switch environments.
+
+## The Solution: Hierarchical Configuration
+
+Concurry solves this with a **Global Configuration System** that separates *what* your code does from *how* it executes.
+
+### Configuration Hierarchy
+
+Concurry resolves settings in this order (Specificity wins):
+
+```text
+1. Explicit Argument (Highest Priority)
+   worker = Worker.options(num_retries=5).init()
+      |
+      v
+2. Mode-Specific Config
+   global_config.thread.num_retries = 3
+      |
+      v
+3. Global Default (Lowest Priority)
+   global_config.defaults.num_retries = 0
+```
+
+This means you can set safe defaults globally, tune them for specific execution modes (like Thread vs Ray), and override them for specific critical workers.
+
+---
 
 ## Quick Start
 
-### Accessing the Global Configuration
+### 1. Accessing Defaults
+All defaults live in `concurry.global_config`.
 
 ```python
 from concurry import global_config
 
-# View current defaults
-print(global_config.defaults.num_retries)  # 0
-print(global_config.defaults.retry_wait)   # 1.0
-
-# View mode-specific settings
-print(global_config.thread.max_workers)     # 30
-print(global_config.ray.max_queued_tasks)   # 3
+# Check defaults
+print(global_config.defaults.num_retries)      # 0
+print(global_config.thread.max_workers)        # 30
+print(global_config.ray.max_queued_tasks)      # 3
 ```
 
-### Modifying Defaults Permanently
+### 2. The `temp_config` Context Manager (Recommended)
+The safest way to change config is temporarily using a context manager. This is thread-safe and scopes changes to a block.
 
 ```python
-from concurry import global_config
+from concurry import worker, temp_config
 
-# Change global defaults (affects all modes)
-global_config.defaults.num_retries = 3
-global_config.defaults.retry_wait = 2.0
-
-# Change mode-specific settings
-global_config.thread.max_workers = 50
-global_config.ray.max_queued_tasks = 10
-
-# Reset to library defaults
-global_config.reset_to_defaults()
-```
-
-### Temporary Configuration with `temp_config()`
-
-The recommended approach is using the `temp_config()` context manager:
-
-```python
-from concurry import temp_config, Worker
-
-class MyWorker(Worker):
+@worker(mode="thread")
+class MyWorker:
     def process(self, data):
         return data * 2
 
-# Temporary global override
-with temp_config(global_num_retries=5, global_retry_wait=3.0):
-    # All workers created here use these retry settings
-    worker1 = MyWorker.options(mode="thread").init()
-    worker2 = MyWorker.options(mode="ray").init()
-    # Both have num_retries=5, retry_wait=3.0
+# "Production Mode" block
+with temp_config(
+    global_num_retries=3,           # Retry everything 3 times
+    thread_max_workers=100,         # Scale up threads
+    global_retry_wait=1.0           # Wait 1s between retries
+):
+    # This worker inherits the config automatically!
+    w = MyWorker.init()
     
-    worker1.stop()
-    worker2.stop()
-# Original settings restored after context
+    # ... do work ...
+    w.stop()
 
-# Mode-specific overrides
-with temp_config(
-    thread_max_workers=100,
-    ray_max_queued_tasks=50
-):
-    # Only affects thread and ray modes respectively
-    pass
+# Settings revert here
 ```
 
-## Configuration Categories
+---
 
-### Worker & Pool Configuration
+## Cookbook: Configuration Patterns
 
-Configure worker pool behavior:
-
-```python
-with temp_config(
-    thread_max_workers=50,          # Max workers in thread pool
-    thread_max_queued_tasks=2000,   # Max queued tasks
-    process_max_workers=8,          # Max workers in process pool
-    ray_max_workers=0               # 0 = unlimited for Ray
-):
-    pass
-```
-
-### Multiprocessing Configuration
-
-Configure multiprocessing context for process mode (important for Ray client compatibility):
+### Pattern 1: "Debug Mode" (Local Development)
+When debugging, concurrency is your enemy. You want things to run one at a time, fail fast, and show you exactly what happened.
 
 ```python
-with temp_config(
-    global_mp_context="forkserver"  # Default: Safe + fast
-    # Options: "fork" (fast but unsafe with Ray client)
-    #          "spawn" (safest but very slow ~10-20s)
-    #          "forkserver" (recommended: safe + fast ~200ms)
-):
-    # All process workers created here use forkserver
-    worker = MyWorker.options(mode="process").init()
-    worker.stop()
-```
+# config/dev.py
+from concurry import global_config
 
-**⚠️ WARNING**: If you use Ray client mode alongside process workers, **DO NOT use `fork`** as the multiprocessing context. It will cause segmentation faults due to forking active gRPC threads. Always use `forkserver` (default) or `spawn`.
-
-### Execution Configuration
-
-Control blocking behavior and future unwrapping:
-
-```python
-with temp_config(
-    global_blocking=True,           # Return results directly, not futures
-    global_unwrap_futures=False     # Don't auto-unwrap nested futures
-):
-    worker = MyWorker.options(mode="thread").init()
-    result = worker.process(10)  # Returns result directly (blocking=True)
-    worker.stop()
-```
-
-### Retry Configuration
-
-Configure retry behavior globally:
-
-```python
-from concurry import temp_config
-from concurry.core.retry import RetryAlgorithm
-
-with temp_config(
-    global_num_retries=3,                          # Retry up to 3 times
-    global_retry_algorithm=RetryAlgorithm.Exponential,  # Exponential backoff
-    global_retry_wait=2.0,                         # Min 2s wait
-    global_retry_jitter=0.5                        # 50% jitter
-):
-    pass
-```
-
-### Load Balancing Configuration
-
-Configure how tasks are distributed across workers:
-
-```python
-from concurry import temp_config
-from concurry.core.constants import LoadBalancingAlgorithm
-
-with temp_config(
-    thread_load_balancing=LoadBalancingAlgorithm.LeastActiveLoad,
-    process_load_balancing=LoadBalancingAlgorithm.RoundRobin
-):
-    pass
-```
-
-### Rate Limiting Configuration
-
-Configure rate limiter behavior:
-
-```python
-from concurry import temp_config
-from concurry.core.constants import RateLimitAlgorithm
-
-with temp_config(
-    global_rate_limit_algorithm=RateLimitAlgorithm.TokenBucket,
-    global_rate_limiter_min_wait_time=0.05  # Min 50ms between checks
-):
-    pass
-```
-
-### Polling Strategy Configuration
-
-Configure how `wait()` and `gather()` poll for results:
-
-```python
-with temp_config(
-    # Fixed polling
-    global_polling_fixed_interval=0.02,  # Check every 20ms
+def configure_dev():
+    """Setup for local debugging."""
+    # Force synchronous execution (no threads/processes)
+    # This makes stack traces clean and readable.
+    global_config.defaults.blocking = True 
     
-    # Adaptive polling
-    global_polling_adaptive_min_interval=0.0005,   # 0.5ms min
-    global_polling_adaptive_max_interval=0.3,      # 300ms max
-    global_polling_adaptive_initial_interval=0.02, # Start at 20ms
+    # Fail immediately on error (don't hide bugs with retries)
+    global_config.defaults.num_retries = 0
     
-    # Exponential polling
-    global_polling_exponential_initial_interval=0.02,  # Start at 20ms
-    global_polling_exponential_max_interval=3.0,       # Max 3s
-    
-    # Progressive polling
-    global_polling_progressive_min_interval=0.0005,    # 0.5ms min
-    global_polling_progressive_max_interval=1.0        # 1s max
-):
-    pass
+    # Use fixed polling for predictable behavior
+    global_config.defaults.polling_algorithm = "fixed"
 ```
 
-### Internal Timeouts
-
-Configure internal timeouts (advanced):
+### Pattern 2: "Production Mode" (High Throughput)
+In production, you want to maximize resource usage and handle transient failures gracefully.
 
 ```python
-with temp_config(
-    # Thread mode timeouts
-    thread_worker_command_queue_timeout=0.2,
+# config/prod.py
+from concurry import global_config
+
+def configure_prod():
+    """Setup for high-throughput production."""
+    # Aggressive parallelism
+    global_config.thread.max_workers = 50
+    global_config.process.max_workers = 8  # Matches CPU cores
+    global_config.ray.max_workers = 0      # Unlimited (auto-scaling)
     
-    # Process mode timeouts
-    process_worker_result_queue_timeout=60.0,
-    process_worker_result_queue_cleanup_timeout=2.0,
+    # Robustness
+    global_config.defaults.num_retries = 3
+    global_config.defaults.retry_algorithm = "exponential"
     
-    # Asyncio mode timeouts
-    asyncio_worker_loop_ready_timeout=60.0,
-    asyncio_worker_thread_ready_timeout=60.0,
-    asyncio_worker_sync_queue_timeout=0.2,
-    
-    # Pool timeouts (all modes)
-    thread_pool_on_demand_cleanup_timeout=10.0,
-    thread_pool_on_demand_slot_max_wait=120.0
-):
-    pass
+    # Optimization
+    global_config.defaults.polling_algorithm = "adaptive"
 ```
 
-### Progress Bar Configuration
-
-Configure progress bar display:
-
-```python
-with temp_config(
-    global_progress_bar_ncols=120,      # Wider progress bars
-    global_progress_bar_smoothing=0.2,  # More smoothing
-    global_progress_bar_miniters=10     # Update every 10 iterations
-):
-    from concurry.utils.progress import ProgressBar
-    
-    for item in ProgressBar(range(1000)):
-        # Uses custom settings
-        pass
-```
-
-## Hierarchical Resolution
-
-When looking up a configuration value, Concurry follows this resolution order:
-
-1. **Explicit parameter** passed to the function/method (highest priority)
-2. **Mode-specific override** from `global_config.<mode>.*`
-3. **Global default** from `global_config.defaults.*` (lowest priority)
-
-Example:
+### Pattern 3: "Test Mode" (CI/CD)
+In tests, you want deterministic behavior and speed.
 
 ```python
-from concurry import temp_config, Worker
-
-# Set global default
-with temp_config(global_num_retries=3):
-    # Set thread-specific override
-    with temp_config(thread_num_retries=10):
-        # Explicit parameter wins
-        worker = Worker.options(
-            mode="thread",
-            num_retries=5  # This value is used
-        ).init()
-        
-        # Without explicit parameter, mode-specific wins
-        worker2 = Worker.options(mode="thread").init()
-        # Uses num_retries=10 (thread override)
-        
-        # Different mode uses global default
-        worker3 = Worker.options(mode="ray").init()
-        # Uses num_retries=3 (global default)
-```
-
-## Best Practices
-
-### 1. Use `temp_config()` for Tests
-
-```python
+# tests/conftest.py
 import pytest
 from concurry import temp_config
 
-def test_with_custom_config():
+@pytest.fixture(autouse=True)
+def concurry_config():
+    """Automatically apply test config for every test."""
     with temp_config(
-        global_num_retries=0,  # No retries in tests
-        thread_max_workers=2   # Fewer workers for testing
+        global_num_retries=0,        # Don't mask flakes
+        thread_max_workers=4,        # Don't blow up CI memory
+        process_max_workers=2
     ):
-        # Test code here
-        pass
+        yield
 ```
 
-### 2. Set Global Defaults at Application Startup
-
-```python
-from concurry import global_config
-
-def configure_concurry():
-    """Configure Concurry for production environment."""
-    # Aggressive retries
-    global_config.defaults.num_retries = 3
-    global_config.defaults.retry_wait = 2.0
-    
-    # Larger thread pools
-    global_config.thread.max_workers = 100
-    global_config.thread.max_queued_tasks = 5000
-    
-    # Ray configuration
-    global_config.ray.max_workers = 0  # Unlimited
-    
-if __name__ == "__main__":
-    configure_concurry()
-    # Start application
-```
-
-### 3. Prefer Mode-Specific Overrides Over Global Changes
-
-When you need different behavior per mode:
-
-```python
-# Good: Specific overrides
-with temp_config(
-    thread_max_workers=100,
-    process_max_workers=8,
-    ray_max_workers=0
-):
-    pass
-
-# Less ideal: Global setting that might not fit all modes
-with temp_config(global_max_workers=100):
-    pass
-```
-
-### 4. Document Configuration Dependencies
-
-If your code relies on specific configuration:
-
-```python
-def heavy_processing():
-    """
-    Process heavy workloads.
-    
-    Configuration:
-        Recommended to increase thread pool size:
-        >>> with temp_config(thread_max_workers=200):
-        ...     heavy_processing()
-    """
-    pass
-```
-
-## Common Patterns
-
-### Performance Tuning
-
-```python
-# High-throughput configuration
-with temp_config(
-    thread_max_workers=200,
-    thread_max_queued_tasks=10000,
-    global_polling_fixed_interval=0.001,  # Poll more frequently
-    global_rate_limiter_min_wait_time=0.001
-):
-    # High-performance processing
-    pass
-```
-
-### Conservative/Reliable Configuration
-
-```python
-# Conservative settings for reliability
-with temp_config(
-    global_num_retries=5,
-    global_retry_wait=5.0,
-    thread_max_workers=10,        # Fewer workers
-    thread_max_queued_tasks=100,  # Smaller queues
-    global_stop_timeout=60.0      # Longer stop timeout
-):
-    # Reliable processing
-    pass
-```
-
-### Development/Debug Configuration
-
-```python
-# Debug-friendly settings
-with temp_config(
-    thread_max_workers=1,          # Single worker for easier debugging
-    global_num_retries=0,          # No retries to see failures immediately
-    global_blocking=True,          # Synchronous for simpler stack traces
-    global_stop_timeout=5.0        # Quick shutdown
-):
-    # Development code
-    pass
-```
+---
 
 ## Configuration Reference
 
-For a complete list of all configuration options, see:
+### Categories
 
-- `GlobalDefaults` class in `concurry/config.py` for global settings
-- `ExecutionModeDefaults` class in `concurry/config.py` for mode-specific settings
+| Category | Key Prefix | Example | Description |
+| :--- | :--- | :--- | :--- |
+| **Execution** | `global_` | `global_blocking` | Controls async vs sync behavior. |
+| **Retries** | `global_` | `global_num_retries` | Default retry behavior. |
+| **Limits** | `global_` | `global_rate_limiter_algorithm` | Rate limiting defaults. |
+| **Worker** | `<mode>_` | `thread_max_workers` | Pool sizes and queue limits per mode. |
+| **Polling** | `global_` | `global_polling_fixed_interval` | `wait()` and `gather()` tuning. |
 
-You can also inspect the configuration at runtime:
+### Common Options
+
+| Option | Default | Description |
+| :--- | :--- | :--- |
+| `defaults.num_retries` | `0` | Number of retries for failed tasks. |
+| `defaults.retry_wait` | `1.0` | Seconds to wait before retry. |
+| `thread.max_workers` | `30` | Max threads in the pool. |
+| `process.max_workers` | `None` | Max processes (None = CPU count). |
+| `ray.max_workers` | `0` | Max Ray actors (0 = unlimited). |
+| `defaults.blocking` | `False` | If True, `future.result()` is called immediately. |
+
+### Inspecting Configuration
+You can print the current configuration state at any time:
 
 ```python
 from concurry import global_config
 import pprint
 
-# See all global defaults
+# Dump current state
 pprint.pprint(global_config.defaults.model_dump())
-
-# See all thread mode settings
-pprint.pprint(global_config.thread.model_dump())
-
-# Get resolved defaults for a specific mode
-from concurry.core.constants import ExecutionMode
-resolved = global_config.get_defaults(ExecutionMode.Threads)
-print(resolved.num_retries)  # Falls back to global if thread-specific is None
 ```
-
-## Related Documentation
-
-- [Architecture: Configuration System](../architecture/configuration.md) - Detailed design and implementation
-- [Workers](workers.md) - Worker configuration options
-- [Retries](retries.md) - Retry configuration
-- [Limits](limits.md) - Rate limiting configuration
-

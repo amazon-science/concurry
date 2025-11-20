@@ -4,7 +4,7 @@ Thank you for your interest in contributing to Concurry! This document provides 
 
 ## Code of Conduct
 
-Please read and follow our [Code of Conduct](../CODE_OF_CONDUCT.md).
+Please read and follow our [Code of Conduct](https://github.com/amazon-science/concurry/blob/mainline/CODE_OF_CONDUCT.md).
 
 ## Development Setup
 
@@ -32,13 +32,7 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 3. **Install development dependencies:**
 
 ```bash
-pip install -e .[dev]
-```
-
-4. **Install documentation dependencies (optional):**
-
-```bash
-pip install -e .[docs]
+pip install -e ".[all]"
 ```
 
 ## Running Tests
@@ -46,13 +40,7 @@ pip install -e .[docs]
 Run the test suite with pytest:
 
 ```bash
-pytest
-```
-
-Run tests with coverage:
-
-```bash
-pytest --cov=concurry --cov-report=html
+pytest --full-trace -rf tests/
 ```
 
 ## Code Style
@@ -100,7 +88,7 @@ To build and view documentation locally:
 
 ```bash
 # Install docs dependencies
-pip install -e .[docs]
+pip install -e ".[docs]"
 
 # Serve documentation locally
 mkdocs serve
@@ -226,9 +214,9 @@ Looking for ways to contribute? Consider:
 
 If you have questions about contributing:
 
-- Open a [Discussion](https://github.com/adivekar-utexas/concurry/discussions)
-- Review existing [Issues](https://github.com/adivekar-utexas/concurry/issues)
-- Check the [Documentation](https://adivekar-utexas.github.io/concurry/)
+- Open an [Issue](https://github.com/amazon-science/concurry/issues)
+- Review existing [Issues](https://github.com/amazon-science/concurry/issues)
+- Check the [Documentation](https://amazon-science.github.io/concurry/)
 
 Thank you for contributing to Concurry!
 

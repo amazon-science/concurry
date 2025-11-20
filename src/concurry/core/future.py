@@ -926,7 +926,7 @@ if _IS_RAY_INSTALLED:
 
         Note:
             This class is only available when Ray is installed.
-            Install with: `pip install concurry[ray]`
+            Install with: `pip install "concurry[ray]"`
         """
 
         __slots__ = (

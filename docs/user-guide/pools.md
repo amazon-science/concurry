@@ -14,12 +14,8 @@ A Pool creates multiple instances of your worker and uses a **Load Balancer** to
 
 Just add `max_workers=N` to your options.
 
-<<<<<<< Current (Your changes)
-=======
 !!! tip "Functions vs Classes"
     If you just want to parallelize a simple function (no state), you don't need a class! Use the [`@task` decorator](task-decorator.md) with `max_workers=N` instead.
-
->>>>>>> Incoming (Background Agent changes)
 ```python
 from concurry import worker
 

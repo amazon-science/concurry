@@ -3,7 +3,7 @@ name: release
 on:
   release:
     types:
-    - published  # Published through GitHub UI: https://github.com/adivekar-utexas/autoenum/releases/new
+    - published  # Published through GitHub UI
 
 jobs:
   pypi:

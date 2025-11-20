@@ -81,7 +81,7 @@
     border-radius: 0.5rem;
     margin: 1rem 0;
     font-family: var(--md-code-font);
-    font-size: 0.6rem;
+    font-size: 0.65rem;
     border-left: 3px solid var(--md-primary-fg-color);
 }
 
@@ -122,11 +122,11 @@
 /* Responsive improvements */
 @media screen and (max-width: 76.1875em) {
     .md-typeset table:not([class]) {
-        font-size: 0.6rem;
+        font-size: 0.65rem;
     }
 
     .doc-signature {
-        font-size: 0.6rem;
+        font-size: 0.65rem;
         padding: 0.75rem;
     }
 }

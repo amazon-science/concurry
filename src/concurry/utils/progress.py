@@ -210,11 +210,8 @@ class ProgressBar:
 
         pbar = self._create_pbar(**kwargs_for_pbar)
         pbar.color = self.color
-        try:
-            pbar.refresh()
-        except (LookupError, RuntimeError, Exception):
-            # Handle threading issues - silently ignore refresh errors
-            pass
+        # Note: tqdm displays on creation, no need to call refresh() here
+        # Calling refresh() after creation can cause duplicate output in Jupyter
         self.pbar = pbar
 
     @classmethod
@@ -315,8 +312,10 @@ class ProgressBar:
         self._pending_updates += n
         if abs(self._pending_updates) >= self.miniters:
             try:
+                # Note: tqdm's update() already refreshes the display, so we don't call
+                # self.refresh() here to avoid duplicate output in Jupyter environments.
+                # See: https://github.com/tqdm/tqdm/issues/1305
                 out = self.pbar.update(n=self._pending_updates)
-                self.refresh()
                 self._pending_updates = 0
                 return out
             except (LookupError, RuntimeError, Exception):
@@ -342,9 +341,9 @@ class ProgressBar:
             ```
         """
         try:
+            # Note: tqdm's update() already refreshes the display
             self.pbar.update(n=new_n - self.pbar.n)
             self._pending_updates = 0  # Clear all updates after setting new value
-            self.refresh()
         except (LookupError, RuntimeError, Exception):
             # Handle threading issues - mark updates as processed
             self._pending_updates = 0
@@ -369,7 +368,8 @@ class ProgressBar:
         try:
             self.pbar.total = new_total
             self._pending_updates = 0  # Clear all updates after setting new value
-            self.refresh()
+            # Need refresh here since setting total doesn't auto-refresh
+            self.pbar.refresh()
         except (LookupError, RuntimeError, Exception):
             # Handle threading issues
             self._pending_updates = 0
@@ -525,19 +525,25 @@ class ProgressBar:
     ) -> None:
         """Complete the progress bar with a status."""
         if getattr(self.pbar, "disable", None) is False:
-            self.pbar.update(n=self._pending_updates)
-            self._pending_updates = 0
+            # Update color and description BEFORE the final update
             self.color = color
             self.pbar.colour = color
             if desc is not None:
                 if append_desc:
                     desc: str = f"[{desc}] {self.pbar.desc}"
                 self.pbar.desc = desc
-            try:
-                self.pbar.refresh()
-            except (LookupError, RuntimeError, Exception):
-                # Handle threading issues - silently ignore refresh errors
-                pass
+
+            # Only call update if there are pending updates (this will refresh automatically)
+            if self._pending_updates != 0:
+                self.pbar.update(n=self._pending_updates)
+                self._pending_updates = 0
+            else:
+                # No pending updates, but we need to show the new color/desc
+                try:
+                    self.pbar.refresh()
+                except (LookupError, RuntimeError, Exception):
+                    pass
+
             if close:
                 self.close()
 
@@ -580,18 +586,13 @@ class ProgressBar:
             ```
         """
         try:
-            self.pbar.refresh()
+            # Just close - tqdm handles final display update internally
             self.pbar.close()
-            self.pbar.refresh()
-        except AttributeError:
+        except (AttributeError, Exception):
             # Handle cases where tqdm.notebook doesn't have properly initialized disp method
             # This can happen when ipywidgets is installed but not properly configured
-            try:
-                # Try to close without the refresh
-                self.pbar.close()
-            except (AttributeError, Exception):
-                # If that fails too, just pass - the progress bar will be cleaned up by GC
-                pass
+            # Silently ignore - the progress bar will be cleaned up by GC
+            pass
 
     def __del__(self) -> None:
         """Clean up the progress bar when the object is deleted."""

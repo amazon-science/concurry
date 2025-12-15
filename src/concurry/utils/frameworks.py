@@ -58,27 +58,49 @@ try:
         # Check if we're in a proper IPython/Jupyter environment
         ipython_instance = get_ipython()
         if ipython_instance is not None:
-            # Additional check: verify the kernel has proper context variable support
-            # This is needed to avoid threading issues with ipykernel's shell_parent context
+            # Check if we're in a proper kernel environment (Jupyter Notebook/Lab)
+            # We use multiple detection methods for compatibility across ipykernel versions
             try:
-                # Try to access the kernel - if this fails, ipywidgets won't work properly
-                kernel = ipython_instance.kernel
-                if kernel is not None and hasattr(kernel, "_shell_parent"):
-                    # Kernel exists and has the context variable
-                    # But we still need to be cautious - disable in SageMaker and similar environments
-                    # where threading issues are common with ipywidgets + tqdm + background threads
-                    if "sagemaker" in sys.modules or "sagemaker_containers" in sys.modules:
-                        # In SageMaker, ipywidgets has threading issues with tqdm
-                        _IS_IPYWIDGETS_INSTALLED = False
-                    else:
-                        _IS_IPYWIDGETS_INSTALLED = True
+                # Get shell class name for detection
+                shell_class_name = ipython_instance.__class__.__name__
+
+                # Check if kernel exists
+                kernel = getattr(ipython_instance, "kernel", None)
+
+                # Check for SageMaker first - disable ipywidgets there due to threading issues
+                if "sagemaker" in sys.modules or "sagemaker_containers" in sys.modules:
+                    _IS_IPYWIDGETS_INSTALLED = False
+                # Method 1: Modern detection (ipykernel 6.x+)
+                # Check for ZMQInteractiveShell which is used in Jupyter Notebook/Lab
+                elif shell_class_name == "ZMQInteractiveShell":
+                    _IS_IPYWIDGETS_INSTALLED = True
+                # Method 2: Legacy detection (ipykernel < 6.0)
+                # Check for _shell_parent attribute on kernel (older ipykernel versions)
+                elif kernel is not None and hasattr(kernel, "_shell_parent"):
+                    _IS_IPYWIDGETS_INSTALLED = True
+                # Method 3: Fallback - check if we have any kernel at all
+                # This handles edge cases where shell class name differs but kernel exists
+                elif kernel is not None:
+                    # Has a kernel, likely a Jupyter environment
+                    _IS_IPYWIDGETS_INSTALLED = True
+                # Method 4: Check for TerminalInteractiveShell (IPython terminal)
+                # ipywidgets doesn't work well in plain terminal, but tqdm.auto handles it
+                elif shell_class_name == "TerminalInteractiveShell":
+                    _IS_IPYWIDGETS_INSTALLED = False
                 else:
+                    # Unknown shell type without kernel - assume not supported
                     _IS_IPYWIDGETS_INSTALLED = False
             except (AttributeError, Exception):
-                # Kernel access failed, ipywidgets won't work properly
-                _IS_IPYWIDGETS_INSTALLED = False
+                # Detection failed, try a simple heuristic:
+                # If we have an IPython instance and it has 'kernel' in its class hierarchy,
+                # assume ipywidgets works
+                try:
+                    has_kernel = hasattr(ipython_instance, "kernel")
+                    _IS_IPYWIDGETS_INSTALLED = has_kernel
+                except Exception:
+                    _IS_IPYWIDGETS_INSTALLED = False
         else:
-            # ipywidgets is installed but we're not in a Jupyter environment
+            # ipywidgets is installed but we're not in an IPython/Jupyter environment
             _IS_IPYWIDGETS_INSTALLED = False
 except (ImportError, Exception):
     _IS_IPYWIDGETS_INSTALLED = False

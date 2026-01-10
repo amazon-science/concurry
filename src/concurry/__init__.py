@@ -49,6 +49,7 @@ from .executor import Executor
 # Utilities
 from .utils import _NO_ARG
 from .utils.progress import ProgressBar
+from .utils.timer import Timer, TimerError
 
 # Public API
 __all__ = [
@@ -94,6 +95,8 @@ __all__ = [
     "RetryValidationError",
     # Utilities
     "ProgressBar",
+    "Timer",
+    "TimerError",
     "_NO_ARG",
     # Global configuration
     "global_config",

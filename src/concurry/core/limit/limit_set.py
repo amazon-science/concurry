@@ -327,6 +327,53 @@ class BaseLimitSet(ABC):
         return {limit.key: limit.get_stats() for limit in self.limits}
 
 
+class NoOpLimitSet(BaseLimitSet):
+    """No-operation limit set for empty limits.
+
+    This is a lightweight, picklable limit set that does nothing.
+    Used when no limits are configured to avoid creating unnecessary
+    synchronization primitives or remote actors.
+
+    Key properties:
+    - No state (no locks, semaphores, or actor references)
+    - Fully picklable (works with Ray and multiprocessing)
+    - Zero overhead (acquire/release are no-ops)
+    """
+
+    def __init__(self, shared: bool = True, config: Optional[dict] = None):
+        """Initialize no-op limit set.
+
+        Args:
+            shared: Whether this is a shared limit set (ignored, always treated as shared)
+            config: Static configuration dict (metadata)
+        """
+        super().__init__(limits=[], shared=shared, config=config)
+
+    def acquire(
+        self,
+        requested: Optional[Dict[str, int]] = None,
+        timeout: Optional[float] = None,
+    ) -> LimitSetAcquisition:
+        """No-op acquire - always succeeds immediately."""
+        return LimitSetAcquisition(limit_set=self, acquisitions={}, successful=True, config=self.config)
+
+    def try_acquire(self, requested: Optional[Dict[str, int]] = None) -> LimitSetAcquisition:
+        """No-op try_acquire - always succeeds immediately."""
+        return LimitSetAcquisition(limit_set=self, acquisitions={}, successful=True, config=self.config)
+
+    def release_limit_set_acquisition(self, acquisition: LimitSetAcquisition) -> None:
+        """No-op release - does nothing."""
+        pass
+
+    def _acquire_resource(self, limit: ResourceLimit, amount: int) -> None:
+        """No-op resource acquire."""
+        pass
+
+    def _release_resource(self, limit: ResourceLimit, amount: int) -> None:
+        """No-op resource release."""
+        pass
+
+
 class InMemorySharedLimitSet(BaseLimitSet):
     """In-memory thread-safe limit set implementation.
 
@@ -1288,14 +1335,26 @@ def LimitSet(
 
     # Select appropriate implementation
     if mode in (ExecutionMode.Sync, ExecutionMode.Asyncio, ExecutionMode.Threads):
+        # For empty limits, use NoOpLimitSet for zero overhead
+        if len(limits) == 0:
+            return NoOpLimitSet(shared=shared, config=config)
         return InMemorySharedLimitSet(limits=limits, shared=shared, config=config)
     elif mode == ExecutionMode.Processes:
         if shared is False:
             raise ValueError("Non-shared LimitSets cannot use mode='process'")
+        # For empty limits, use NoOpLimitSet to avoid unnecessary IPC overhead
+        # NoOpLimitSet is picklable (no locks or managers) and has zero overhead
+        if len(limits) == 0:
+            return NoOpLimitSet(shared=True, config=config)
         return MultiprocessSharedLimitSet(limits=limits, shared=True, config=config, mp_context=mp_context)
     elif mode == ExecutionMode.Ray:
         if shared is False:
             raise ValueError("Non-shared LimitSets cannot use mode='ray'")
+        # For empty limits, use NoOpLimitSet to avoid creating a Ray actor
+        # NoOpLimitSet is picklable (no locks or actor references) and has zero overhead
+        # This prevents accumulation of unnecessary actors in Ray client mode
+        if len(limits) == 0:
+            return NoOpLimitSet(shared=True, config=config)
         return RaySharedLimitSet(limits=limits, shared=True, config=config)
     else:
         raise ValueError(

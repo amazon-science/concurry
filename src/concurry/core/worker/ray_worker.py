@@ -204,8 +204,21 @@ class RayWorkerProxy(WorkerProxy):
         """Create a Ray actor from the worker class.
 
         Returns:
-            Ray actor handle
+            Ray actor handle, or None for TaskWorker (uses Ray tasks instead)
+
+        Note:
+            For TaskWorker, we skip actor creation because _execute_task() creates
+            standalone Ray tasks. This avoids spawning two Ray entities (actor + task)
+            for each TaskWorker call.
         """
+        # Skip actor creation for TaskWorker - it uses _execute_task() which creates
+        # standalone Ray tasks, not actor method calls. Creating an actor would be
+        # wasteful since it would never be used.
+        from .task_worker import TaskWorker
+
+        if issubclass(self.worker_cls, TaskWorker):
+            return None
+
         try:
             import ray
         except ImportError:
@@ -365,9 +378,11 @@ class RayWorkerProxy(WorkerProxy):
                 future.cancel()
             self._futures.clear()
 
-        try:
-            import ray
+        # Kill actor if it exists (TaskWorker doesn't create an actor)
+        if self._ray_actor is not None:
+            try:
+                import ray
 
-            ray.kill(self._ray_actor)
-        except Exception:
-            pass
+                ray.kill(self._ray_actor)
+            except Exception:
+                pass

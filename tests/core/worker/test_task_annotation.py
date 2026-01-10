@@ -692,7 +692,3 @@ class TestTaskDecoratorEdgeCases:
         return_dict.stop()
         return_list.stop()
         return_tuple.stop()
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

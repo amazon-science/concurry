@@ -731,7 +731,3 @@ class TestTaskWorkerEdgeCases:
         assert result3 == 30
 
         worker.stop()
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

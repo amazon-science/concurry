@@ -815,8 +815,10 @@ class TestLimitPoolWorkerIntegration:
         pool.stop()
 
     @pytest.mark.parametrize("mode", ["process", "ray"])
-    def test_limitpool_serialization_across_processes(self, mode):
+    def test_limitpool_serialization_across_processes(self, mode, request):
         """Test that LimitPool can be serialized for process/Ray workers."""
+        if mode == "ray":
+            request.getfixturevalue("requires_ray_mode")
 
         class APIWorker(Worker):
             def __init__(self):
@@ -940,8 +942,10 @@ class TestLimitPoolWorkerIntegration:
         pool.stop()
 
     @pytest.mark.parametrize("mode", ["process", "ray"])
-    def test_limitpool_config_accessible_in_remote_workers(self, mode):
+    def test_limitpool_config_accessible_in_remote_workers(self, mode, request):
         """Test that config from LimitPool's LimitSets is accessible in remote workers."""
+        if mode == "ray":
+            request.getfixturevalue("requires_ray_mode")
 
         class APIWorker(Worker):
             def __init__(self):

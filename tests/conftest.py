@@ -21,6 +21,7 @@ import morphic
 import pytest
 
 import concurry
+from concurry.core.constants import ExecutionMode
 from concurry.utils import _IS_RAY_INSTALLED
 
 # =============================================================================
@@ -168,50 +169,194 @@ def pytest_configure(config):
     Note: Timeouts are non-fatal by default - tests continue after timeout.
     Use -x flag to stop on first timeout/failure.
     """
-    # Set default timeout if not specified via command line
-    if config.option.timeout is None:
+    # Set default timeout if not specified via command line.
+    # Use getattr because pytest-timeout's options may not be registered yet
+    # depending on plugin load order.
+    if getattr(config.option, "timeout", None) is None:
         config.option.timeout = 120  # 120 seconds default
 
     # Use 'thread' timeout method for better compatibility
     # (works with Ray actors and multiprocessing)
-    if not hasattr(config.option, "timeout_method") or config.option.timeout_method is None:
+    if getattr(config.option, "timeout_method", None) is None:
         config.option.timeout_method = "thread"
 
 
 def pytest_addoption(parser):
     """Add custom command-line options for concurry tests.
 
-    This allows users to override the default timeout:
+    Execution mode filtering (accepts any ExecutionMode alias):
+        pytest --execution-modes=thread,process
+        pytest --execution-modes=sync
+        pytest --execution-modes=proc,threads   # aliases work too
+
+    Timeout configuration:
         pytest --timeout=120  # 2 minute timeout
         pytest --timeout=0    # Disable timeout
 
     Use -x to stop on first failure (including timeouts):
         pytest --timeout=60 -x  # Stop on first timeout/failure
     """
-    # The pytest-timeout plugin already adds --timeout option,
-    # but we ensure it's available and document it
-    pass
+    parser.addoption(
+        "--execution-modes",
+        action="store",
+        default=None,
+        help="Comma-separated list of execution modes to test. "
+        "Accepts any ExecutionMode alias (e.g. 'thread', 'threads', 'process', 'proc', "
+        "'sync', 'synchronous', 'async', 'asyncio', 'ray'). "
+        "The worker_mode fixture uses the full list; the pool_mode fixture uses "
+        "only the subset that supports pooling. "
+        "Default: all installed modes.",
+    )
 
 
-# Test modes available for all tests
-WORKER_MODES = ["sync", "thread", "process", "asyncio"]
+# ---------------------------------------------------------------------------
+# ExecutionMode → canonical test string mapping
+# ---------------------------------------------------------------------------
 
+_EXECUTION_MODE_TO_TEST_STR: dict = {
+    ExecutionMode.Sync: "sync",
+    ExecutionMode.Threads: "thread",
+    ExecutionMode.Processes: "process",
+    ExecutionMode.Asyncio: "asyncio",
+    ExecutionMode.Ray: "ray",
+}
+
+_ALL_EXECUTION_MODES: list = [
+    ExecutionMode.Sync,
+    ExecutionMode.Threads,
+    ExecutionMode.Processes,
+    ExecutionMode.Asyncio,
+]
 if _IS_RAY_INSTALLED:
-    WORKER_MODES.append("ray")
+    _ALL_EXECUTION_MODES.append(ExecutionMode.Ray)
 
-# Pool modes (subset of worker modes that support pooling)
-POOL_MODES = ["thread", "process"]
-
+_POOL_EXECUTION_MODES: list = [
+    ExecutionMode.Threads,
+    ExecutionMode.Processes,
+]
 if _IS_RAY_INSTALLED:
-    POOL_MODES.append("ray")
+    _POOL_EXECUTION_MODES.append(ExecutionMode.Ray)
+
+WORKER_MODES: list = [_EXECUTION_MODE_TO_TEST_STR[m] for m in _ALL_EXECUTION_MODES]
+POOL_MODES: list = [_EXECUTION_MODE_TO_TEST_STR[m] for m in _POOL_EXECUTION_MODES]
+
+
+def _parse_execution_modes(raw: str) -> list:
+    """Parse a comma-separated mode string, validate via ExecutionMode, return test strings."""
+    tokens = [t.strip() for t in raw.split(",") if len(t.strip()) > 0]
+    test_strings = []
+    for token in tokens:
+        try:
+            mode = ExecutionMode(token)
+        except (KeyError, ValueError):
+            raise pytest.UsageError(
+                f"Invalid execution mode: '{token}'. "
+                f"Accepted values (and their aliases): "
+                + ", ".join(
+                    f"{_EXECUTION_MODE_TO_TEST_STR[m]} ({m.name})" for m in _EXECUTION_MODE_TO_TEST_STR
+                )
+            )
+        if mode == ExecutionMode.Auto:
+            raise pytest.UsageError(
+                f"'auto' is not a valid test execution mode. Choose from: {', '.join(WORKER_MODES)}"
+            )
+        test_str = _EXECUTION_MODE_TO_TEST_STR.get(mode)
+        if test_str is None:
+            raise pytest.UsageError(f"ExecutionMode.{mode.name} is not mapped to a test string.")
+        if mode not in _ALL_EXECUTION_MODES:
+            raise pytest.UsageError(
+                f"Execution mode '{token}' (ExecutionMode.{mode.name}) is not available. "
+                f"Ray is {'installed' if _IS_RAY_INSTALLED else 'NOT installed'}."
+            )
+        if test_str not in test_strings:
+            test_strings.append(test_str)
+    return test_strings
+
+
+def _already_parametrized(metafunc, name: str) -> bool:
+    """Check if a fixture is already parametrized via @pytest.mark.parametrize."""
+    for marker in metafunc.definition.iter_markers("parametrize"):
+        args = marker.args
+        if len(args) > 0:
+            argnames = args[0]
+            if isinstance(argnames, str):
+                names = [n.strip() for n in argnames.split(",")]
+            else:
+                names = list(argnames)
+            if name in names:
+                return True
+    return False
+
+
+def pytest_generate_tests(metafunc):
+    """Dynamically parametrize worker_mode / pool_mode fixtures.
+
+    Reads --execution-modes from the CLI (if provided) and narrows the
+    parametrization accordingly:
+      - worker_mode: uses the requested modes directly.
+      - pool_mode: uses the intersection of requested modes with POOL_MODES.
+
+    When the CLI option is not given, all installed modes are used.
+
+    Tests that already apply @pytest.mark.parametrize("worker_mode", ...)
+    or @pytest.mark.parametrize("pool_mode", ...) are left alone to avoid
+    "duplicate parametrization" errors.
+    """
+    raw = metafunc.config.getoption("execution_modes")
+    requested = _parse_execution_modes(raw) if raw is not None else None
+
+    if "worker_mode" in metafunc.fixturenames and not _already_parametrized(metafunc, "worker_mode"):
+        modes = requested if requested is not None else list(WORKER_MODES)
+        metafunc.parametrize("worker_mode", modes)
+
+    if "pool_mode" in metafunc.fixturenames and not _already_parametrized(metafunc, "pool_mode"):
+        if requested is not None:
+            modes = [m for m in requested if m in POOL_MODES]
+            if len(modes) == 0:
+                pytest.skip(
+                    f"--execution-modes={raw} contains no pool-capable modes "
+                    f"(need one of: {', '.join(POOL_MODES)})"
+                )
+        else:
+            modes = list(POOL_MODES)
+        metafunc.parametrize("pool_mode", modes)
+
+
+def _is_ray_mode_requested(config) -> bool:
+    """Check if 'ray' is among the requested execution modes (or if no filter was given)."""
+    raw = config.getoption("execution_modes")
+    if raw is None:
+        return True  # No filter → all modes including ray
+    requested = _parse_execution_modes(raw)
+    return "ray" in requested
+
+
+@pytest.fixture
+def requires_ray_mode(request):
+    """Skip the test if Ray is not installed or not in --execution-modes.
+
+    Use this fixture in tests that hardcode mode="ray" instead of using the
+    worker_mode / pool_mode fixtures.
+
+    Example:
+        def test_ray_specific_feature(self, requires_ray_mode):
+            w = MyWorker.options(mode="ray").init()
+            ...
+    """
+    if not _IS_RAY_INSTALLED:
+        pytest.skip("Ray is not installed")
+    if not _is_ray_mode_requested(request.config):
+        pytest.skip("Ray mode not included in --execution-modes")
 
 
 @pytest.fixture(scope="session", autouse=True)
-def initialize_ray():
-    """Session-level fixture to initialize Ray once if available.
+def initialize_ray(request):
+    """Session-level fixture to initialize Ray once if available and requested.
 
-    This fixture runs automatically before all tests. If Ray is installed,
+    This fixture runs automatically before all tests. If Ray is installed
+    and "ray" is included in --execution-modes (or no filter is given),
     it initializes the Ray cluster with the correct runtime environment.
+    When --execution-modes omits "ray", the cluster is never started.
 
     Ray Client Mode Testing:
     ------------------------
@@ -247,7 +392,7 @@ def initialize_ray():
 
     If client mode connection fails, tests will fail with a clear error message.
     """
-    if not _IS_RAY_INSTALLED:
+    if not _IS_RAY_INSTALLED or not _is_ray_mode_requested(request.config):
         yield
         return
 
@@ -349,7 +494,7 @@ def cleanup_between_modules(request):
     cleanup_multiprocessing_children()
 
     # Heavy cleanup: Restart Ray periodically
-    if not _IS_RAY_INSTALLED:
+    if not _IS_RAY_INSTALLED or not _is_ray_mode_requested(request.config):
         return
 
     import ray
@@ -388,15 +533,16 @@ def cleanup_between_modules(request):
             stop_ray_server(timeout=5)
 
 
-@pytest.fixture(params=WORKER_MODES)
+@pytest.fixture
 def worker_mode(request):
     """Fixture providing different worker modes.
 
-    This fixture is automatically parametrized across all supported worker modes.
-    If Ray is installed, it will be included in the test modes.
+    This fixture is dynamically parametrized by pytest_generate_tests across
+    all supported worker modes. Override via CLI:
 
-    The Ray cluster is initialized by the initialize_ray fixture, so this
-    fixture just yields the mode name.
+        pytest --execution-modes=thread,process  # Only test these modes
+
+    If Ray is installed, it will be included in the test modes by default.
 
     Args:
         request: pytest request object containing the parameter
@@ -407,15 +553,16 @@ def worker_mode(request):
     yield request.param
 
 
-@pytest.fixture(params=POOL_MODES)
+@pytest.fixture
 def pool_mode(request):
     """Fixture providing different pool modes.
 
-    This fixture is automatically parametrized across pool-supporting modes.
-    Pool modes are modes that support max_workers > 1 (thread, process, and ray if installed).
+    This fixture is dynamically parametrized by pytest_generate_tests using the
+    pool-capable subset of --execution-modes. Override via CLI:
 
-    The Ray cluster is initialized by the initialize_ray fixture, so this
-    fixture just yields the mode name.
+        pytest --execution-modes=thread  # Only test thread pool mode
+
+    Pool modes are modes that support max_workers > 1 (thread, process, and ray if installed).
 
     Args:
         request: pytest request object containing the parameter

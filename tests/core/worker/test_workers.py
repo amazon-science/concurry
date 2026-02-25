@@ -987,7 +987,7 @@ class TestRayWorker:
     This class only tests Ray-specific features like resource specifications.
     """
 
-    def test_ray_worker_with_resources(self):
+    def test_ray_worker_with_resources(self, requires_ray_mode):
         """Test Ray worker with resource specifications."""
         # Ray is initialized by conftest.py initialize_ray fixture
         w = SimpleWorker.options(mode="ray", actor_options={"num_cpus": 1, "num_gpus": 0}).init(10)

@@ -352,7 +352,7 @@ class TestExceptionPreservation:
 class TestRayZeroCopyOptimization:
     """Tests specific to Ray's zero-copy optimization."""
 
-    def test_ray_to_ray_future_passing(self):
+    def test_ray_to_ray_future_passing(self, requires_ray_mode):
         """Test that Ray futures can be passed between Ray workers."""
         # Ray is initialized by conftest.py initialize_ray fixture
         producer = SimpleWorker.options(mode="ray").init(value=100)
@@ -369,7 +369,7 @@ class TestRayZeroCopyOptimization:
         producer.stop()
         consumer.stop()
 
-    def test_ray_nested_futures(self):
+    def test_ray_nested_futures(self, requires_ray_mode):
         """Test Ray zero-copy with nested futures."""
         # Ray is initialized by conftest.py initialize_ray fixture
         producer = SimpleWorker.options(mode="ray").init(value=10)
@@ -389,7 +389,7 @@ class TestRayZeroCopyOptimization:
         producer.stop()
         consumer.stop()
 
-    def test_cross_worker_ray_to_process(self):
+    def test_cross_worker_ray_to_process(self, requires_ray_mode):
         """Test passing Ray future to process worker (should materialize)."""
         # Ray is initialized by conftest.py initialize_ray fixture
         producer = SimpleWorker.options(mode="ray").init(value=100)

@@ -51,7 +51,7 @@ def test_progress_bar_with_thread_pool():
 
 
 @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray is not installed")
-def test_progress_bar_with_ray():
+def test_progress_bar_with_ray(requires_ray_mode):
     """Test progress bar with Ray"""
     import ray
 
@@ -80,7 +80,7 @@ def test_progress_bar_with_multiple_threads():
 
 
 @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray is not installed")
-def test_progress_bar_with_ray_parallel():
+def test_progress_bar_with_ray_parallel(requires_ray_mode):
     """Test multiple progress bars running in parallel using Ray"""
     import ray
 
@@ -188,7 +188,7 @@ def test_progress_bar_with_exception_in_thread():
 
 
 @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray is not installed")
-def test_progress_bar_with_exception_in_ray():
+def test_progress_bar_with_exception_in_ray(requires_ray_mode):
     """Test progress bar behavior when an exception occurs in Ray task"""
     import ray
 

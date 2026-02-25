@@ -197,7 +197,7 @@ class TestWorkerPoolContextManager:
 
         assert pool._stopped is True
 
-    def test_pool_context_manager_ray(self):
+    def test_pool_context_manager_ray(self, requires_ray_mode):
         """Test context manager with Ray pool.
 
         This test:

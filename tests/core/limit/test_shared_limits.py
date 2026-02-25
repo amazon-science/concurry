@@ -377,7 +377,7 @@ class TestRayWorkerLimits:
     This class focuses on shared LimitSet behavior across multiple Ray workers.
     """
 
-    def test_shared_limitset_across_ray_workers(self):
+    def test_shared_limitset_across_ray_workers(self, requires_ray_mode):
         """Test that shared RaySharedLimitSet works across Ray workers (CRITICAL TEST).
 
         1. Creates shared LimitSet for Ray mode (ResourceLimit, capacity=3, shared=True)
@@ -543,7 +543,7 @@ class TestMixedLimitTypes:
 
         w.stop()
 
-    def test_worker_with_call_and_rate_limits_ray(self):
+    def test_worker_with_call_and_rate_limits_ray(self, requires_ray_mode):
         """Test Ray worker with both CallLimit and RateLimit."""
         pytest.importorskip("ray")
         # Ray is initialized by conftest.py initialize_ray fixture
@@ -770,7 +770,7 @@ class TestSharedLimitSetsWithConfig:
     @pytest.mark.skipif(
         not pytest.importorskip("ray", reason="Ray not installed"), reason="Ray not installed"
     )
-    def test_config_shared_across_ray_workers(self):
+    def test_config_shared_across_ray_workers(self, requires_ray_mode):
         """Test that Ray workers can access config from shared LimitSet."""
 
         class APIWorker(Worker):

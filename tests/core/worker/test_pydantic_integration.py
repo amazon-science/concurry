@@ -661,7 +661,7 @@ class TestModelWorkerAdvanced:
         w.stop()
 
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
-    def test_typed_worker_serialization_ray_mode(self):
+    def test_typed_worker_serialization_ray_mode(self, requires_ray_mode):
         """Test that Typed worker works in Ray mode with automatic composition wrapper."""
         # Ray is initialized by conftest.py initialize_ray fixture
         # Now works thanks to automatic composition wrapper!
@@ -684,7 +684,7 @@ class TestModelWorkerAdvanced:
         w.stop()
 
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
-    def test_pydantic_worker_serialization_ray_mode(self):
+    def test_pydantic_worker_serialization_ray_mode(self, requires_ray_mode):
         """Test that Pydantic worker works in Ray mode with automatic composition wrapper."""
         # Ray is initialized by conftest.py initialize_ray fixture
         # Now works thanks to automatic composition wrapper!
@@ -757,11 +757,12 @@ class TestModelWorkerAdvanced:
 # ============================================================================
 
 
+@pytest.mark.usefixtures("requires_ray_mode")
 class TestRayCompatibility:
     """Test Ray mode compatibility with Pydantic-based workers via automatic composition wrapper."""
 
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
-    def test_typed_worker_ray_mode_works(self):
+    def test_typed_worker_ray_mode_works(self, requires_ray_mode):
         """Test that Typed worker works in Ray mode with automatic composition wrapper."""
         # Ray is initialized by conftest.py initialize_ray fixture
         # Now works thanks to automatic composition wrapper!
@@ -778,7 +779,7 @@ class TestRayCompatibility:
         worker.stop()
 
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
-    def test_typed_worker_ray_simple_case(self):
+    def test_typed_worker_ray_simple_case(self, requires_ray_mode):
         """Test simple Typed worker with Ray (regression test for recursion bug).
 
         This test verifies that the CompositionWrapper.__getattr__ fix prevents
@@ -803,7 +804,7 @@ class TestRayCompatibility:
         worker.stop()
 
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
-    def test_typed_worker_ray_pool_simple_case(self):
+    def test_typed_worker_ray_pool_simple_case(self, requires_ray_mode):
         """Test simple Typed worker pool with Ray (regression test for pool recursion bug).
 
         This test verifies that the CompositionWrapper fix works correctly with pools.
@@ -832,7 +833,7 @@ class TestRayCompatibility:
         pool.stop()
 
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
-    def test_pydantic_worker_ray_mode_works(self):
+    def test_pydantic_worker_ray_mode_works(self, requires_ray_mode):
         """Test that Pydantic worker works in Ray mode with automatic composition wrapper."""
         # Ray is initialized by conftest.py initialize_ray fixture
         # Now works thanks to automatic composition wrapper!
@@ -849,7 +850,7 @@ class TestRayCompatibility:
         worker.stop()
 
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
-    def test_typed_worker_ray_pool_works(self):
+    def test_typed_worker_ray_pool_works(self, requires_ray_mode):
         """Test that Typed worker pool works in Ray mode with automatic composition wrapper."""
         # Ray is initialized by conftest.py initialize_ray fixture
         # Now works thanks to automatic composition wrapper!
@@ -865,7 +866,7 @@ class TestRayCompatibility:
         pool.stop()
 
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
-    def test_pydantic_worker_ray_pool_works(self):
+    def test_pydantic_worker_ray_pool_works(self, requires_ray_mode):
         """Test that Pydantic worker pool works in Ray mode with automatic composition wrapper."""
         # Ray is initialized by conftest.py initialize_ray fixture
         # Now works thanks to automatic composition wrapper!
@@ -880,10 +881,8 @@ class TestRayCompatibility:
 
         pool.stop()
 
-    def test_regular_worker_ray_mode_still_works(self):
+    def test_regular_worker_ray_mode_still_works(self, requires_ray_mode):
         """Test that regular (non-Pydantic) workers continue to work fine in Ray mode."""
-        if not _IS_RAY_INSTALLED:
-            pytest.skip("Ray not installed")
 
         # Ray is initialized by conftest.py initialize_ray fixture
         class RegularWorker(Worker):
@@ -900,7 +899,7 @@ class TestRayCompatibility:
         worker.stop()
 
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
-    def test_typed_worker_validation_works_in_ray(self):
+    def test_typed_worker_validation_works_in_ray(self, requires_ray_mode):
         """Test that Typed field validation works correctly in Ray mode."""
         # Ray is initialized by conftest.py initialize_ray fixture
 
@@ -959,7 +958,7 @@ class TestRayCompatibility:
             assert "actor" in error_str or "validation" in error_str or "error" in error_str
 
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
-    def test_pydantic_worker_validation_works_in_ray(self):
+    def test_pydantic_worker_validation_works_in_ray(self, requires_ray_mode):
         """Test that Pydantic BaseModel field validation works correctly in Ray mode."""
         # Ray is initialized by conftest.py initialize_ray fixture
 

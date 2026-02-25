@@ -715,7 +715,7 @@ class TestRateLimitingAlgorithms:
 
         w.stop()
 
-    def test_token_bucket_rate_limiting_ray(self):
+    def test_token_bucket_rate_limiting_ray(self, requires_ray_mode):
         """Test TokenBucket algorithm on Ray workers."""
         pytest.importorskip("ray")
         # Ray is initialized by conftest.py initialize_ray fixture
@@ -786,7 +786,7 @@ class TestRateLimitingAlgorithms:
 
         w.stop()
 
-    def test_leaky_bucket_rate_limiting_ray(self):
+    def test_leaky_bucket_rate_limiting_ray(self, requires_ray_mode):
         """Test LeakyBucket algorithm on Ray workers."""
         pytest.importorskip("ray")
         # Ray is initialized by conftest.py initialize_ray fixture
@@ -857,7 +857,7 @@ class TestRateLimitingAlgorithms:
 
         w.stop()
 
-    def test_sliding_window_rate_limiting_ray(self):
+    def test_sliding_window_rate_limiting_ray(self, requires_ray_mode):
         """Test SlidingWindow algorithm on Ray workers."""
         pytest.importorskip("ray")
         # Ray is initialized by conftest.py initialize_ray fixture
@@ -928,7 +928,7 @@ class TestRateLimitingAlgorithms:
 
         w.stop()
 
-    def test_fixed_window_rate_limiting_ray(self):
+    def test_fixed_window_rate_limiting_ray(self, requires_ray_mode):
         """Test FixedWindow algorithm on Ray workers."""
         pytest.importorskip("ray")
         # Ray is initialized by conftest.py initialize_ray fixture
@@ -1000,7 +1000,7 @@ class TestRateLimitingAlgorithms:
 
         w.stop()
 
-    def test_gcra_rate_limiting_ray(self):
+    def test_gcra_rate_limiting_ray(self, requires_ray_mode):
         """Test GCRA algorithm on Ray workers."""
         pytest.importorskip("ray")
         # Ray is initialized by conftest.py initialize_ray fixture

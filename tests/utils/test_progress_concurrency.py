@@ -246,7 +246,7 @@ class TestProgressBarRayConcurrency:
     """Test ProgressBar in Ray distributed contexts."""
 
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray is not installed")
-    def test_progress_bar_in_ray_tasks(self):
+    def test_progress_bar_in_ray_tasks(self, requires_ray_mode):
         """Test ProgressBar works correctly in Ray tasks.
 
         This test creates multiple Ray tasks, each with its own ProgressBar,
@@ -270,7 +270,7 @@ class TestProgressBarRayConcurrency:
         assert sorted(results) == list(range(3))
 
     @pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray is not installed")
-    def test_progress_bar_in_ray_actor(self):
+    def test_progress_bar_in_ray_actor(self, requires_ray_mode):
         """Test ProgressBar works correctly in Ray actors.
 
         This test creates a Ray actor that uses ProgressBar for its operations.

@@ -23,7 +23,10 @@ import pytest
 from concurry import TaskWorker, Worker, task
 from concurry.utils import _IS_RAY_INSTALLED
 
-pytestmark = pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed")
+pytestmark = [
+    pytest.mark.skipif(not _IS_RAY_INSTALLED, reason="Ray not installed"),
+    pytest.mark.usefixtures("requires_ray_mode"),
+]
 
 
 class TestRayTaskWorkerSingleEntity:

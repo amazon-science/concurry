@@ -1,6 +1,7 @@
 """Process-based worker implementation for concurry."""
 
 import asyncio
+import gc as _gc
 import inspect
 import multiprocessing as mp
 import queue
@@ -56,11 +57,75 @@ def _process_worker_main(
         command_queue: Queue for receiving commands
         result_queue: Queue for sending results
     """
+    # =========================================================================
+    # Set glibc malloc tunables FIRST, before any significant allocations.
+    # These must be set before the first malloc() call to take effect.
+    # With forkserver context, the child process starts fresh, so setting
+    # these here ensures they apply to this process's heap.
+    #
+    # NOTE: These are glibc-specific (Linux only). On macOS (libmalloc) and
+    # Windows (MSVC CRT), these env vars are silently ignored — those
+    # allocators don't read MALLOC_ARENA_MAX or MALLOC_TRIM_THRESHOLD_.
+    # The os.environ.setdefault calls are harmless no-ops on non-Linux.
+    #
+    # IMPORTANT: os.environ must be set before the first malloc() call.
+    # In a forkserver child, Python's interpreter startup has already called
+    # malloc, so env vars alone may not take effect. We also call mallopt()
+    # below via ctypes as a belt-and-suspenders approach, since mallopt()
+    # can adjust arena limits at any time.
+    # =========================================================================
+    import os
+    import sys
+
+    if sys.platform == "linux":
+        os.environ.setdefault("MALLOC_ARENA_MAX", "2")
+        os.environ.setdefault("MALLOC_TRIM_THRESHOLD_", "131072")  # 128KB
+        os.environ.setdefault("MALLOC_MMAP_THRESHOLD_", "131072")  # 128KB
+
     worker_cls = cloudpickle.loads(worker_cls_bytes)
     init_args = cloudpickle.loads(init_args_bytes)
     init_kwargs = cloudpickle.loads(init_kwargs_bytes)
     retry_configs = cloudpickle.loads(retry_configs_bytes)
     worker = None
+
+    # =========================================================================
+    # Memory management: On Linux, glibc's malloc uses per-thread arenas that
+    # hold freed memory for reuse rather than returning it to the OS. In
+    # long-running worker processes that repeatedly serialize/deserialize large
+    # objects via multiprocessing.Queue (pickle), this causes RSS to grow
+    # monotonically even though Python has freed all objects.
+    #
+    # Fix: Call malloc_trim(0) periodically to force glibc to return freed
+    # pages to the OS. We do this after every task to prevent fragmentation.
+    #
+    # Platform notes:
+    # - Linux (glibc): malloc_trim(0) releases free pages back to OS.
+    #   mallopt(M_ARENA_MAX=0x08, 2) limits arena count at runtime.
+    # - macOS (libmalloc): No malloc_trim equivalent. Apple's allocator
+    #   uses madvise(MADV_FREE) internally and handles this automatically.
+    # - Windows (MSVC CRT): No malloc_trim. HeapCompact is the closest
+    #   equivalent but not needed for typical Python workloads.
+    #
+    # The _libc handle is set to None on non-Linux platforms, so all
+    # malloc_trim calls become no-ops. The del/gc.collect cleanup still
+    # helps on all platforms by freeing Python objects promptly.
+    # =========================================================================
+    _libc = None
+    if sys.platform == "linux":
+        try:
+            import ctypes
+
+            _libc = ctypes.CDLL("libc.so.6")
+            # Call mallopt(M_ARENA_MAX, 2) to limit arenas at runtime.
+            # This works even after malloc() has been called (unlike env vars).
+            # M_ARENA_MAX = 0x08 (from glibc's malloc.h)
+            _libc.mallopt(0x08, 2)
+        except (OSError, ImportError, AttributeError):
+            _libc = None
+
+    _MALLOC_TRIM_INTERVAL = 1  # Call malloc_trim after EVERY task to prevent arena fragmentation
+    _GC_COLLECT_INTERVAL = 10  # Full gc.collect every N tasks (more expensive)
+    _task_counter = 0
 
     while True:
         try:
@@ -69,6 +134,7 @@ def _process_worker_main(
                 break
 
             request_id, method_name, args, kwargs = command
+            del command  # Free the deserialized command tuple immediately
 
             try:
                 if method_name == "__initialize__":
@@ -114,6 +180,16 @@ def _process_worker_main(
                         result = _invoke_function(fn, *task_args, **task_kwargs)
 
                     result_queue.put((request_id, "ok", result))
+                    del result  # Free result immediately after sending to queue
+                    _task_counter += 1
+                    # Release fragmented memory back to the OS after every task
+                    if _libc is not None and _task_counter % _MALLOC_TRIM_INTERVAL == 0:
+                        if _task_counter % _GC_COLLECT_INTERVAL == 0:
+                            _gc.collect()  # Break cyclic refs before trim
+                        try:
+                            _libc.malloc_trim(0)
+                        except Exception:
+                            pass
                     continue
 
                 if worker is None:
@@ -125,9 +201,21 @@ def _process_worker_main(
 
                 result = _invoke_function(method, *args, **kwargs)
                 result_queue.put((request_id, "ok", result))
+                del result  # Free result immediately after sending to queue
             except Exception as e:
                 tb_str = traceback.format_exc()
                 result_queue.put((request_id, "error", (e, tb_str)))
+
+            # Release fragmented memory back to the OS after every task.
+            # This prevents RSS from growing monotonically in long-running workers.
+            _task_counter += 1
+            if _libc is not None and _task_counter % _MALLOC_TRIM_INTERVAL == 0:
+                if _task_counter % _GC_COLLECT_INTERVAL == 0:
+                    _gc.collect()  # Break cyclic refs before trim
+                try:
+                    _libc.malloc_trim(0)
+                except Exception:
+                    pass
 
         except Exception as e:
             # Catch any unexpected exceptions in the process loop

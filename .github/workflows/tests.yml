@@ -9,7 +9,20 @@ on:
 jobs:
   pytest:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "single-process"
+            execution-modes: "sync,asyncio,thread"
+          - name: "multiprocess"
+            execution-modes: "process"
+          - name: "ray"
+            execution-modes: "ray"
+
+    name: "tests (${{ matrix.name }})"
 
     steps:
       - name: Check out concurry repo
@@ -37,7 +50,6 @@ jobs:
             ${{ runner.os }}-pip-
 
       - name: Install test requirements
-        # Install morphic first from local checkout, then concurry with all dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install --upgrade uv
@@ -45,12 +57,10 @@ jobs:
           python -m uv pip install -e "./morphic[all]"
           python -m uv pip install -e "./concurry[all]"
 
-      - name: Run tests
-        timeout-minutes: 110
-        # Skip performance tests and progress tests (via pytestmark) on CI
-        # Use --timeout=300 (5 min per test) to prevent individual test hangs
+      - name: Run tests (${{ matrix.name }})
+        timeout-minutes: 50
         env:
           CI: true
         run: |
           cd concurry
-          pytest tests --verbose -m "not performance" --timeout=300 --timeout-method=thread
+          pytest tests --verbose -m "not performance" --timeout=300 --timeout-method=thread --execution-modes=${{ matrix.execution-modes }}

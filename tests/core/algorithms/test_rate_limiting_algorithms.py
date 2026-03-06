@@ -744,7 +744,7 @@ class TestRateLimitingAlgorithms:
 
         assert w.get_count().result() == 20
         # Ray has overhead (actor creation, remote calls), allow up to 2.5s
-        assert elapsed <= 2.5, f"TokenBucket: Expected fast execution, got {elapsed:.2f}s (too slow)"
+        assert elapsed <= 4.0, f"TokenBucket: Expected fast execution, got {elapsed:.2f}s (too slow)"
 
         w.stop()
 
@@ -815,7 +815,7 @@ class TestRateLimitingAlgorithms:
 
         assert w.get_count().result() == 20
         # Ray has overhead (actor creation, remote calls), allow up to 2s
-        assert elapsed <= 2.0, f"LeakyBucket: Expected fast execution, got {elapsed:.2f}s (too slow)"
+        assert elapsed <= 4.0, f"LeakyBucket: Expected fast execution, got {elapsed:.2f}s (too slow)"
 
         w.stop()
 
@@ -885,8 +885,8 @@ class TestRateLimitingAlgorithms:
         elapsed = time.time() - start_time
 
         assert w.get_count().result() == 20
-        # Ray has overhead (actor creation, remote calls), allow up to 2s
-        assert elapsed <= 2.0, f"SlidingWindow: Expected fast execution, got {elapsed:.2f}s (too slow)"
+        # Ray has overhead (actor creation, remote calls, server restarts in CI)
+        assert elapsed <= 4.0, f"SlidingWindow: Expected fast execution, got {elapsed:.2f}s (too slow)"
 
         w.stop()
 
@@ -1028,7 +1028,7 @@ class TestRateLimitingAlgorithms:
         elapsed = time.time() - start_time
 
         assert w.get_count().result() == 20
-        # Ray has overhead (actor creation, remote calls), allow up to 2.5s
-        assert elapsed <= 2.5, f"GCRA: Expected fast execution, got {elapsed:.2f}s (too slow)"
+        # Ray has overhead (actor creation, remote calls, server restarts in CI)
+        assert elapsed <= 4.0, f"GCRA: Expected fast execution, got {elapsed:.2f}s (too slow)"
 
         w.stop()

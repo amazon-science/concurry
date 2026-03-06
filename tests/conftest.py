@@ -31,7 +31,7 @@ from concurry.utils import _IS_RAY_INSTALLED
 # Ray server configuration
 RAY_SERVER_PORT = 6379
 RAY_CLIENT_PORT = 10001
-RAY_NUM_CPUS = 4
+RAY_NUM_CPUS = 2 if os.environ.get("CI") == "true" else 4
 RAY_TEMP_DIR = "/tmp/ray_test_server/"
 
 # Timing configuration (seconds)
@@ -40,8 +40,20 @@ RAY_SHUTDOWN_WAIT = 2
 RAY_RESTART_WAIT = 3
 CLEANUP_WAIT = 0.5
 
-# Default restart interval for batched Ray restarts
-DEFAULT_RAY_RESTART_INTERVAL = 5
+# How often to restart the Ray server between test modules (files).
+# After every N modules, the Ray client is disconnected, the server process is killed
+# and restarted, and a fresh client connection is established. This cleans up leaked
+# gRPC connections, actor state, and file descriptors that accumulate across tests.
+# Each restart takes ~6-8 seconds (shutdown + startup + reconnect).
+# With ~25 test modules in the suite:
+#   Interval=1: restart every module  → ~150-200s overhead (most restarts, highest failure risk)
+#   Interval=3: restart every 3       → ~50-70s overhead
+#   Interval=5: restart every 5       → ~30-40s overhead
+#   Interval=10: restart every 10     → ~15-20s overhead
+#   Interval=0: never restart         → 0s overhead (requires high ulimit)
+# On CI, restarts are disabled because ulimit is raised in the workflow.
+# Restarts are the #1 cause of "Ray is not initialized" failures on CI.
+DEFAULT_RAY_RESTART_INTERVAL = 0 if os.environ.get("CI") == "true" else 5
 
 # =============================================================================
 # Helper Functions
@@ -97,16 +109,19 @@ def stop_ray_server(timeout: int = 10) -> None:
 
 def start_ray_server() -> subprocess.Popen:
     """Start a Ray server process and return the Popen object."""
+    cmd = [
+        "ray",
+        "start",
+        "--head",
+        f"--port={RAY_SERVER_PORT}",
+        f"--ray-client-server-port={RAY_CLIENT_PORT}",
+        f"--num-cpus={RAY_NUM_CPUS}",
+        f"--temp-dir={RAY_TEMP_DIR}",
+    ]
+    if os.environ.get("CI") == "true":
+        cmd.append("--object-store-memory=209715200")  # 200 MB; CI runners have ~7 GB total
     return subprocess.Popen(
-        [
-            "ray",
-            "start",
-            "--head",
-            f"--port={RAY_SERVER_PORT}",
-            f"--ray-client-server-port={RAY_CLIENT_PORT}",
-            f"--num-cpus={RAY_NUM_CPUS}",
-            f"--temp-dir={RAY_TEMP_DIR}",
-        ],
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -125,17 +140,106 @@ def connect_ray_client() -> None:
     )
 
 
+def wait_for_ray_client_port(timeout: float = 30.0) -> bool:
+    """Wait until the Ray client port is accepting TCP connections.
+
+    This is more reliable than a fixed sleep — it confirms the gRPC server
+    is actually listening before we attempt ray.init().
+
+    Args:
+        timeout: Maximum seconds to wait.
+
+    Returns:
+        True if port is ready, False if timeout reached.
+    """
+    import socket
+
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(1.0)
+                s.connect(("127.0.0.1", RAY_CLIENT_PORT))
+                return True
+        except (ConnectionRefusedError, OSError, socket.timeout):
+            time.sleep(0.5)
+    return False
+
+
+def start_ray_server_and_wait(timeout: float = 30.0) -> None:
+    """Start Ray server and wait until the client port is accepting connections.
+
+    Combines start_ray_server() with wait_for_ray_client_port() for a
+    deterministic startup sequence.
+
+    Raises:
+        RuntimeError: If the server doesn't become ready within timeout.
+    """
+    start_ray_server()
+    if not wait_for_ray_client_port(timeout=timeout):
+        raise RuntimeError(
+            f"Ray server did not start accepting connections on port {RAY_CLIENT_PORT} "
+            f"within {timeout}s"
+        )
+
+
+def connect_ray_client_with_retry(max_attempts: int = 3, wait_between: float = 3.0) -> None:
+    """Connect to Ray server with retries, clearing stale client state between attempts.
+
+    ray.init() in client mode can leave partial state on failure, and
+    ignore_reinit_error=True doesn't work properly with Ray Client
+    (see ray-project/ray#24888). So we call ray.shutdown() before each
+    retry to ensure a clean slate.
+
+    Args:
+        max_attempts: Maximum number of connection attempts.
+        wait_between: Seconds to wait between attempts.
+
+    Raises:
+        The last exception if all attempts fail.
+    """
+    import ray
+
+    last_error = None
+    for attempt in range(max_attempts):
+        try:
+            # Clear any stale client state from a previous failed connection.
+            # ray.shutdown() is safe to call even when not connected.
+            if attempt > 0:
+                try:
+                    ray.shutdown()
+                except Exception:
+                    pass
+                time.sleep(wait_between)
+
+            connect_ray_client()
+            return  # Success
+        except Exception as e:
+            last_error = e
+            if attempt < max_attempts - 1:
+                print(f"  Ray client connect attempt {attempt + 1}/{max_attempts} failed: {e}")
+
+    raise last_error  # type: ignore[misc]
+
+
 def initialize_ray_standard() -> None:
     """Initialize Ray in standard (non-client) mode."""
     import ray
 
     import tests
 
-    ray.init(
+    init_kwargs = dict(
         ignore_reinit_error=True,
         num_cpus=RAY_NUM_CPUS,
         runtime_env={"py_modules": [concurry, morphic, tests]},
     )
+    if os.environ.get("CI") == "true":
+        init_kwargs.update(
+            num_cpus=2,
+            object_store_memory=200 * 1024 * 1024,  # 200 MB
+            _system_config={"object_store_memory": 200 * 1024 * 1024},
+        )
+    ray.init(**init_kwargs)
 
 
 def cleanup_multiprocessing_children(timeout: float = 0.5) -> None:
@@ -347,6 +451,10 @@ def requires_ray_mode(request):
         pytest.skip("Ray is not installed")
     if not _is_ray_mode_requested(request.config):
         pytest.skip("Ray mode not included in --execution-modes")
+    import ray
+
+    if not ray.is_initialized():
+        pytest.fail("Ray is not initialized (server may have failed to restart)")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -423,11 +531,10 @@ def initialize_ray(request):
                 set_max_file_descriptors()
                 print("=" * 70)
 
-                start_ray_server()
-                time.sleep(RAY_STARTUP_WAIT)
+                start_ray_server_and_wait(timeout=30)
 
                 print("Connecting to Ray server in client mode...")
-                connect_ray_client()
+                connect_ray_client_with_retry(max_attempts=3, wait_between=3.0)
                 print("✓ Connected to Ray server in client mode")
                 print("=" * 70 + "\n")
 
@@ -457,6 +564,33 @@ def initialize_ray(request):
         print("=" * 70 + "\n")
     except Exception as e:
         print(f"Note: Error stopping Ray server: {e}")
+
+
+@pytest.fixture(autouse=True)
+def cleanup_after_each_test():
+    """Per-test fixture to release Ray actor handles via garbage collection.
+
+    Large test modules (e.g., test_pydantic_integration.py) can have 50+ Ray tests.
+    Without per-test cleanup, leaked Python references to actor handles accumulate.
+    gc.collect() releases dead references, allowing Ray to reclaim resources.
+
+    Note: We intentionally do NOT call ray.kill() here because killing actors causes
+    Ray worker processes to die and respawn without the runtime_env (py_modules),
+    leading to ModuleNotFoundError on the next test.
+
+    Safe for non-ray modes: exits immediately if Ray is not initialized.
+    """
+    yield
+
+    if not _IS_RAY_INSTALLED:
+        return
+    try:
+        import ray
+
+        if ray.is_initialized():
+            gc.collect()
+    except Exception:
+        pass
 
 
 # Track module count for batched Ray restarts
@@ -503,7 +637,10 @@ def cleanup_between_modules(request):
     restart_interval = get_ray_restart_interval()
 
     should_restart = (
-        use_client_mode and ray.is_initialized() and (_module_counter["count"] % restart_interval == 0)
+        restart_interval > 0
+        and use_client_mode
+        and ray.is_initialized()
+        and (_module_counter["count"] % restart_interval == 0)
     )
 
     if should_restart:
@@ -512,24 +649,24 @@ def cleanup_between_modules(request):
             print(f"Completed {_module_counter['count']} modules - Restarting Ray...")
             print("=" * 70)
 
-            # Shutdown Ray client
+            # Shutdown Ray client and clean up
             ray.shutdown()
             gc.collect()
             time.sleep(1)
 
-            # Stop and restart Ray server
+            # Stop old server, start new one, wait for port to be ready
             stop_ray_server(timeout=10)
-            start_ray_server()
-            time.sleep(RAY_RESTART_WAIT)
+            start_ray_server_and_wait(timeout=30)
 
-            # Reconnect as client
-            connect_ray_client()
+            # Reconnect with retry (clears stale client state between attempts)
+            connect_ray_client_with_retry(max_attempts=3, wait_between=3.0)
 
             print("✓ Ray restarted successfully")
             print("=" * 70 + "\n")
 
         except Exception as e:
-            print(f"Warning: Ray restart failed: {e}")
+            print(f"WARNING: Ray restart failed: {e}")
+            print("Subsequent Ray tests will fail until Ray is re-initialized.")
             stop_ray_server(timeout=5)
 
 
@@ -550,7 +687,13 @@ def worker_mode(request):
     Yields:
         str: The worker mode name ("sync", "thread", "process", "asyncio", or "ray")
     """
-    yield request.param
+    mode = request.param
+    if mode == "ray":
+        import ray
+
+        if not ray.is_initialized():
+            pytest.fail("Ray is not initialized (server may have failed to restart)")
+    yield mode
 
 
 @pytest.fixture
@@ -570,7 +713,13 @@ def pool_mode(request):
     Yields:
         str: The pool mode name ("thread", "process", or "ray")
     """
-    yield request.param
+    mode = request.param
+    if mode == "ray":
+        import ray
+
+        if not ray.is_initialized():
+            pytest.fail("Ray is not initialized (server may have failed to restart)")
+    yield mode
 
 
 @pytest.fixture(scope="session", autouse=True)

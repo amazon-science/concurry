@@ -53,7 +53,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install --upgrade uv
-          python -m uv pip install --upgrade pytest pytest-xdist pytest-timeout
+          python -m uv pip install --upgrade pytest pytest-xdist pytest-timeout pytest-instafail
           python -m uv pip install -e "./morphic[all]"
           python -m uv pip install -e "./concurry[all]"
 
@@ -62,5 +62,6 @@ jobs:
         env:
           CI: true
         run: |
+          ulimit -n 65535
           cd concurry
-          pytest tests --verbose -m "not performance" --timeout=300 --timeout-method=thread --execution-modes=${{ matrix.execution-modes }}
+          pytest tests --instafail --tb=short -rf --verbose -p no:sugar -m "not performance" --timeout=300 --timeout-method=thread --execution-modes=${{ matrix.execution-modes }}

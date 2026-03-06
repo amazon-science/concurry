@@ -378,25 +378,54 @@ class TestRayWorkerLimits:
     """
 
     def test_shared_limitset_across_ray_workers(self, requires_ray_mode):
-        """Test that shared RaySharedLimitSet works across Ray workers (CRITICAL TEST).
+        """Verify that a shared RaySharedLimitSet enforces capacity across Ray actors.
 
-        1. Creates shared LimitSet for Ray mode (ResourceLimit, capacity=3, shared=True)
-        2. Creates 6 Ray actors (workers) in SEPARATE Ray processes
-        3. All actors share THE SAME LimitSet via Ray actor (LimitTrackerActor)
-        4. Submits 6 tasks (one per worker) that acquire 1 resource and hold for 1 second
-        5. **VALIDATES SHARING**: With capacity=3, only 3 tasks can run concurrently
-        6. Expected: First 3 tasks complete after ~1s, next 3 tasks wait then complete after ~2s
-        7. If NOT shared: All 6 tasks would complete after ~1s (each worker has its own capacity=3)
+        Scenario:
+            - 6 Ray actors share a single ResourceLimit with capacity=3.
+            - Each actor acquires 1 resource unit, sleeps for 1 second, then releases.
+            - With capacity=3, only 3 actors can hold the resource at once.
+            - The remaining 3 must block until a slot frees up.
 
-        Note: Ray actors execute methods serially, so we need 6 separate actors to have
-        6 concurrent tasks. This validates limits are SHARED across multiple RAY ACTORS.
+        Expected behaviour:
+            The 6 tasks split into two waves of 3. Wave 1 runs from ~t=0 to
+            ~t=1, Wave 2 runs from ~t=1 to ~t=2, so total elapsed is ~2s.
+            If limits are NOT shared (each actor has its own private
+            capacity=3), all 6 run concurrently and finish in ~1s.
+
+        Why 6 separate actors:
+            Ray actors execute methods serially. To have 6 concurrent tasks
+            we need 6 separate actors, each running one task.
+
+        Why we warm up with ping():
+            Ray actors are created asynchronously. Without a warmup step,
+            some actors may not finish initialising until well after the
+            timing window starts, making the total elapsed time unreliable.
+            Calling ``ping().result()`` on every actor forces us to wait
+            until every actor is alive and responsive before we start the
+            clock.
+
+        Assertions (and why these specific ones):
+            1. total elapsed >= 1.7s -- proves two sequential waves occurred.
+               We use 1.7 instead of 2.0 to tolerate scheduling jitter.
+            2. total elapsed <= 8.0s -- sanity upper bound; rules out
+               deadlocks or pathological blocking.
+
+        Why we do NOT assert per-task acquire_time:
+            Even with warmup, Ray's task scheduling introduces variable
+            delays between when we call ``.hold_resource()`` and when the
+            actor actually starts executing it.  Per-task ``acquire_time``
+            (measured inside the actor) is therefore unreliable for
+            distinguishing "waited for a limit" from "waited for Ray to
+            schedule me".  Total wall-clock time is the robust metric.
         """
         pytest.importorskip("ray")
-        # Ray is initialized by conftest.py initialize_ray fixture
 
         class ResourceWorker(Worker):
             def __init__(self, worker_id: int):
                 self.worker_id = worker_id
+
+            def ping(self) -> bool:
+                return True
 
             def hold_resource(self, task_id: int) -> dict:
                 """Acquire resource, hold for 1 second, return timing info."""
@@ -405,69 +434,43 @@ class TestRayWorkerLimits:
                 start = time.time()
                 with self.limits.acquire(requested={"resource": 1}):
                     acquire_time = time.time() - start
-                    time.sleep(1.0)  # Hold resource for 1 second
+                    time.sleep(1.0)
                     return {
                         "worker_id": self.worker_id,
                         "task_id": task_id,
                         "acquire_time": acquire_time,
                     }
 
-        # Create shared LimitSet with capacity=3
         shared_limits = LimitSet(
             limits=[ResourceLimit(key="resource", capacity=3)],
             shared=True,
             mode="ray",
         )
 
-        # Create 6 Ray workers (actors) sharing the same limits
-        # Need 6 actors because Ray actors execute methods serially (one at a time)
         workers = []
         for i in range(6):
             w = ResourceWorker.options(mode="ray", max_workers=0, limits=shared_limits).init(worker_id=i)
             workers.append(w)
 
-        # Submit 6 tasks (one to each worker) simultaneously
-        start_time = time.time()
-        futures = []
-        for i, worker in enumerate(workers):
-            futures.append(worker.hold_resource(i))
+        # Warm up: ensure all actors are initialized before timing begins.
+        for w in workers:
+            assert w.ping().result(timeout=30) is True
 
-        # Collect results
+        start_time = time.time()
+        futures = [worker.hold_resource(i) for i, worker in enumerate(workers)]
         results = [f.result(timeout=15) for f in futures]
         elapsed = time.time() - start_time
 
-        # Analyze acquire times
-        acquire_times = sorted([r["acquire_time"] for r in results])
-
-        # Validate shared behavior using total elapsed time:
-        # - If limits NOT shared: All 6 tasks run concurrently, total time ~1s (just the sleep)
-        # - If limits ARE shared: Two waves of 3 tasks, total time ~2s (two sequential sleeps)
-        #
-        # With Ray's async scheduling, individual acquire times are unreliable due to
-        # variable task start times. Total elapsed time is a more robust indicator.
-        #
-        # Expected: ~2 seconds (two waves of 3 concurrent tasks, each holding for 1s)
-        # Allow slack for Ray overhead (actor startup, network latency, scheduling)
         assert elapsed >= 1.7, (
             f"Total time {elapsed:.2f}s is too fast. Expected >= 1.7s. "
-            f"If < 1.5s, limits are NOT shared (all 6 tasks ran concurrently). "
-            f"Acquire times: {acquire_times}"
+            f"If < 1.5s, limits are NOT shared (all 6 tasks ran concurrently)."
         )
 
-        assert elapsed <= 5.0, (
-            f"Total time {elapsed:.2f}s is too slow. Expected <= 5.0s. "
-            f"This suggests unexpected overhead or blocking. "
-            f"Acquire times: {acquire_times}"
+        assert elapsed <= 8.0, (
+            f"Total time {elapsed:.2f}s is too slow. Expected <= 8.0s. "
+            f"This suggests unexpected overhead or blocking."
         )
 
-        # Additional sanity check: NOT all tasks should acquire immediately
-        # If all 6 acquired in < 0.2s, limits are definitely not shared
-        all_immediate = all(t < 0.2 for t in acquire_times)
-        assert not all_immediate, (
-            f"All 6 tasks acquired immediately (<0.2s), limits NOT shared! Acquire times: {acquire_times}"
-        )
-
-        # Stop all workers
         for w in workers:
             w.stop()
 
@@ -583,7 +586,7 @@ class TestMixedLimitTypes:
         # - Remaining 5 calls at 5/sec = 1 second
         # - Ray has overhead (actor creation, remote calls), allow up to 3s
         assert elapsed >= 0.5, f"Expected ~1s with Ray overhead, got {elapsed:.2f}s (too fast)"
-        assert elapsed <= 3.0, f"Expected ~1s with Ray overhead, got {elapsed:.2f}s (too slow)"
+        assert elapsed <= 5.0, f"Expected ~1s with Ray overhead, got {elapsed:.2f}s (too slow)"
 
         w.stop()
 
@@ -896,46 +899,79 @@ class TestSharedLimitSetsWithConfig:
 
 
 class TestSharedLimitAcquisitionTracking:
-    """Test shared limits with explicit acquisition tracking across execution modes.
+    """Test that a shared ResourceLimit is enforced across multiple workers.
 
-    These tests differ from test_retry_shared_limit_no_starvation in that:
-    1. They explicitly track WHEN each acquisition was requested vs granted
-    2. They validate precise timing constraints derived from logical acquisition patterns
-    3. They test without retries to isolate pure limit enforcement behavior
-    4. They verify that timing constraints hold regardless of execution mode overhead
+    These tests create N workers sharing a single LimitSet with
+    ResourceLimit(capacity=C), submit one task per worker, and verify that the
+    shared capacity constraint is never violated. Each task acquires 1 unit,
+    holds for a fixed duration, then releases.
 
-    The key insight is that we can derive hard timing constraints from the acquisition
-    pattern that MUST hold regardless of Ray/process/async overhead:
-    - If task A holds resource for T seconds, task B waiting for that resource MUST
-      wait at least T seconds (minus small epsilon for measurement precision)
-    - If N tasks request M resources (N > M), at least (N - M) tasks MUST wait
+    The core property under test:
+        At no point in time should more than C tasks hold the resource
+        simultaneously. With N > C tasks, this forces sequential "waves":
+        the first C tasks acquire immediately; the remaining (N - C) tasks
+        must block until a slot is freed.
+
+    Validation strategy (robust to scheduling jitter in Ray/process modes):
+        - Timeline analysis: reconstruct grant/release events and verify
+          max concurrent holdings <= capacity.
+        - Total elapsed time: with N tasks, C capacity, and H hold-seconds,
+          minimum elapsed time is ceil(N/C) * H. If all N ran concurrently
+          (limits broken), elapsed would be ~H.
+        - Wave ordering (capacity=2 only): Wave 2 grants must occur after
+          Wave 1 releases.  Not used for higher capacities because
+          staggered task starts can cause legitimate interleaving that
+          does not violate capacity.
+
+    Why we warm up with ping():
+        Ray actors (and to a lesser extent process workers) start
+        asynchronously. Without a warmup, some workers may not begin
+        executing their task until well into the test window, which can
+        cause false failures (e.g. a late-starting worker requests the
+        resource after Wave 1 has already released, so its wait_time is
+        near-zero despite limits working correctly).  Calling
+        ``ping().result()`` on every worker before starting the clock
+        guarantees all workers are alive and responsive.
+
+    These tests do NOT use retries, isolating pure limit enforcement.
     """
 
     def test_shared_resource_limit_sequential_waves(self, worker_mode):
-        """Test shared ResourceLimit enforces sequential execution waves.
+        """Verify that 4 tasks sharing capacity=2 execute in two sequential waves.
 
-        What this test validates:
-        -------------------------
-        With capacity=2 and 4 tasks each holding for 1 second:
-        - Wave 1: Tasks 0, 1 acquire immediately (t=0)
-        - Wave 2: Tasks 2, 3 wait until Wave 1 releases (t=1)
+        Scenario:
+            - 4 separate workers share a ResourceLimit with capacity=2.
+            - Each task acquires 1 resource unit, holds for 1 second, releases.
+            - With capacity=2, only 2 tasks can hold the resource at once.
+            - The remaining 2 must wait for a slot to free up.
 
-        Logical timing constraints (MUST hold regardless of execution mode):
-        1. Tasks 0, 1 MUST acquire within epsilon of each other (both immediate)
-        2. Tasks 2, 3 MUST wait >= 0.9s (accounting for 1s hold time - 0.1s epsilon)
-        3. Total elapsed time MUST be >= 1.9s (two sequential 1s waves - 0.1s epsilon)
-        4. Total elapsed time SHOULD be < 3s (not three sequential waves)
+        Expected behaviour:
+            Wave 1 (2 tasks) runs from ~t=0 to ~t=1. Wave 2 (2 tasks) runs
+            from ~t=1 to ~t=2. Total elapsed is ~2s. If limits are NOT
+            shared, all 4 run concurrently and finish in ~1s.
 
-        Difference from test_retry_shared_limit_no_starvation:
-        - No retries (tests pure limit enforcement)
-        - Explicit tracking of request vs grant timestamps
-        - Validates precise timing relationships between tasks
-        - Tests sequential wave pattern (not just "some tasks wait")
+        Assertions:
+            1. Capacity never exceeded -- reconstruct a timeline of grant
+               and release events; at no point do more than 2 tasks hold
+               the resource simultaneously.
+            2. Wave ordering -- the earliest Wave 2 grant timestamp is
+               after the latest Wave 1 release timestamp.  This is valid
+               for capacity=2 because after warmup, all 4 tasks start
+               nearly simultaneously, so the first 2 by grant-time truly
+               form a concurrent wave whose releases gate the next 2.
+            3. Total elapsed >= 1.9s -- proves two sequential 1-second
+               waves occurred (minus 0.1s epsilon for measurement jitter).
+            4. Total elapsed < 5s -- rules out deadlock or pathological
+               blocking.
 
-        Implementation:
-        - Worker tracks request_time, grant_time for each acquisition
-        - Test validates timing relationships between acquisitions
-        - Timing constraints are derived from logical acquisition pattern
+        Why wave ordering works here but not for capacity=3:
+            With capacity=2 and 4 tasks starting simultaneously, exactly 2
+            acquire immediately and 2 block. The blocked tasks cannot
+            acquire until the first 2 release. So Wave 1 (first 2 by
+            grant time) and Wave 2 (last 2) are cleanly separated.
+            With higher capacities and more tasks, staggered scheduling
+            can cause tasks to interleave across "waves" without violating
+            capacity, making a strict wave ordering check invalid.
         """
         if worker_mode in ("sync", "asyncio"):
             pytest.skip("Sync and asyncio modes only support max_workers=1")
@@ -943,6 +979,9 @@ class TestSharedLimitAcquisitionTracking:
         class TrackingWorker(Worker):
             def __init__(self, worker_id: int):
                 self.worker_id = worker_id
+
+            def ping(self) -> bool:
+                return True
 
             def hold_resource(self, hold_time: float) -> dict:
                 """Acquire resource, hold for specified time, return timing info."""
@@ -966,14 +1005,12 @@ class TestSharedLimitAcquisitionTracking:
                         "wait_time": wait_time,
                     }
 
-        # Create shared LimitSet with capacity=2
         shared_limits = LimitSet(
             limits=[ResourceLimit(key="resource", capacity=2)],
             shared=True,
             mode=worker_mode,
         )
 
-        # Create 4 workers
         workers = []
         for i in range(4):
             if worker_mode == "thread":
@@ -990,97 +1027,110 @@ class TestSharedLimitAcquisitionTracking:
                 )
             workers.append(w)
 
-        # Submit 4 tasks, each holding for 1 second
+        # Warm up: ensure all actors are initialized before timing begins.
+        # Ray actors start asynchronously; without this, staggered startup
+        # causes some tasks to begin well after others, skewing timing.
+        for w in workers:
+            assert w.ping().result(timeout=30) is True
+
         start_time = time.time()
         futures = [w.hold_resource(1.0) for w in workers]
         results = [f.result(timeout=30) for f in futures]
         total_elapsed = time.time() - start_time
 
-        # Sort results by grant time to identify waves
         results_by_grant = sorted(results, key=lambda r: r["grant_time"])
 
-        # Validate Wave 1 (first 2 tasks)
+        # --- Property 1: capacity never exceeded (timeline analysis) ---
+        events = []
+        for r in results:
+            events.append(("grant", r["grant_time"], r["worker_id"]))
+            events.append(("release", r["release_time"], r["worker_id"]))
+        events.sort(key=lambda e: e[1])
+
+        current_holdings = set()
+        max_concurrent = 0
+        for event_type, _ts, worker_id in events:
+            if event_type == "grant":
+                current_holdings.add(worker_id)
+                max_concurrent = max(max_concurrent, len(current_holdings))
+            else:
+                current_holdings.discard(worker_id)
+
+        assert max_concurrent <= 2, (
+            f"Max concurrent holdings was {max_concurrent}, exceeds capacity=2! "
+            f"This indicates a race condition in limit enforcement."
+        )
+
+        # --- Property 2: Wave 2 grants occur after Wave 1 releases ---
         wave1 = results_by_grant[:2]
-        wave1_grant_times = [r["grant_time"] for r in wave1]
-        wave1_wait_times = [r["wait_time"] for r in wave1]
-
-        # Wave 1 tasks should acquire close together (within 0.6s of each other)
-        # Note: With Ray/process scheduling, tasks may not start simultaneously
-        wave1_spread = max(wave1_grant_times) - min(wave1_grant_times)
-        assert wave1_spread < 0.6, (
-            f"Wave 1 tasks should acquire relatively close together, but spread is {wave1_spread:.3f}s. "
-            f"Grant times: {wave1_grant_times}"
-        )
-
-        # Wave 1 tasks should have relatively short wait times (< 0.6s)
-        # Note: Ray scheduling delays may cause some wait time even for "immediate" acquisitions
-        assert all(wt < 0.6 for wt in wave1_wait_times), (
-            f"Wave 1 tasks should acquire with minimal wait, but wait times are {wave1_wait_times}"
-        )
-
-        # Validate Wave 2 (last 2 tasks)
         wave2 = results_by_grant[2:]
-        wave2_grant_times = [r["grant_time"] for r in wave2]
-        wave2_wait_times = [r["wait_time"] for r in wave2]
-
-        # Wave 2 tasks MUST wait >= 0.9s (accounting for 1s hold - 0.1s epsilon)
-        # This is a HARD constraint: if Wave 1 holds for 1s, Wave 2 MUST wait ~1s
-        assert all(wt >= 0.9 for wt in wave2_wait_times), (
-            f"Wave 2 tasks MUST wait >= 0.9s (Wave 1 holds for 1s), but wait times are {wave2_wait_times}. "
-            f"This indicates limits are NOT properly shared!"
-        )
-
-        # Wave 2 tasks should acquire after Wave 1 releases
         wave1_latest_release = max(r["release_time"] for r in wave1)
         wave2_earliest_grant = min(r["grant_time"] for r in wave2)
 
-        # Wave 2 should not acquire before Wave 1 releases (allow 0.1s epsilon for timing)
         assert wave2_earliest_grant >= wave1_latest_release - 0.1, (
-            f"Wave 2 acquired at {wave2_earliest_grant:.3f} before Wave 1 released at {wave1_latest_release:.3f}. "
-            f"This violates capacity constraint!"
+            f"Wave 2 acquired at {wave2_earliest_grant:.3f} before Wave 1 released at "
+            f"{wave1_latest_release:.3f}. This violates the capacity constraint!"
         )
 
-        # Total elapsed time MUST be >= 1.9s (two sequential 1s waves - 0.1s epsilon)
+        # --- Property 3: total time proves limits are shared ---
         assert total_elapsed >= 1.9, (
-            f"Total time {total_elapsed:.2f}s is too fast. Expected >= 1.9s for two sequential waves. "
-            f"If < 1.5s, limits are NOT shared (all 4 ran concurrently)."
+            f"Total time {total_elapsed:.2f}s is too fast. Expected >= 1.9s for two "
+            f"sequential 1s waves. If < 1.5s, limits are NOT shared."
         )
 
-        # Total elapsed time should be < 4s (not three sequential waves)
-        # Allow extra slack for Ray overhead (actor startup, network latency)
-        assert total_elapsed < 4.0, (
-            f"Total time {total_elapsed:.2f}s is too slow. Expected < 4s. "
+        # --- Property 4: not pathologically slow ---
+        assert total_elapsed < 5.0, (
+            f"Total time {total_elapsed:.2f}s is too slow. Expected < 5s. "
             f"This suggests unexpected blocking or overhead."
         )
 
-        # Cleanup
         for w in workers:
             w.stop()
 
     def test_shared_resource_limit_precise_capacity_enforcement(self, worker_mode):
-        """Test shared ResourceLimit enforces exact capacity with overlapping requests.
+        """Verify the hard capacity invariant: at most C tasks hold the resource at once.
 
-        What this test validates:
-        -------------------------
-        With capacity=3 and 6 tasks:
-        - Exactly 3 tasks should acquire immediately
-        - Exactly 3 tasks should wait for resources
-        - No more than 3 tasks should hold resources simultaneously at any point
+        Scenario:
+            - 6 separate workers share a ResourceLimit with capacity=3.
+            - Each task acquires 1 resource unit, holds for 1 second, releases.
+            - With capacity=3, only 3 tasks can hold the resource concurrently.
+            - The remaining 3 must block until a slot frees up.
 
-        Logical timing constraints (MUST hold regardless of execution mode):
-        1. Exactly 3 tasks MUST have wait_time < 0.2s (immediate acquisition)
-        2. Exactly 3 tasks MUST have wait_time >= 0.8s (waited for 1s hold - epsilon)
-        3. At any timestamp T, at most 3 tasks should be holding resources
+        Expected behaviour:
+            The 6 tasks split into roughly two waves of 3. Total elapsed is
+            ~2s. If limits are NOT shared, all 6 run concurrently and finish
+            in ~1s.
 
-        Difference from previous tests:
-        - Validates EXACT capacity (not just "some wait")
-        - Checks that no more than capacity tasks hold resources simultaneously
-        - Uses overlapping time windows to verify capacity enforcement
+        Assertions:
+            1. Capacity never exceeded -- reconstruct the grant/release
+               timeline and verify at most 3 tasks hold the resource at any
+               point.  This is the strongest possible check: it directly
+               validates the invariant that ResourceLimit is supposed to
+               enforce.
+            2. Total elapsed >= 1.5s -- proves that NOT all 6 tasks ran
+               concurrently. With capacity=3, at least ceil(6/3)=2 waves
+               are needed, each taking ~1s.
 
-        Implementation:
-        - Workers track request, grant, release timestamps
-        - Test constructs timeline of resource holdings
-        - Validates that at no point do more than capacity tasks hold resources
+        Why we do NOT check wave ordering here:
+            With capacity=3 and 6 tasks, staggered task scheduling (even
+            after warmup) can cause the 4th task to start and acquire the
+            resource shortly after the 1st task releases, while the 2nd
+            and 3rd tasks are still holding. Sorting tasks by grant-time
+            and calling the first 3 "Wave 1" and last 3 "Wave 2" creates
+            an artificial grouping that does not correspond to a real
+            concurrent wave. A "Wave 2" task can legitimately acquire
+            before the latest "Wave 1" task releases, as long as the
+            total concurrent count never exceeds 3. The timeline analysis
+            (assertion 1) is the correct check for this.
+
+        Why we do NOT check per-task wait_time:
+            Per-task ``wait_time`` (grant_time - request_time) depends on
+            when the actor starts executing the method, which varies due
+            to Ray/process scheduling jitter. A task that starts late may
+            have a near-zero wait_time despite limits being correctly
+            enforced, because by the time it requests the resource a slot
+            has already freed up. Total elapsed time and the timeline
+            capacity analysis are immune to this problem.
         """
         if worker_mode in ("sync", "asyncio"):
             pytest.skip("Sync and asyncio modes only support max_workers=1")
@@ -1088,6 +1138,9 @@ class TestSharedLimitAcquisitionTracking:
         class TrackingWorker(Worker):
             def __init__(self, worker_id: int):
                 self.worker_id = worker_id
+
+            def ping(self) -> bool:
+                return True
 
             def hold_resource(self, hold_time: float) -> dict:
                 """Acquire resource, hold for specified time, return timing info."""
@@ -1099,7 +1152,6 @@ class TestSharedLimitAcquisitionTracking:
                     grant_time = time.time()
                     wait_time = grant_time - request_time
 
-                    # Hold resource
                     time.sleep(hold_time)
                     release_time = time.time()
 
@@ -1111,14 +1163,12 @@ class TestSharedLimitAcquisitionTracking:
                         "wait_time": wait_time,
                     }
 
-        # Create shared LimitSet with capacity=3
         shared_limits = LimitSet(
             limits=[ResourceLimit(key="resource", capacity=3)],
             shared=True,
             mode=worker_mode,
         )
 
-        # Create 6 workers
         workers = []
         for i in range(6):
             if worker_mode == "thread":
@@ -1135,57 +1185,43 @@ class TestSharedLimitAcquisitionTracking:
                 )
             workers.append(w)
 
-        # Submit 6 tasks, each holding for 1 second
+        # Warm up: ensure all actors are initialized before timing begins.
+        for w in workers:
+            assert w.ping().result(timeout=30) is True
+
         start_time = time.time()
         futures = [w.hold_resource(1.0) for w in workers]
         results = [f.result(timeout=30) for f in futures]
         total_elapsed = time.time() - start_time
 
-        # Validate exact capacity enforcement
-        wait_times = [r["wait_time"] for r in results]
-
-        # Key validation: NOT all 6 tasks should acquire immediately
-        # If all 6 acquired in < 0.2s, limits are definitely not shared
-        all_immediate = all(wt < 0.2 for wt in wait_times)
-        assert not all_immediate, (
-            f"All 6 tasks acquired immediately (<0.2s), limits NOT shared! Wait times: {sorted(wait_times)}"
-        )
-
-        # Validate that at no point do more than capacity tasks hold resources
-        # Build timeline of holdings
+        # --- Property 1: capacity never exceeded (timeline analysis) ---
         events = []
         for r in results:
             events.append(("grant", r["grant_time"], r["worker_id"]))
             events.append(("release", r["release_time"], r["worker_id"]))
+        events.sort(key=lambda e: e[1])
 
-        events.sort(key=lambda e: e[1])  # Sort by timestamp
-
-        # Track concurrent holdings
         current_holdings = set()
         max_concurrent = 0
-
-        for event_type, timestamp, worker_id in events:
+        for event_type, _ts, worker_id in events:
             if event_type == "grant":
                 current_holdings.add(worker_id)
                 max_concurrent = max(max_concurrent, len(current_holdings))
-            else:  # release
+            else:
                 current_holdings.discard(worker_id)
 
-        # Max concurrent holdings should never exceed capacity
         assert max_concurrent <= 3, (
             f"Max concurrent holdings was {max_concurrent}, exceeds capacity=3! "
             f"This indicates a race condition in limit enforcement."
         )
 
-        # Total elapsed time validation: If limits NOT shared, all 6 would complete in ~1s
-        # With shared limits (capacity=3), should take ~2s (two waves)
-        # Key constraint: Total time MUST be > 1.5s (proves limits are shared)
+        # --- Property 2: total time proves limits are shared ---
         assert total_elapsed >= 1.5, (
-            f"Total time {total_elapsed:.2f}s is too fast. Expected >= 1.5s. "
-            f"If < 1.5s, all 6 tasks ran concurrently (limits NOT shared)."
+            f"Total time {total_elapsed:.2f}s is too fast. Expected >= 1.5s for two "
+            f"sequential 1s waves with capacity=3. If < 1.5s, all 6 tasks ran concurrently "
+            f"(limits NOT shared)."
         )
 
-        # Cleanup
         for w in workers:
             w.stop()
 
@@ -1223,6 +1259,9 @@ class TestSharedLimitAcquisitionTracking:
         class TrackingWorker(Worker):
             def __init__(self, worker_id: int):
                 self.worker_id = worker_id
+
+            def ping(self) -> bool:
+                return True
 
             def hold_resource(self, hold_time: float) -> dict:
                 """Acquire resource, hold for specified time, return timing info."""

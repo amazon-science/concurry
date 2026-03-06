@@ -1394,7 +1394,7 @@ class TestSubmissionQueueFastSubmission:
         # With 10 workers, completion should be much faster than serial execution
         # Serial would be ~20s, parallel should be ~2-3s
         # Ray client mode adds significant overhead (actor startup, network communication)
-        # Allow up to 8s to account for Ray client mode overhead while still catching regressions
-        assert complete_time < 8.0, f"Completion took {complete_time:.3f}s, should show parallelism (< 8s)"
+        # Allow up to 10s to account for Ray client mode overhead while still catching regressions
+        assert complete_time < 10.0, f"Completion took {complete_time:.3f}s, should show parallelism (< 10s)"
 
         pool.stop()

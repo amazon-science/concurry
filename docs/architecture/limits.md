@@ -2001,8 +2001,11 @@ pytest tests/core/limit/test_shared_limits.py::TestSharedLimitAcquisitionTrackin
 # Run specific test
 pytest tests/core/limit/test_shared_limits.py::TestSharedLimitAcquisitionTracking::test_shared_resource_limit_sequential_waves -v
 
-# Run with specific mode
-pytest tests/core/limit/test_shared_limits.py::TestSharedLimitAcquisitionTracking -v -k "ray"
+# Run only Ray shared-limit tests (using --execution-modes)
+pytest tests/core/limit/test_shared_limits.py -v --execution-modes=ray
+
+# Run only process shared-limit tests
+pytest tests/core/limit/test_shared_limits.py -v --execution-modes=process
 ```
 
 **Expected Results:**

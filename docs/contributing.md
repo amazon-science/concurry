@@ -37,11 +37,44 @@ pip install -e ".[all]"
 
 ## Running Tests
 
-Run the test suite with pytest:
+Run the full test suite with pytest:
 
 ```bash
 pytest --full-trace -rf tests/
 ```
+
+### Filtering by Execution Mode
+
+Tests run across multiple execution modes (sync, thread, process, asyncio, ray).
+Use `--execution-modes` to run only specific modes, which accepts any
+`ExecutionMode` alias:
+
+```bash
+# Run only single-process modes (fastest for quick iteration)
+pytest tests/ --execution-modes=sync,asyncio,thread
+
+# Run only process mode
+pytest tests/ --execution-modes=process
+
+# Run only Ray mode
+pytest tests/ --execution-modes=ray
+
+# Aliases work too (e.g. "proc" for process, "threads" for thread)
+pytest tests/ --execution-modes=proc,threads
+```
+
+When `--execution-modes` omits `ray`, the Ray cluster is never started, saving
+significant startup time during local development.
+
+### CI Workflow
+
+CI runs three parallel jobs, one per mode group:
+
+| Job | Modes | Purpose |
+|---|---|---|
+| `tests (single-process)` | sync, asyncio, thread | In-process execution |
+| `tests (multiprocess)` | process | Multiprocessing |
+| `tests (ray)` | ray | Distributed execution |
 
 ## Code Style
 

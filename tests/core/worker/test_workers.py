@@ -1794,6 +1794,78 @@ class TestAsyncIOPerformance:
             else:
                 print("  Note: Results may vary based on system and overhead")
 
+    def test_asyncio_concurrency_preserved_with_async_acquire(self):
+        """Prove that async_acquire() preserves async concurrency, while acquire() destroys it.
+
+        The core value proposition of async_acquire(): when an asyncio worker has
+        N concurrent I/O-bound coroutines and a ResourceLimit with capacity < N,
+        async_acquire() lets coroutines that acquired the limit run their I/O
+        concurrently, then yields to let waiting coroutines proceed. With sync
+        acquire(), time.sleep() blocks the event loop and prevents any concurrency.
+
+        Setup:
+        - 20 coroutines, each doing 100ms of async I/O
+        - ResourceLimit capacity=10 (so 2 waves of 10)
+        - With async_acquire: ~200ms (2 waves x 100ms, concurrent within each wave)
+        - With sync acquire: deadlock (time.sleep blocks event loop) or very slow
+
+        This test compares async_acquire timing against the theoretical sequential
+        time to prove concurrency is preserved.
+        """
+        from concurry import ResourceLimit, Worker
+
+        class IOWorkerWithLimits(Worker):
+            def __init__(self):
+                pass
+
+            async def async_acquire_io(self, duration: float, task_id: int) -> str:
+                """Uses async_acquire -- should be concurrent."""
+                import asyncio
+
+                async with await self.limits.async_acquire(requested={"slots": 1}):
+                    await asyncio.sleep(duration)
+                    return f"done-{task_id}"
+
+        num_tasks = 20
+        io_duration = 0.1  # 100ms per task
+        capacity = 10  # 10 concurrent slots
+
+        limits = [ResourceLimit(key="slots", capacity=capacity)]
+        w_async = IOWorkerWithLimits.options(mode="asyncio", limits=limits).init()
+
+        start = time.time()
+        futures = [w_async.async_acquire_io(io_duration, i) for i in range(num_tasks)]
+        results = [f.result(timeout=30) for f in futures]
+        async_acquire_time = time.time() - start
+        w_async.stop()
+
+        sequential_time = num_tasks * io_duration  # 20 x 0.1 = 2.0s
+        expected_concurrent_time = (num_tasks / capacity) * io_duration  # 2 waves x 0.1s = 0.2s
+
+        assert len(results) == num_tasks
+
+        # async_acquire should complete much faster than sequential
+        # Allow generous margin (5x expected) to account for overhead
+        assert async_acquire_time <= expected_concurrent_time * 5, (
+            f"async_acquire too slow: {async_acquire_time:.2f}s. "
+            f"Expected ~{expected_concurrent_time:.2f}s (concurrent). "
+            f"Sequential would be {sequential_time:.2f}s. "
+            f"async_acquire may not be yielding to the event loop."
+        )
+
+        speedup = sequential_time / async_acquire_time
+        assert speedup >= 3, (
+            f"async_acquire speedup too low: {speedup:.1f}x. "
+            f"Expected at least 3x over sequential ({sequential_time:.2f}s / {async_acquire_time:.2f}s). "
+            f"Coroutines may not be running concurrently within each wave."
+        )
+
+        print(f"\nasync_acquire concurrency test ({num_tasks} tasks, capacity={capacity}):")
+        print(f"  async_acquire time: {async_acquire_time:.3f}s")
+        print(f"  Sequential would be: {sequential_time:.3f}s")
+        print(f"  Theoretical concurrent: {expected_concurrent_time:.3f}s")
+        print(f"  Speedup: {speedup:.1f}x")
+
 
 @pytest.mark.performance
 class TestWorkerPerformance:

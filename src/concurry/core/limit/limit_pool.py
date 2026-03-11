@@ -236,6 +236,24 @@ class LimitPool(Typed):
         # Delegate to selected LimitSet
         return selected_limitset.acquire(requested=requested, timeout=timeout)
 
+    async def async_acquire(
+        self, requested: Optional[Dict[str, int]] = None, timeout: Optional[float] = None
+    ) -> LimitSetAcquisition:
+        """Async version of acquire(). Uses await asyncio.sleep() internally
+        to avoid blocking the asyncio event loop during polling.
+
+        Selects a LimitSet using load balancing, then delegates async acquisition.
+
+        Args:
+            requested: Dict mapping limit keys to requested amounts.
+            timeout: Maximum time to wait for acquisition in seconds.
+
+        Returns:
+            LimitSetAcquisition with config from selected LimitSet
+        """
+        selected_limitset = self._select_limit_set()
+        return await selected_limitset.async_acquire(requested=requested, timeout=timeout)
+
     def try_acquire(self, requested: Optional[Dict[str, int]] = None) -> LimitSetAcquisition:
         """Try to acquire from a selected LimitSet without blocking.
 

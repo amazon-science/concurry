@@ -1550,7 +1550,43 @@ def __setstate__(self, state):
 
 ## Gotchas and Limitations
 
-### 1. Limit Objects Are NOT Thread-Safe
+### 1. Async Event-Loop Deadlock with Synchronous `acquire()`
+
+**CRITICAL**: When using async worker methods (asyncio mode), `acquire()` will deadlock if the number of concurrent coroutines exceeds the limit capacity. Use `async_acquire()` instead.
+
+**The problem**: `acquire()` uses `time.sleep()` for polling, which blocks the entire asyncio event loop. When coroutine N+1 blocks the loop waiting for capacity, coroutines 1..N that are holding limits cannot complete their `await` calls and release capacity. This creates an irrecoverable deadlock.
+
+```
+Coroutines 1-5:  acquire() succeeds → await http_call() → BLOCKED (event loop frozen)
+Coroutine 6:     acquire() fails → time.sleep() → EVENT LOOP BLOCKED
+                 → Coroutines 1-5 can never complete → capacity never freed → DEADLOCK
+```
+
+**The fix**: `async_acquire()` replaces `time.sleep()` with `await asyncio.sleep()`, yielding control to the event loop so other coroutines can make progress.
+
+```python
+# ❌ DEADLOCKS when batch_size > capacity in async context:
+with self.limits.acquire(requested=usage) as acq:
+    result = await do_async_work()
+    acq.update(...)
+
+# ✅ No deadlock - event loop stays responsive:
+async with await self.limits.async_acquire(requested=usage) as acq:
+    result = await do_async_work()
+    acq.update(...)
+```
+
+**When to use which**:
+- `acquire()` — sync worker methods, thread workers, process workers, Ray task workers
+- `async_acquire()` — async worker methods running on an asyncio event loop
+
+**Design details**:
+- `threading.Lock` is retained (not replaced with `asyncio.Lock`) because multiple asyncio workers sharing one LimitSet may run on different event loop threads. `asyncio.Lock` is not thread-safe.
+- The lock is held only for the brief `_can_acquire_all()` + `_acquire_all()` check (microseconds), so holding it from async context is acceptable.
+- `LimitSetAcquisition` supports both `with` (sync) and `async with` (async) context managers. The `release()` method itself is synchronous and fast.
+- Cancellation via `asyncio.wait_for` or `task.cancel()` propagates `CancelledError` cleanly through `await asyncio.sleep()` without leaking limits.
+
+### 2. Limit Objects Are NOT Thread-Safe
 
 **CRITICAL**: Never use Limit objects directly from multiple threads without external locking.
 
@@ -1571,7 +1607,7 @@ def worker():
         pass
 ```
 
-### 2. RateLimit Requires Update
+### 3. RateLimit Requires Update
 
 **CRITICAL**: Must call `acq.update()` for RateLimits before context exit.
 
@@ -1600,7 +1636,7 @@ limits.acquire(requested={"tokens": 1500})  # Capacity is 1000 - can never fulfi
 - The warning helps identify incorrect usage tracking or unexpected consumption
 - Excess usage is naturally constrained by the limit's capacity
 
-### 3. Unknown Keys are Skipped with Warning
+### 4. Unknown Keys are Skipped with Warning
 
 **BEHAVIOR CHANGE**: Unknown limit keys in `requested` dict are now skipped with a warning instead of raising `ValueError`.
 
@@ -1626,7 +1662,7 @@ with limits.acquire(requested={"tokens": 100, "typo_key": 50}) as acq:
 
 **Gotcha**: If you intentionally want to fail when a key is missing, you'll now get a warning instead of an error. Check warnings in your logs or validate keys before acquisition if strict validation is needed.
 
-### 4. Mode Compatibility
+### 5. Mode Compatibility
 
 **CRITICAL**: LimitSet mode must match worker mode.
 
@@ -1645,7 +1681,7 @@ worker = Worker.options(mode="process", limits=process_limitset).init()
 - `process` uses `Manager.Lock()` (works across processes)
 - `ray` uses Ray actor (works across distributed workers)
 
-### 5. Shared vs Non-Shared
+### 6. Shared vs Non-Shared
 
 **GOTCHA**: `shared=False` only works with `mode="sync"`.
 
@@ -1659,7 +1695,7 @@ limitset = LimitSet(limits=[...], shared=False, mode="sync")
 
 **Why**: Non-shared means "no synchronization needed" → only safe for single-threaded sync mode.
 
-### 6. LimitPool String Indexing
+### 7. LimitPool String Indexing
 
 **GOTCHA**: `pool["key"]` does NOT work.
 
@@ -1679,7 +1715,7 @@ limit = limitset["tokens"]
 
 **Why**: Different LimitSets may have different limit keys. Ambiguous which LimitSet to query.
 
-### 7. Config Immutability
+### 8. Config Immutability
 
 **GOTCHA**: `acquisition.config` is a copy, modifying it doesn't affect LimitSet.
 
@@ -1694,7 +1730,7 @@ print(limitset.config["region"])  # Still "us-east-1"
 
 **Why**: Config is copied during acquisition to prevent mutations. This is intentional for thread-safety.
 
-### 8. Empty LimitSet Still Requires Context Manager
+### 9. Empty LimitSet Still Requires Context Manager
 
 **GOTCHA**: Even empty LimitSet must use context manager or manual release.
 
@@ -1712,7 +1748,7 @@ with empty_limitset.acquire():
 
 **Why**: Consistent API, even if empty LimitSet is no-op.
 
-### 9. Partial Acquisition Automatic Inclusion
+### 10. Partial Acquisition Automatic Inclusion
 
 **GOTCHA**: CallLimit/ResourceLimit automatically included even if not requested.
 
@@ -1745,7 +1781,7 @@ with limits.acquire(requested={"call_count": 10, "tokens": 1000}) as acq:
     })
 ```
 
-### 10. Serialization of LimitPool
+### 11. Serialization of LimitPool
 
 **GOTCHA**: LimitPool with RoundRobinBalancer contains lock, but pickling works via custom methods.
 
@@ -1759,7 +1795,7 @@ unpickled = pickle.loads(pickled)
 
 **But**: If you subclass LimitPool and add non-serializable state, you must handle it in `__getstate__` / `__setstate__`.
 
-### 11. Worker Pools Get Different worker_index
+### 12. Worker Pools Get Different worker_index
 
 **GOTCHA**: Each worker in pool gets different `worker_index`.
 
@@ -1778,7 +1814,7 @@ pool = Worker.options(
 
 **Why**: Staggers round-robin starting points to reduce contention.
 
-### 12. Multiprocess/Ray Shared State Overhead
+### 13. Multiprocess/Ray Shared State Overhead
 
 **GOTCHA**: `MultiprocessSharedLimitSet` and `RaySharedLimitSet` are 10-100x slower than `InMemorySharedLimitSet`.
 
@@ -1786,7 +1822,7 @@ pool = Worker.options(
 
 **Mitigation**: Use LimitPool to reduce contention on single LimitSet.
 
-### 13. RateLimit Algorithms Have Different Refund Behavior
+### 14. RateLimit Algorithms Have Different Refund Behavior
 
 **GOTCHA**: Not all algorithms support refunding unused tokens.
 
@@ -1808,7 +1844,7 @@ with limitset.acquire(requested={"tokens": 100}) as acq:
 
 **Why**: Algorithm-specific implementation. TokenBucket/GCRA continuously refill; others don't.
 
-### 14. Timeout Only Applies to Acquisition
+### 15. Timeout Only Applies to Acquisition
 
 **GOTCHA**: `timeout` parameter only applies to `acquire()`, not to work inside context manager.
 
@@ -1821,7 +1857,7 @@ with limitset.acquire(requested={"tokens": 100}, timeout=5.0) as acq:
 
 **Why**: Timeout is for blocking on limits, not for user code execution.
 
-### 15. try_acquire Still Needs Context Manager
+### 16. try_acquire Still Needs Context Manager
 
 **GOTCHA**: Even failed `try_acquire` should use context manager (or manual check).
 

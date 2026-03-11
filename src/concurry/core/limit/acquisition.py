@@ -313,3 +313,11 @@ class LimitSetAcquisition:
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Exit context manager and release all acquisitions."""
         self.release()
+
+    async def __aenter__(self) -> "LimitSetAcquisition":
+        """Enter async context manager."""
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Exit async context manager and release all acquisitions."""
+        self.release()

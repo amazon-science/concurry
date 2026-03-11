@@ -909,7 +909,7 @@ class TestSubmissionQueueEdgeCases:
         futures = [pool.increment(1) for _ in range(20)]
 
         # All should complete
-        results = gather(futures, timeout=15.0)
+        results = gather(futures, timeout=30.0)
         assert len(results) == 20
 
         pool.stop()

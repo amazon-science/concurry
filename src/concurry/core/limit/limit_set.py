@@ -28,6 +28,7 @@ Shared State Management:
         - This ensures all workers check against the SAME shared state, not local copies
 """
 
+import asyncio
 import logging
 import threading
 import time
@@ -72,6 +73,22 @@ class BaseLimitSet(ABC):
         self, requested: Optional[Dict[str, int]] = None, timeout: Optional[float] = None
     ) -> LimitSetAcquisition:
         """Acquire all limits atomically, blocking until available.
+
+        Args:
+            requested: Mapping of limit key to amount requested
+            timeout: Maximum time to wait for all limits
+
+        Returns:
+            LimitSetAcquisition for tracking usage
+        """
+        pass
+
+    @abstractmethod
+    async def async_acquire(
+        self, requested: Optional[Dict[str, int]] = None, timeout: Optional[float] = None
+    ) -> LimitSetAcquisition:
+        """Async version of acquire(). Uses await asyncio.sleep() instead of time.sleep()
+        to avoid blocking the asyncio event loop during polling.
 
         Args:
             requested: Mapping of limit key to amount requested
@@ -357,6 +374,14 @@ class NoOpLimitSet(BaseLimitSet):
         """No-op acquire - always succeeds immediately."""
         return LimitSetAcquisition(limit_set=self, acquisitions={}, successful=True, config=self.config)
 
+    async def async_acquire(
+        self,
+        requested: Optional[Dict[str, int]] = None,
+        timeout: Optional[float] = None,
+    ) -> LimitSetAcquisition:
+        """No-op async acquire - always succeeds immediately."""
+        return LimitSetAcquisition(limit_set=self, acquisitions={}, successful=True, config=self.config)
+
     def try_acquire(self, requested: Optional[Dict[str, int]] = None) -> LimitSetAcquisition:
         """No-op try_acquire - always succeeds immediately."""
         return LimitSetAcquisition(limit_set=self, acquisitions={}, successful=True, config=self.config)
@@ -426,6 +451,35 @@ class InMemorySharedLimitSet(BaseLimitSet):
                     raise TimeoutError(f"Failed to acquire all limits within {timeout}s")
 
             time.sleep(sleep_time)
+
+    async def async_acquire(
+        self,
+        requested: Optional[Dict[str, int]] = None,
+        timeout: Optional[float] = None,
+    ) -> LimitSetAcquisition:
+        """Async version of acquire(). Uses await asyncio.sleep() instead of
+        time.sleep() to avoid blocking the asyncio event loop during polling."""
+        from ...config import global_config
+
+        requested_amounts = self._build_requested_amounts(requested)
+        start_time = time.time()
+        local_config = global_config.clone()
+        sleep_time = local_config.defaults.limit_set_acquire_sleep
+
+        while True:
+            with self._lock:
+                if self._can_acquire_all(requested_amounts):
+                    acquisitions = self._acquire_all(requested_amounts)
+                    return LimitSetAcquisition(
+                        limit_set=self, acquisitions=acquisitions, successful=True, config=self.config
+                    )
+
+            if timeout is not None:
+                elapsed = time.time() - start_time
+                if elapsed >= timeout:
+                    raise TimeoutError(f"Failed to acquire all limits within {timeout}s")
+
+            await asyncio.sleep(sleep_time)
 
     def try_acquire(self, requested: Optional[Dict[str, int]] = None) -> LimitSetAcquisition:
         """Try to acquire all limits atomically without blocking."""
@@ -712,6 +766,34 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
                     raise TimeoutError(f"Failed to acquire all limits within {timeout}s")
 
             time.sleep(sleep_time)
+
+    async def async_acquire(
+        self, requested: Optional[Dict[str, int]] = None, timeout: Optional[float] = None
+    ) -> LimitSetAcquisition:
+        """Async version of acquire(). Uses await asyncio.sleep() instead of
+        time.sleep() to avoid blocking the asyncio event loop during polling."""
+        from ...config import global_config
+
+        requested_amounts = self._build_requested_amounts(requested)
+        start_time = time.time()
+        local_config = global_config.clone()
+        sleep_time = local_config.defaults.limit_set_acquire_sleep
+
+        while True:
+            with self._lock:
+                if self._can_acquire_all(requested_amounts):
+                    acquisitions = self._acquire_all(requested_amounts)
+                    if acquisitions is not None:
+                        return LimitSetAcquisition(
+                            limit_set=self, acquisitions=acquisitions, successful=True, config=self.config
+                        )
+
+            if timeout is not None:
+                elapsed = time.time() - start_time
+                if elapsed >= timeout:
+                    raise TimeoutError(f"Failed to acquire all limits within {timeout}s")
+
+            await asyncio.sleep(sleep_time)
 
     def try_acquire(self, requested: Optional[Dict[str, int]] = None) -> LimitSetAcquisition:
         """Try to acquire all limits atomically without blocking."""
@@ -1188,6 +1270,39 @@ class RaySharedLimitSet(BaseLimitSet):
                     raise TimeoutError(f"Failed to acquire all limits within {timeout}s")
 
             time.sleep(sleep_time)
+
+    async def async_acquire(
+        self, requested: Optional[Dict[str, int]] = None, timeout: Optional[float] = None
+    ) -> LimitSetAcquisition:
+        """Async version of acquire(). Uses await asyncio.sleep() instead of
+        time.sleep() to avoid blocking the asyncio event loop during polling."""
+        from ...config import global_config
+
+        requested_amounts = self._build_requested_amounts(requested)
+        start_time = time.time()
+        local_config = global_config.clone()
+        sleep_time = local_config.defaults.limit_set_acquire_sleep
+
+        import ray
+
+        while True:
+            acquired = ray.get(self._actor.acquire_all.remote(requested_amounts))
+            if acquired:
+                acquisitions = {}
+                for key, amount in requested_amounts.items():
+                    limit = self._limits_by_key[key]
+                    acquisitions[key] = Acquisition(limit=limit, requested=amount, successful=True)
+
+                return LimitSetAcquisition(
+                    limit_set=self, acquisitions=acquisitions, successful=True, config=self.config
+                )
+
+            if timeout is not None:
+                elapsed = time.time() - start_time
+                if elapsed >= timeout:
+                    raise TimeoutError(f"Failed to acquire all limits within {timeout}s")
+
+            await asyncio.sleep(sleep_time)
 
     def try_acquire(self, requested: Optional[Dict[str, int]] = None) -> LimitSetAcquisition:
         """Try to acquire all limits atomically without blocking."""

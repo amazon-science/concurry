@@ -7,30 +7,204 @@ alwaysApply: true
 ## Code Quality Standards
 
 ### No Backward Compatibility
+
+This project has a single developer/consumer. Backward compatibility is overhead, not a feature.
+
 - **Never maintain backward compatibility** with deprecated patterns or old APIs
 - When making breaking changes, update all code and tests immediately
 - Remove deprecated code paths rather than maintaining them
 - Focus on the best current design, not historical compatibility
+- **Do NOT insert deprecation warnings**, shim layers, compatibility wrappers, or version-checking fallbacks
+- **Do NOT rename old functions** to `_legacy_*` or `_compat_*` — delete them outright
+
+LLMs trained on public codebases reflexively produce backward-compatibility scaffolding (deprecation decorators, `warnings.warn(...)`, adapter classes). This is the correct pattern for libraries with thousands of consumers; it is pure noise here.
 
 ### Type Hints
 - **Always include type hints** for all function parameters and return values
-- Use proper type annotations from `typing` module (e.g., `List`, `Dict`, `Optional`, `Union`)
+- **Always use capitalized `typing` imports**: `List`, `Dict`, `Set`, `Tuple`, `Optional`, `Union`, `FrozenSet`
+- Do NOT use lowercase built-in generics (`list[str]`, `dict[str, int]`) or pipe unions (`str | None`) even though Python 3.10+ supports them
+- **Rationale:** Capitalized typing imports are visually distinct and grep-able. `List` is unambiguously a type annotation; `list` could be a variable name, a builtin call, or a type hint. This makes bulk find-and-replace across files reliable, and makes it immediately clear when reading code that a line involves type annotations.
+- Use `-> None` for functions that return no value (side-effect functions, lifecycle hooks like `post_initialize`, `on_start`, `on_stop`)
+- Use `-> NoReturn` ONLY for functions that genuinely never return (unconditional `raise`, `sys.exit()`, infinite loops)
 - Include type hints for class attributes and instance variables
-- Use `NoReturn` for functions that don't return (e.g., lifecycle hooks)
-- Never use bare `Any` without a good reason - prefer specific types
+- **Prefer `morphic.Typed` over `TypedDict`** for structured data. `TypedDict` is a fallback for cases where `Typed` cannot be used (e.g., dicts that must remain plain `dict` for JSON serialization to a third-party API, or when the consuming code expects a raw dict, not a model). When you control both producer and consumer, use `Typed`.
+- **`Protocol` is for function parameters and call-site typing, NOT for Pydantic/Typed field types.** Pydantic v2 validates Protocol fields with `isinstance()` at construction time, which (a) rejects `None` for non-Optional fields even in tests that don't exercise the field, and (b) fails on proxy objects that use `__getattr__`-based dynamic dispatch (e.g., Concurry `Worker` proxies) because Python's `isinstance` Protocol check inspects the type's `__dict__` and MRO, not dynamic attributes. Declare such fields as `Any` and document the duck-typed contract in a comment referencing the Protocol class. The Protocol provides type safety at *call sites* (IDE autocomplete, static analysis); Pydantic field validation is the wrong enforcement point.
+
+#### Strict `Any` Ban (CRITICAL)
+
+**`Any` is as good as no typing.** Using `Any` removes the entire reason to use Morphic Typed, Pydantic, and type hints. It tells neither the reader nor the type checker what the value actually is. LLM coding assistants produce `Any` reflexively because it silences type errors without solving them.
+
+**`Any` is ONLY acceptable in these specific situations:**
+
+| Situation | Why `Any` is acceptable | Example |
+|---|---|---|
+| **Pydantic/Typed fields for duck-typed workers** | Pydantic's `isinstance()` validation rejects Concurry `WorkerProxy` proxy objects; the Protocol cannot be used as a field type. | `worker: Any  # WorkerProtocol; see types.py` |
+| **`_serialize_value`-style functions** | Serialization functions that genuinely accept any Python object. | `def serialize(value: Any) -> Any:` |
+| **`Dict[str, Any]` for genuinely heterogeneous dicts** | When the dict's values are mixed types by design (JSON payloads, config dicts, serialized output). | `metadata: Dict[str, Any]` |
+| **`**kwargs: Any`** | Catch-all for pass-through kwargs to parent classes or third-party libraries. | `**kwargs: Any` |
+| **`PrivateAttr` for opaque runtime handles** | Locks, queues, processes, event loops — objects from external libraries whose type is complex or private. | `_lock: Any = PrivateAttr()` |
+
+**`Any` is NEVER acceptable in these situations:**
+
+| Situation | What to use instead | Example fix |
+|---|---|---|
+| **Function parameters where you know the type** | Use the actual type. | `task: Task` not `task: Any` |
+| **Return types where you know the type** | Use the actual type. | `-> List[Future]` not `-> List[Any]` |
+| **List/Dict generic parameters** | Spell out the element type. | `List[WorkerProxy]` not `List[Any]` |
+| **Forward references within the same package** | Use string annotations or fix import ordering. See the Forward References rule below. | `result: "WorkerResult"` not `result: Any` |
+
+**The test is simple:** when you write `Any`, ask: **"Do I know what type this actually is at runtime?"** If yes, write that type. If you are writing `Any` to avoid an import or to silence a type error, fix the import or the type error instead.
+
+❌ Bad (known types hidden behind `Any`):
+```python
+def submit_batch(
+    self,
+    tasks: List[Any],              # ❌ These are Task objects
+    callback: Optional[Any] = None,  # ❌ This is Callable[[Result], None]
+) -> List[Any]:                    # ❌ These are Future objects
+```
+
+✅ Good (actual types everywhere they are known):
+```python
+def submit_batch(
+    self,
+    tasks: List[Task],
+    callback: Optional[Callable[[Result], None]] = None,
+) -> List[Future]:
+```
+
+#### No `Any` for Forward References (CRITICAL)
+
+**Never use `Any` as a workaround for forward references.** This defeats the entire purpose of Morphic Typed — if the field is typed `Any`, Pydantic cannot validate it, the IDE cannot autocomplete it, and the reader does not know what it holds.
+
+**Forward references within the same file:** Use a string annotation (`"ClassName"`) or add `from __future__ import annotations` at the top of the file.
+
+**Forward references across files:** Fix the import ordering. In a well-structured package, there should be no circular imports. The dependency graph flows one way. If module A needs a type from module B and module B needs a type from module A, the modules need restructuring — either extract the shared type into a lower-level module, or merge the files.
+
+❌ Bad (using `Any` to avoid importing a type from another module):
+```python
+class WorkerPool(Typed):
+    balancer: Any  # LoadBalancer (Any required: forward ref)
+    workers: List[Any]  # List[WorkerProxy] (Any: forward ref)
+```
+
+✅ Good (import the type and use it directly):
+```python
+from concurry.core.limit.balancer import LoadBalancer
+from concurry.core.worker.proxy import WorkerProxy
+
+class WorkerPool(Typed):
+    balancer: LoadBalancer
+    workers: List[WorkerProxy]
+```
+
+✅ Also good (string annotation when the type is defined later in the same file):
+```python
+class WorkerPool(Typed):
+    balancer: "LoadBalancer"
+```
+
+**If adding the import creates a circular dependency, that is a bug in the module structure.** Fix the structure (extract the shared type into a leaf module) instead of papering over it with `Any`.
+
+#### Type-Annotate All Intermediate Variables (CRITICAL)
+
+**Every local variable MUST have a type annotation the first time it is assigned.** If the variable later changes type (which should be rare), annotate the re-assignment. This applies even when the type is "obvious" from the right-hand side.
+
+**Why this matters:**
+
+1. **Readability.** A reader scanning a 200-line function can see `futures: List[Future] = []` and immediately know the shape. Without the annotation, they must trace through the loop body to figure out what gets put into `futures`.
+2. **Refactoring safety.** When you change the return type of a called function, annotated variables produce immediate type errors at every downstream usage. Unannotated variables silently propagate the wrong type.
+3. **LLM code generation.** When an LLM reads your function to extend it, explicit types on every variable tell it exactly what data is available. Without annotations, it guesses — and guesses wrong.
+
+❌ Bad (no annotations on intermediates):
+```python
+workers = [self._create_worker(i) for i in range(count)]
+results = {}
+pending = set()
+
+for future in completed:
+    result = future.result()
+```
+
+✅ Good (every variable annotated at first assignment):
+```python
+workers: List[WorkerProxy] = [self._create_worker(i) for i in range(count)]
+results: Dict[str, Result] = {}
+pending: Set[Future] = set()
+
+for future in completed:
+    result: Result = future.result()
+```
+
+**Loop variables** in `for` loops should be annotated when the iterable's element type is not obvious:
+
+```python
+# Obvious (iterating a List[WorkerProxy]) — annotation optional but encouraged:
+for worker in self._workers:
+    ...
+
+# Not obvious (iterating dict items, zip, enumerate) — annotation required:
+for worker_id, proxy in self._proxy_map.items():
+    worker_id: str
+    proxy: WorkerProxy
+    ...
+```
+
+**This rule has no exceptions.** Annotate every intermediate variable. The cost is a few extra characters per line. The benefit is that every function reads like a specification of the data flowing through it.
+
+❌ Bad (lowercase generics, pipe unions):
+```python
+def process(items: list[str], config: dict[str, int] | None = None) -> str | None:
+    pass
+```
+
+✅ Good (capitalized typing imports):
+```python
+from typing import List, Dict, Optional
+
+def process(items: List[str], config: Optional[Dict[str, int]] = None) -> Optional[str]:
+    pass
+```
+
+❌ Bad (NoReturn misuse):
+```python
+from typing import NoReturn
+
+def on_start(self) -> NoReturn:  # ❌ This function returns normally!
+    self._setup_resources()
+```
+
+✅ Good:
+```python
+def on_start(self) -> None:  # Returns normally, no value
+    self._setup_resources()
+
+def fatal_error(msg: str) -> NoReturn:  # Genuinely never returns
+    raise RuntimeError(msg)
+```
 
 ### Explicit Checks
 
-#### Collection Emptiness
+#### Collection Emptiness (DEVIATES FROM PEP 8 — INTENTIONAL)
 - **Never use `not x` to check if a collection is empty**
 - **Always use `len(x) == 0`** for emptiness checks
 - **Use `len(x) > 0`** for non-empty checks
+
+**Rationale:** This rule intentionally deviates from PEP 8 and the Google Python Style Guide, both of which recommend `if not seq:`. We enforce `len(x)` for three reasons:
+
+1. **`len()` signals container type.** `len(x)` only works on sized containers. `not x` works on anything with `__bool__`, including `False`, `0`, `None`, and `""`. Writing `len(x)` communicates "x is a collection" in a way that `not x` does not. `len(False)` raises `TypeError` — that is a *feature*, not a bug, because it catches type confusion at the call site.
+2. **Truthiness conflates distinct concepts.** `not x` is true for `None`, `0`, `False`, `""`, `[]`, `{}`, and `set()`. These are semantically different. In a concurrency library that handles diverse user-provided types across thread/process/ray boundaries, treating emptiness and falsiness as the same concept produces subtle bugs.
+3. **Uniform behavior across collection types.** NumPy arrays and Pandas DataFrames raise `ValueError` when cast to bool if they have more than one element. `len()` works uniformly across all sized containers.
+
+**Linter suppression:** Disable Pylint C1802 (`use-implicit-booleaness-not-len`) and Ruff PLC1802 for this project.
 
 ❌ Bad:
 ```python
 if not my_list:
     pass
 if my_dict:
+    pass
+if not futures:
     pass
 ```
 
@@ -40,17 +214,24 @@ if len(my_list) == 0:
     pass
 if len(my_dict) > 0:
     pass
+if len(futures) == 0:
+    pass
 ```
 
 #### None Checks
-- **Never check None using falsiness** (e.g., `not x`, `if x`)
-- **Always use explicit `is None` or `is not None`**
+- When checking whether a variable is `None`: **always use `is None` or `is not None`**
+- **Never use `not x` or `if x` as a proxy for None checking** — `0`, `""`, `[]`, and `False` are valid non-None values that would be incorrectly treated as None
+- This is PEP 8, Google Python Style Guide, and Flake8 E711/E712 — universally agreed upon
+
+**Why `is` not `==`:** `None` is a singleton. `is` tests object identity (is this the exact same object?), which is always correct. `==` tests equality, which can be overridden by `__eq__` methods and produce surprising results with custom objects.
 
 ❌ Bad:
 ```python
-if not value:
+if not value:      # ❌ Catches 0, "", [], False — not just None
     pass
-if value:
+if value:          # ❌ Misses 0, "", [], False as valid non-None
+    pass
+if value == None:  # ❌ Uses equality, not identity
     pass
 ```
 
@@ -63,22 +244,496 @@ if value is not None:
 ```
 
 ### Code Style
-- Follow PEP 8 style guidelines
-- Use descriptive variable names
-- Keep functions focused and single-purpose
-- Add comprehensive docstrings for all public APIs
+- Follow PEP 8 style guidelines (enforced by Ruff)
+- Use descriptive variable names: `timeout_seconds` not `t`, `worker_count` not `n`
+- Boolean variables and functions: prefix with `is_`, `has_`, `can_`, `should_`
+- Keep functions focused and single-purpose (Single Responsibility Principle)
+- Add comprehensive docstrings for all public APIs (Google style with Args/Returns/Raises)
 - Include usage examples in docstrings for complex functionality
+
+#### Guard Clauses and Early Returns
+
+Reduce nesting by checking preconditions first and returning/raising early. This keeps the happy path at low indentation and makes control flow obvious.
+
+❌ Bad (deeply nested):
+```python
+def process_task(self, task: Task) -> Result:
+    if task is not None:
+        if task.is_valid():
+            if self._is_running:
+                return self._execute(task)
+            else:
+                raise WorkerStoppedError()
+        else:
+            raise InvalidTaskError()
+    else:
+        raise ValueError("task is None")
+```
+
+✅ Good (guard clauses):
+```python
+def process_task(self, task: Task) -> Result:
+    if task is None:
+        raise ValueError("task is None")
+    if not task.is_valid():
+        raise InvalidTaskError()
+    if not self._is_running:
+        raise WorkerStoppedError()
+    return self._execute(task)
+```
+
+#### Exhaustive Dispatch: `if-elif-else` with a Raising `else`
+
+When a variable has a **closed set of valid values** and you are dispatching behavior based on it, always use a full `if-elif-else` ladder where the `else` branch raises an exception. This makes two things immediately clear to the reader: (a) exactly which values are handled, and (b) that no value falls through silently.
+
+Contrast this with a **feature flag** (a boolean or optional condition that enables/disables a behavior). Feature flags correctly use a bare `if` with no `else`, because the "else" case is "do nothing, proceed normally" — not an error.
+
+**Closed-set dispatch — ALWAYS use `if-elif-else` with raising `else`:**
+
+❌ Bad (validate-then-dispatch — reader must remember the set of valid values):
+```python
+algorithm: str = config.get("load_balancing", "round_robin")
+if algorithm not in ("round_robin", "least_loaded", "random"):
+    raise ValueError(f"Unknown algorithm={algorithm!r}")
+
+if algorithm == "round_robin":
+    return RoundRobinBalancer(...)
+if algorithm == "least_loaded":
+    return LeastLoadedBalancer(...)
+return RandomBalancer(...)  # ← reader must infer this is the "random" case
+```
+
+✅ Good (exhaustive dispatch — every case is explicit, invalid values caught):
+```python
+if algorithm == "round_robin":
+    return RoundRobinBalancer(...)
+elif algorithm == "least_loaded":
+    return LeastLoadedBalancer(...)
+elif algorithm == "random":
+    return RandomBalancer(...)
+else:
+    raise ValueError(
+        f"Unknown load_balancing algorithm={algorithm!r}. "
+        f"Must be 'round_robin', 'least_loaded', or 'random'."
+    )
+```
+
+**Why the `else` matters:** Without it, adding a fourth algorithm value later silently falls through to the last branch. With `else: raise`, the new value is caught immediately. This is the textual equivalent of a `match/case` with exhaustiveness checking.
+
+**Feature flag — bare `if` is correct:**
+
+✅ Good (optional behavior, not a dispatch):
+```python
+if self.enable_metrics:
+    self._metrics_collector.record(elapsed_ms)
+```
+
+Here, the `if` block enables an optional feature. There is no `else` because the alternative is "don't record metrics" — that is a valid default, not an error. An `else` branch would be empty noise.
+
+**Decision rule:** Ask "is the `else` case an error, or is it 'do nothing'?"
+- **Error** (closed set dispatch) → `if-elif-else` with raising `else`
+- **Do nothing** (feature flag) → bare `if`, no `else`
+
+#### Naming Conventions
+
+- `snake_case` for functions, methods, variables, modules
+- `CamelCase` for classes
+- `UPPER_SNAKE_CASE` for module-level constants
+- Prefix private attributes with `_`: `self._internal_state`
+- Name by intent, not implementation: `failed_futures` not `bad_list`
+- Include units where ambiguous: `timeout_seconds`, `max_retries`, `delay_ms`
+- Avoid abbreviations: `configuration` not `cfg`, `response` not `resp`, `message` not `msg`
+
+#### String Formatting
+
+- **Always use f-strings** (Python 3.6+), not `.format()` or `%` formatting
+- f-strings are faster, more readable, and less error-prone
+
+❌ Bad:
+```python
+log.info("Worker {} started with {} tasks".format(worker_id, task_count))
+log.info("Worker %s started with %d tasks" % (worker_id, task_count))
+```
+
+✅ Good:
+```python
+log.info(f"Worker {worker_id} started with {task_count} tasks")
+```
+
+#### Never Truncate String Content in Logs or Outputs
+
+**Never slice or truncate strings when logging, printing, or writing output.** Show the full content, always. This is a critical rule, not a style preference. It has **zero exceptions**.
+
+LLM coding assistants reflexively insert truncation guards like `text[:200] + "..."` because their training data is full of web applications where long strings must be clipped for UI display. In library and infrastructure code, this is actively harmful and absolutely not allowed. If a string is worth logging, it is worth showing in full. Truncation hides the exact data needed for debugging and makes failures irreproducible.
+
+**Why truncation is never appropriate:**
+
+1. **Debugging requires full context.** When a worker fails, the error message, the input that caused it, and the stack trace must be complete. A truncated error message is useless. A truncated input means you cannot reproduce the failure. A truncated retry log means you cannot diagnose why the retry strategy did not recover.
+2. **Disk is free; debugging time is not.** A log line that is 2000 characters instead of 200 costs an extra 1.8 KB on disk. A debugging session caused by truncated data costs hours.
+3. **It is the caller's job to filter, not the library's job to truncate.** Concurry is a library consumed by other codebases. If Concurry silently truncates content in its logs, error messages, or worker outputs, every consumer inherits that data loss with no way to recover it. The library must never silently discard content.
+4. **Concurrency bugs are especially hard to reproduce.** Race conditions, deadlocks, and timing-dependent failures are the hardest bugs in this codebase. When they occur, the logged state at the moment of failure is often the only evidence. Truncating that evidence is unacceptable.
+
+❌ Bad (truncation in logging):
+```python
+log.info(f"Task input: {task_data[:100]}...")
+log.error(f"Error (truncated): {error_msg[:200]}")
+log.warning(f"Worker state: {repr(state)[:500]}")
+```
+
+✅ Good (full content, always):
+```python
+log.info(f"Task input: {task_data}")
+log.error(f"Error: {error_msg}")
+log.warning(f"Worker state: {repr(state)}")
+```
+
+**This rule has zero exceptions.** If a particular output is too verbose for the console during normal runs, control it with the verbosity level — do not truncate the content itself.
+
+#### Import Ordering
+
+Follow PEP 8 / isort convention. Three groups separated by blank lines:
+
+```python
+# 1. Standard library
+import os
+import time
+from typing import List, Optional
+
+# 2. Third-party
+import ray
+
+# 3. Local/project
+from concurry.config import global_config
+from concurry.core.worker import Worker
+```
+
+#### All Imports at the Top of the File (No Inline Imports)
+
+**Every import statement MUST go at the top of the file.** Never place `import` or `from ... import` inside a function, method, or class body.
+
+LLM coding assistants habitually produce inline imports. They do this because they generate code incrementally and inserting an import at the top of a file they are editing mid-function is inconvenient for them. This is an LLM workflow limitation, not a valid coding practice. The result is imports scattered throughout the file: `from datetime import datetime` appears at the top AND inside a method 1400 lines later, `import json` shows up in three different functions, and `import re` is buried inside a parser. This makes the dependency surface of the module invisible — you cannot glance at the top of the file and know what it depends on.
+
+**Why inline imports are harmful:**
+
+1. **Hidden dependencies.** The top-level import block is the module's manifest of external dependencies. An import buried in line 800 is invisible when reviewing the file header, when running dependency analysis tools, and when auditing for circular imports.
+2. **Redundant re-imports.** Python caches modules in `sys.modules` so repeated imports are cheap, but they are visual noise. When `from datetime import datetime` appears at line 10 AND line 800, a reader does not know whether the second import is redundant or whether it was added because the first was removed at some point. It creates ambiguity where none should exist.
+3. **False signal about import cost.** Inline imports in mainstream Python codebases signal "this import is expensive or optional." When you put `import torch` inside a function, a reader infers "we only want to pay the torch import cost if this function is called." Placing `from datetime import datetime` inline sends the same signal about a module that takes microseconds to import — it is a false alarm that wastes the reader's attention.
+4. **Circular import workarounds that should not exist.** If an inline import exists to break a circular import, the circular dependency is the bug. Fix the module structure instead of hiding the cycle inside a function body.
+
+❌ Bad (inline import of a standard library module):
+```python
+import asyncio  # Already at top of file!
+
+class ThreadWorkerProxy(WorkerProxy):
+    def _start_result_thread(self):
+        import asyncio  # ❌ Redundant inline import
+        loop = asyncio.new_event_loop()
+```
+
+❌ Bad (inline import of a project module):
+```python
+def _create_balancer(self):
+    from concurry.core.limit.balancer import RoundRobinBalancer  # ❌ Inline project import
+    return RoundRobinBalancer(self._workers)
+```
+
+❌ Bad (inline import of a third-party module):
+```python
+def _serialize_state(self):
+    import json  # ❌ stdlib, should be at top
+    return json.dumps(self._state)
+```
+
+✅ Good (all imports at the top):
+```python
+import asyncio
+import json
+import os
+from typing import Any, Dict, List, Optional
+
+import ray
+
+from concurry.config import global_config
+from concurry.core.limit.balancer import RoundRobinBalancer
+```
+
+**The only two exceptions where inline imports are acceptable:**
+
+1. **Concurry `Worker` methods and `@task` functions** that may be serialized and sent to a Ray cluster. Ray serializes the function bytecode and executes it in a remote process where the module's top-level imports may not be available. In this case, the import MUST be inside the function so it runs in the remote context. Mark these with a comment:
+```python
+class MyWorker(Worker):
+    def process(self, data):
+        # Inline import required: Worker methods execute in Ray remote context
+        import numpy as np
+        return np.mean(data)
+```
+
+2. **Truly optional dependencies** that should not cause an import error when the module is loaded. Use `morphic.optional_dependency` for these — never a bare inline `import`:
+```python
+from morphic.imports import optional_dependency
+
+with optional_dependency("ray", error="ignore"):
+    import ray
+    RAY_AVAILABLE = True
+```
+
+**If you see an inline import that does not fall into one of these two categories, move it to the top of the file.**
 
 ### Testing
 - Write comprehensive test coverage for all features
 - Update tests immediately when making breaking changes
-- Test both success and failure cases
-- Include edge cases and error conditions
-- Use descriptive test names that explain what is being tested
+- Test both success and failure cases (use `pytest.raises` for expected exceptions)
+- Include edge cases and error conditions (empty inputs, `None` values, boundary values, concurrent access)
+- Use descriptive test names: `test_worker_stop_during_active_submission_cancels_pending_futures`
+- Follow the AAA pattern: Arrange (setup), Act (call), Assert (verify)
+- Use `@pytest.mark.parametrize` to cover multiple scenarios from a single test function
+- Never catch and suppress test failures — fix the code or the test
 
-### Documentation
+### Fail Fast
 
-**CRITICAL**: See [documentation-practices.mdc](mdc:.cursor/rules/documentation-practices.mdc) for comprehensive documentation rules.
+Detect invalid state at the earliest possible point. Invalid inputs should raise exceptions at the function boundary where they enter, not deep inside nested calls where the traceback is useless.
+
+- Validate arguments at the top of public methods before any work is done
+- Raise specific, descriptive exceptions immediately when preconditions are violated
+- Prefer raising over returning sentinel values (`None`, `-1`, `False`) for error conditions
+
+```python
+def submit(self, task: Task, priority: int) -> Future:
+    if task is None:
+        raise ValueError("task must not be None")
+    if priority < 0:
+        raise ValueError(f"priority must be non-negative, got {priority}")
+    if not self._is_running:
+        raise WorkerStoppedError(f"Cannot submit to stopped worker {self._id}")
+    return self._enqueue(task, priority)
+```
+
+### Runtime Type Enforcement with `@validate` (CRITICAL)
+
+#### What `@validate` Does and Why It Matters
+
+`morphic.validate` is a decorator built on Pydantic's `validate_call` that brings full Pydantic validation to regular functions and methods. When you decorate a function with `@validate`, every call validates and coerces its arguments against the declared type hints at runtime — not just at type-check time, not just in tests, but on every single invocation.
+
+This is the bridge between "type hints as documentation" and "type hints as enforcement." Without `@validate`, a function annotated `def submit(task: Task)` will happily accept a string, a number, or `None` at runtime — Python ignores annotations by default. With `@validate`, the same function rejects invalid inputs immediately with a clear `ValidationError`, and automatically coerces compatible types (e.g., a dict into a `Task` object via Pydantic's model coercion).
+
+The interaction with the Strict `Any` Ban is direct: `@validate` can only enforce types that are declared. If a parameter is typed `Any`, `@validate` passes it through without checking. Every `Any` in a `@validate`-decorated function is a parameter that bypasses runtime validation entirely. The two rules reinforce each other: the `Any` ban ensures types are declared precisely, and `@validate` ensures those precise declarations are enforced at runtime.
+
+For LLM coding agents, `@validate` is a critical safety net. When an agent generates a call like `worker.submit(task=some_variable)`, the agent may have constructed `some_variable` incorrectly — wrong type, wrong structure, missing fields. Without `@validate`, this error propagates silently. With `@validate`, the error is caught at the function boundary with a clear `ValidationError` at the call site.
+
+`@validate` works with Morphic `Typed` classes, `Typed + Registry` subclasses, standalone functions, and class methods. Dict arguments are automatically coerced into `Typed` instances. String arguments are coerced into ints, floats, and bools. `AutoEnum` values are resolved by fuzzy matching. This coercion means `@validate` is not just a gate — it is a normalizer that converts loosely-typed data into strongly-typed objects at the function boundary.
+
+The latency cost is real but small: a few hundred microseconds per call. For Concurry's user-facing API (`.options()`, `.init()`, `gather()`, `wait()` called with a list) this is invisible — the actual work (thread/process/Ray dispatch) dwarfs the validation cost by orders of magnitude. The only places where `@validate` must be omitted are **tight inner loops in concurrency primitives** where microseconds compound into seconds.
+
+#### When to Use `@validate` in Concurry
+
+**Default: use `@validate` on every public function and method.** The decorator should be present unless a specific exception applies.
+
+| Category | Use `@validate`? | Rationale |
+|---|---|---|
+| **All public module-level functions** (`wait`, `gather`, `wrap_future`) | **YES** | User-facing entry points. |
+| **All public methods of user-facing classes** (`Worker.options`, `LimitSet.acquire`) | **YES** | `Worker.options()` already uses `@validate`. Extend to all public methods. |
+| **Factory functions** | **YES** | Construct objects from user config; coercion is essential. |
+| **Private methods** (`_create_retry_configs`, `_dispatch_to_worker`) | **No** (type hints required, `@validate` optional) | Called from validated public methods. Double-validating wastes cycles. |
+| **Morphic lifecycle hooks** (`pre_initialize`, `post_initialize`, `pre_validate`) | **No** | The Morphic framework calls these with already-validated data. |
+| **Pydantic `@field_validator` methods** | **No** | Already part of Pydantic's validation pipeline. |
+| **`AutoEnum` methods, `__getattr__`, `__getitem__`** | **No** | Input types guaranteed by the Python language or Morphic framework. |
+| **Hot-path concurrency primitives** (see below) | **No** (with documented justification) | Called thousands/millions of times per second. |
+| **Worker methods serialized across Ray** (see below) | **Case-by-case** | `@validate` closure may not be picklable. |
+
+#### Performance Exemption (CRITICAL for Concurry)
+
+Concurry's core primitives are called in tight loops at very high frequency. The following components are **explicitly exempt** from `@validate` because the validation overhead compounds into visible latency:
+
+| Component | Call frequency | Why exempt |
+|---|---|---|
+| `BaseFuture.result()`, `.done()`, `.cancel()`, `.exception()` | Once per future in `wait()`/`gather()` loops (50,000+/sec) | 200µs × 50k = 10s added to a 2s gather |
+| `async_wait()`, `async_gather()` inner loops | Same as above | Async hot path |
+| `Acquisition.__init__()`, `.update()`, `.release()` | Once per limit acquisition per task submission | Thousands/sec in rate-limited workers |
+| `LimitSet` internal synchronization methods | Called under lock on every task dispatch | Microseconds matter under contention |
+
+When `@validate` is omitted from a public function for performance, the omission **MUST** be documented with a comment:
+
+```python
+# @validate omitted: hot path — called once per future in wait()/gather() loops.
+# At 50k futures/sec, 200µs/call validation overhead would add 10s to a 2s operation.
+def result(self, timeout: Optional[float] = None) -> Any:
+    ...
+```
+
+For these components, `Typed` on the class (validated once at construction) provides sufficient type safety without per-call overhead.
+
+Without this justification, the omission will be treated as a bug and `@validate` will be added back.
+
+#### Serialization Exemption
+
+Concurry `Worker` methods may be serialized and sent to remote Ray processes. The `@validate` decorator wraps the function in a Pydantic `validate_call` closure that may not serialize cleanly across process boundaries. When `@validate` cannot be used on a Worker method for this reason, document it:
+
+```python
+class MyWorker(Worker):
+    # @validate omitted: Worker methods are serialized for Ray remote execution.
+    # validate_call closure is not picklable across process boundaries.
+    def process(self, data: List[float]) -> float:
+        ...
+```
+
+Note that `@validate` on `Worker.options()` (a classmethod, not serialized) is fine and already used.
+
+#### Examples
+
+✅ Good (public function with `@validate` — already done in Concurry):
+```python
+@classmethod
+@validate
+def options(
+    cls: Type[T],
+    *,
+    mode: Union[ExecutionMode, _NO_ARG_TYPE] = _NO_ARG,
+    blocking: Union[bool, _NO_ARG_TYPE] = _NO_ARG,
+    max_workers: Optional[Union[conint(ge=0), _NO_ARG_TYPE]] = _NO_ARG,
+    ...
+) -> WorkerBuilder:
+    ...
+```
+
+✅ Good (private method — type hints required, `@validate` optional):
+```python
+def _create_retry_configs(self) -> Optional[Dict[str, Optional[RetryConfig]]]:
+    ...
+```
+
+✅ Good (hot-path exemption with documented justification):
+```python
+class ThreadFuture(BaseFuture):
+    # @validate omitted: hot path — result() is called in tight
+    # wait()/gather() loops at 50k+ calls/sec.
+    def result(self, timeout: Optional[float] = None) -> Any:
+        ...
+```
+
+❌ Bad (public method missing `@validate` without justification):
+```python
+class LimitPool(Typed):
+    def acquire(self, *, requested: Dict[str, int]) -> LimitSetAcquisition:
+        # ❌ Public method, not a hot path, no justification for missing @validate
+        ...
+```
+
+### Never Hide Known Parameters in `**kwargs`
+
+**If you know a parameter's name at the time you write the function, it MUST be an explicit parameter with a type annotation.** Using `kwargs.get("some_name")` to extract a value that the function *always expects* is as bad as `.get(key, None)` — it silently returns `None` instead of raising, hides the interface from callers, and completely defeats type checking.
+
+This is not a style preference. It is a correctness issue:
+
+1. **`@validate` and `@field_validator` cannot see kwargs.** Morphic's `@validate` decorator and Pydantic validators use the function signature to enforce types at runtime. A parameter extracted via `kwargs.get()` is invisible to them — it arrives as an untyped `Any` inside a `dict`, bypassing every safety net.
+2. **Static type checkers are blind.** mypy, pyright, and IDE autocomplete cannot infer the type of `kwargs.get("timeout")`. The caller gets no autocomplete, no type errors, no hover documentation.
+3. **Silent `None` on missing keys.** `kwargs.get("timeout")` returns `None` when the caller forgets to pass `timeout`. The function proceeds with `None`, producing a confusing `TypeError` or wrong behavior ten lines later instead of a clear `TypeError: missing required argument` at the call boundary.
+4. **The function signature lies.** When you read `def submit(self, **kwargs)`, you have no idea what the function actually needs. You must read the implementation to discover that it does `kwargs.get("timeout")`, `kwargs.get("retry_config")`, etc. This is a hidden interface.
+
+❌ Bad (known parameters hidden in `**kwargs`):
+```python
+def execute(self, task: Task, **kwargs) -> Future:
+    timeout = kwargs.get("timeout")           # ❌ Hidden param, silent None
+    retry_config = kwargs.get("retry_config") # ❌ Hidden param, silent None
+    priority = kwargs.get("priority", 0)      # ❌ Hidden default
+
+    if timeout is not None:          # ❌ Now you need a None guard
+        self._set_timeout(timeout)
+```
+
+✅ Good (all known parameters are explicit):
+```python
+def execute(
+    self,
+    task: Task,
+    *,
+    timeout: Optional[float] = None,
+    retry_config: Optional[RetryConfig] = None,
+    priority: int = 0,
+    **kwargs,
+) -> Future:
+    if timeout is not None:
+        self._set_timeout(timeout)
+```
+
+**The rule is simple:** if you are writing `kwargs.get("some_name")` and `some_name` is a string literal you typed yourself, that parameter MUST be promoted to an explicit function parameter. `**kwargs` is for truly unknown, pass-through parameters (e.g., forwarding to a parent class or a third-party library). It is never a substitute for declaring your interface.
+
+**Corollary — `**kwargs` in an abstract method signature:** When a base class defines `def process(self, ..., **kwargs)` and every subclass does `kwargs.get("timeout")`, the base class signature is wrong. Add `timeout: Optional[float] = None` to the base class and all subclasses. The `**kwargs` should only carry genuinely subclass-specific extensions that differ across implementations and cannot be enumerated on the base.
+
+### Exception Handling
+
+- **Catch narrow, specific exceptions** (`ValueError`, `TypeError`, `TimeoutError`), never bare `except:` or `except Exception:`
+- **Raise low, catch high**: let lower-level functions raise; catch at application boundaries (CLI, web handler, top-level orchestrator)
+- **Never silently swallow exceptions**: `except: pass` hides bugs. If you must catch broadly, at minimum log the exception
+- **Use custom exception classes** for domain-specific errors (`WorkerStoppedError`, `LimitExceededError`) — callers can then catch precisely what they need
+- **Include context in error messages**: the message should contain enough information to diagnose the problem without a debugger
+
+❌ Bad:
+```python
+try:
+    result = worker.execute(task)
+except Exception:
+    pass
+```
+
+✅ Good:
+```python
+try:
+    result = worker.execute(task)
+except TimeoutError:
+    log.warning(f"Task {task.id} timed out after {timeout_seconds}s on worker {worker.id}")
+    raise
+except WorkerStoppedError:
+    log.error(f"Worker {worker.id} stopped unexpectedly during task {task.id}")
+    raise
+```
+
+### Mutable Default Arguments
+
+**Never use mutable objects as default argument values.** This is a classic Python trap: the default is shared across all calls, so mutations persist between invocations.
+
+❌ Bad:
+```python
+def submit_batch(self, tasks: List[Task] = []) -> List[Future]:
+    tasks.append(self._sentinel_task)  # ❌ Mutates the shared default!
+    return [self._submit(t) for t in tasks]
+```
+
+✅ Good:
+```python
+def submit_batch(self, tasks: Optional[List[Task]] = None) -> List[Future]:
+    if tasks is None:
+        tasks = []
+    tasks.append(self._sentinel_task)
+    return [self._submit(t) for t in tasks]
+```
+
+This applies to all mutable types: `list`, `dict`, `set`, `bytearray`, and any custom mutable class.
+
+### Context Managers
+
+Use `with` statements for any resource that must be released: files, locks, semaphores, connections, temporary directories. This is especially critical in a concurrency library where leaked resources cause deadlocks.
+
+- Always use `with` for locks: `with self._lock:`
+- Always use `with` for file I/O: `with open(path) as f:`
+- Implement `__enter__`/`__exit__` (or use `@contextmanager`) for custom resources that need cleanup
+- Prefer `contextlib.suppress(ExceptionType)` over `try/except: pass` when intentionally ignoring specific exceptions
+
+❌ Bad:
+```python
+self._lock.acquire()
+try:
+    self._shared_state.update(data)
+finally:
+    self._lock.release()
+```
+
+✅ Good:
+```python
+with self._lock:
+    self._shared_state.update(data)
+```
+
+### Documentation**CRITICAL**: See [documentation-practices.mdc](mdc:.cursor/rules/documentation-practices.mdc) for comprehensive documentation rules.
 
 **Key principles**:
 - ❌ **NEVER create summary .md files** documenting completed work
@@ -224,6 +879,224 @@ grep -rn "=\s*PollingAlgorithm\." src/concurry/
 # Search for hardcoded sleep times
 grep -rn "time.sleep(" src/concurry/core/
 ```
+
+## Morphic Typed & Registry Patterns
+
+Concurry's data model is built on `morphic.Typed` (immutable Pydantic BaseModel) and `morphic.Registry` (inheritance-based class registration with string-based factory lookup). Understanding these two base classes is essential to writing idiomatic Concurry code.
+
+### Quick Reference: What Typed Gives You for Free
+
+| Feature | How | Manual Code It Replaces |
+|---|---|---|
+| Immutability | `frozen=True` by default | No need for `__slots__`, `@dataclass(frozen=True)` |
+| Validation on construction | Pydantic field types | Manual `if not isinstance(...)` checks |
+| Type coercion | Automatic (`"25"` → `int(25)`) | Manual `int(x)` calls |
+| Serialization | `.model_dump()` → dict | Hand-written `.to_dict()` methods |
+| Factory method | `MyClass.of(...)` or `Base.of("subclass", ...)` | Manual `__init__` wiring |
+| Lifecycle hooks | `pre_initialize`, `pre_validate`, `post_initialize`, `post_validate` | `__init__` overrides with `object.__setattr__` |
+| Registry lookup | `Base.of("thread", ...)` | Manual if/elif chains or dict dispatches |
+| Nested model coercion | `dict` → `Typed` subclass automatically | Manual `MyModel(**d)` construction |
+
+### Anti-Pattern 1: Hand-Written `to_dict()` Methods
+
+`Typed` inherits Pydantic's `.model_dump()` which serializes all fields to a dict recursively. Never write a custom `to_dict()` on a `Typed` subclass.
+
+❌ Bad (hand-written serialization on a Typed subclass):
+```python
+class RetryConfig(Typed):
+    max_retries: int
+    wait_seconds: float
+    algorithm: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "max_retries": self.max_retries,
+            "wait_seconds": self.wait_seconds,
+            "algorithm": self.algorithm,
+        }
+```
+
+✅ Good (use the built-in):
+```python
+class RetryConfig(Typed):
+    max_retries: int
+    wait_seconds: float
+    algorithm: str
+
+# Call sites:
+config_dict = retry_config.model_dump()
+```
+
+**Exception:** If you need to *exclude* certain fields or rename keys for a specific serialization context, use `model_dump(include=..., exclude=...)` rather than writing a custom method.
+
+### Anti-Pattern 2: Using `object.__setattr__` to Mutate Typed Fields
+
+`Typed` is frozen (immutable). Calling `object.__setattr__(self, "field", value)` bypasses Pydantic validation and breaks the immutability contract. If you need to normalize a field during construction, use `model_post_init` (Pydantic's built-in hook) or Typed's `pre_initialize` lifecycle hook.
+
+❌ Bad (bypassing frozen with `object.__setattr__` for field normalization):
+```python
+class LimitPool(Typed):
+    load_balancing: Optional[str] = None
+
+    def post_initialize(self) -> None:
+        if self.load_balancing is None:
+            local_config = global_config.clone()
+            object.__setattr__(self, "load_balancing", local_config.defaults.limit_pool_load_balancing)
+```
+
+✅ Good (normalize in `pre_initialize` before Pydantic validates):
+```python
+class LimitPool(Typed):
+    load_balancing: str  # Always resolved after construction
+
+    @classmethod
+    def pre_initialize(cls, data: dict) -> None:
+        if data.get("load_balancing") is None:
+            local_config = global_config.clone()
+            data["load_balancing"] = local_config.defaults.limit_pool_load_balancing
+```
+
+**When `object.__setattr__` IS acceptable:**
+- On `MutableTyped` subclasses (which are not frozen) — e.g., `GlobalDefaults`, `PromptMOOConfig`
+- Setting `PrivateAttr` values in `post_initialize` (Pydantic explicitly supports this)
+- On non-Typed objects where you are stamping runtime metadata
+
+### Anti-Pattern 3: Mutable State as Typed Fields with `= None`
+
+`Typed` fields are frozen after construction. Storing mutable runtime state (queues, locks, processes, balancer instances) as regular fields and then assigning them in `post_initialize` via `object.__setattr__` works but is semantically wrong — it says "this is an immutable config field" when it is actually mutable runtime state. Use Pydantic's `PrivateAttr` for mutable internal state on frozen models.
+
+Concurry already does this correctly in most places — follow the existing pattern:
+
+✅ Good (from `ProcessWorkerProxy`):
+```python
+from pydantic import PrivateAttr
+
+class ProcessWorkerProxy(WorkerProxy):
+    _command_queue: Any = PrivateAttr()
+    _result_queue: Any = PrivateAttr()
+    _futures: dict = PrivateAttr()
+    _futures_lock: Any = PrivateAttr()
+    _process: Any = PrivateAttr()
+    _result_thread: Any = PrivateAttr()
+```
+
+✅ Good (from `LimitPool`):
+```python
+class LimitPool(Typed):
+    _balancer: Any = PrivateAttr()
+```
+
+**Rule of thumb:** If a field is set once at construction and never changes, it is a Typed field. If it is created/mutated during the object's lifetime (locks, queues, runtime handles, balancers), it must be a `PrivateAttr`.
+
+### Anti-Pattern 4: Manual Registry Dispatch Instead of `Registry.of()`
+
+The `Registry` pattern provides `Base.of("key", **kwargs)` which resolves the correct subclass by name/alias. Never write manual if/elif dispatch chains or dict-based lookups to select subclasses.
+
+❌ Bad (manual dispatch):
+```python
+if mode == "thread":
+    proxy = ThreadWorkerProxy(...)
+elif mode == "process":
+    proxy = ProcessWorkerProxy(...)
+elif mode == "ray":
+    proxy = RayWorkerProxy(...)
+else:
+    raise ValueError(f"Unknown mode: {mode}")
+```
+
+✅ Good (use Registry):
+```python
+proxy = WorkerProxy.of(mode, ...)
+```
+
+This works because each subclass registers itself via `aliases` (or its class name is auto-registered). The `of()` method handles case-insensitive matching, alias resolution, and hierarchy scoping automatically.
+
+### Anti-Pattern 5: Ignoring Typed's Validation for Constructor Inputs
+
+`Typed` automatically coerces compatible types (e.g., `"25"` → `int(25)`, `dict` → nested `Typed` subclass). Never add manual type-conversion code before constructing a Typed object.
+
+❌ Bad (manual coercion before Typed construction):
+```python
+timeout = float(config["timeout"])
+max_retries = int(config["max_retries"])
+retry_cfg = RetryConfig(timeout=timeout, max_retries=max_retries, ...)
+```
+
+✅ Good (let Typed/Pydantic handle coercion):
+```python
+retry_cfg = RetryConfig(timeout=config["timeout"], max_retries=config["max_retries"], ...)
+```
+
+Similarly, when passing a `dict` to a field typed as a `Typed` subclass, Pydantic automatically coerces the dict into the model:
+
+```python
+class Limit(Typed, ABC):
+    key: str
+    capacity: int
+
+class RateLimit(Limit):
+    window_seconds: float
+
+class LimitPool(Typed):
+    limits: List[Limit]
+
+# Pydantic coerces dicts into the appropriate Limit subclass:
+pool = LimitPool(limits=[
+    RateLimit(key="rpm", capacity=100, window_seconds=60),
+])
+```
+
+### Anti-Pattern 6: Using Bare `dict` for Configuration Bundles
+
+When passing structured configuration through multiple layers, avoid bare `Dict[str, Any]`. Define a `Typed` config class so typos and type errors are caught at construction time.
+
+❌ Bad (ad-hoc dict keys with no validation):
+```python
+worker_config = {
+    "timeout": 30,
+    "max_retires": 3,    # ← typo: "retires" instead of "retries"
+    "algorithm": "exponential",
+}
+```
+
+✅ Good (validated config class):
+```python
+class RetryConfig(Typed):
+    timeout: float
+    max_retries: int = 3
+    algorithm: str = "exponential"
+
+retry_cfg = RetryConfig(timeout=30)  # Validated, typos caught
+```
+
+### (Optional) Anti-Pattern 7: Not Using `aliases` for Registry Subclasses
+
+Every `Registry` subclass is automatically registered under its class name. If you want additional lookup keys (e.g., `"thread"` for `ThreadWorkerProxy`), use `aliases` instead of relying on call sites to know the full class name.
+
+❌ Bad (no aliases — call sites must know full class name):
+```python
+class ThreadWorkerProxy(WorkerProxy):
+    pass
+
+# Call site must use exact class name:
+proxy = WorkerProxy.of("ThreadWorkerProxy")
+```
+
+✅ Good (aliases for convenient lookup):
+```python
+class ThreadWorkerProxy(WorkerProxy):
+    aliases = ["thread"]
+
+# Call site uses short name:
+proxy = WorkerProxy.of("thread")
+```
+
+### Anti-Pattern 8: Plain Classes Where Typed Would Add Value
+
+If a class primarily holds configuration (immutable after construction) plus some derived fields, prefer `Typed` over a plain class. You get free validation, serialization, immutability, and `model_dump()`.
+
+**Judgment call:** Not every class needs to be `Typed`. Use `Typed` when you want immutable config + validation + serialization. Use plain classes (or `MutableTyped`) for stateful service objects where the overhead of frozen fields is not worth it. Concurry's `Worker` facade class is intentionally a plain class because it is a user-facing API with mutable lifecycle state; the internal `WorkerProxy` and `WorkerBuilder` correctly use `Typed`.
+
 
 ## Testing
 

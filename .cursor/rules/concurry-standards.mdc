@@ -1,10 +1,25 @@
 ---
+description: Rules for editing code and writing tests in concurry library.
 alwaysApply: true
 ---
-
 # Cursor Rules for Concurry Package
 
 ## Code Quality Standards
+
+### Always Read Entire Functions (LLM Agent Workflow — CRITICAL)
+
+**When reading or editing a function, ALWAYS retrieve and read the entire function body — from the `def` line to the last line of the function.** Never read only a fragment, a few lines around an edit point, or a single code block within a function.
+
+**Why this is non-negotiable:** Functions in this codebase use variable reassignment to reduce cognitive load (see **Prefer Variable Reassignment for Same-Concept Transformations** below). A variable like `futures` may be created as an empty list on line 5, populated in a loop on lines 8-15, and then *reassigned* through a transformation on line 17. If the agent reads only lines 17-25, it sees `futures` and has no idea whether it is the raw version or the transformed version. It will generate code based on wrong assumptions about the variable's state, producing bugs that are invisible at the edit site but catastrophic at runtime.
+
+This is the single most common source of LLM-generated bugs in this codebase: the agent reads a 10-line window, sees a variable name, assumes it knows what it contains, and writes code that worked for the *original* value but fails for the *reassigned* value.
+
+**The rules:**
+
+1. **Functions:** Always read the entire function. No exceptions. Even if the function is 150 lines, read all of it. You must understand the full lineage of every variable before making any edit.
+2. **Class methods:** Read the entire method, plus the class header (field declarations, `PrivateAttr` declarations, and `__init__`/lifecycle hooks) so you know the available instance state.
+3. **Classes as a whole:** Reading an entire class is not required (classes can be very large). But when editing a method, always read the complete method and the class-level declarations.
+4. **When searching for code to edit:** If a search result lands you in the middle of a function, expand your read to include the entire function before making any changes.
 
 ### No Backward Compatibility
 
@@ -18,6 +33,214 @@ This project has a single developer/consumer. Backward compatibility is overhead
 - **Do NOT rename old functions** to `_legacy_*` or `_compat_*` — delete them outright
 
 LLMs trained on public codebases reflexively produce backward-compatibility scaffolding (deprecation decorators, `warnings.warn(...)`, adapter classes). This is the correct pattern for libraries with thousands of consumers; it is pure noise here.
+
+### Loud Failures Over Silent Defaults (CRITICAL — Read This First)
+
+**A program that crashes on misconfiguration is infinitely better than a program that silently produces wrong output.** This is the single most important principle in this codebase. Every other rule — fail-fast, strict typing, `@validate`, exhaustive dispatch, the `Any` ban — is a corollary of this principle.
+
+**Why this is non-negotiable:** A silent wrong output destroys trust. If a worker pool silently falls back to a slower implementation because a configuration is wrong, nobody knows until mysterious slowdowns appear in production — if they ever notice. A crash at initialization with a clear error message costs thirty seconds to fix. A silent degradation can cost days of debugging.
+
+**The test is simple:** when you write code that handles a missing or unexpected value, ask: **"If this value is wrong, would I rather crash immediately or produce incorrect/degraded behavior that looks correct?"** The answer is always crash. No one pushes code to production without testing. A crash during testing is a gift — it tells you exactly what to fix. A silent default that degrades behavior is a bomb with a delayed fuse.
+
+LLM coding assistants are the primary source of silent-default code. They are trained on web application code where `.get(key, default)` is a reasonable defensive pattern — web apps must not crash on a single bad request. In a library/infrastructure codebase, the opposite is true: **the system MUST crash on bad configuration** so the developer fixes it before deployment.
+
+#### The `.get(key, default)` Anti-Pattern
+
+**Never use `dict.get(key, hardcoded_default)` when the key is expected to exist.** This is the most common form of silent default. It tells the reader "this key might be absent, and that's fine." If the key *should* be present, its absence is a bug — and `.get()` with a fallback hides that bug.
+
+**The decision rule:** ask "if this key is missing, is that a valid state or a bug?"
+- **Valid state** (sparse data where absence is meaningful) → `.get(key)` returning `None`, with explicit handling of the `None` case
+- **Bug** (the key should always be present given the program's logic) → use bracket access `dict[key]`, or check-and-raise with feedback
+
+❌ Bad (silent default hides missing key):
+```python
+timeout = config.get("timeout", 30.0)
+```
+
+✅ Good (check, raise with feedback data, then access):
+```python
+if "timeout" not in config:
+    raise ValueError(
+        f"Expected 'timeout' in config, "
+        f"but only found keys: {list(config.keys())}"
+    )
+timeout = config["timeout"]
+```
+
+✅ Good (bracket access — crashes immediately with a `KeyError` that names the missing key):
+```python
+timeout = config["timeout"]
+```
+
+✅ Best (use a Typed class so the key cannot be missing — Pydantic enforces it at construction):
+```python
+class WorkerConfig(Typed):
+    timeout: float
+
+config = WorkerConfig(**raw_config)  # Pydantic raises ValidationError if timeout missing
+timeout = config.timeout  # Guaranteed to exist
+```
+
+#### Feedback-Driven Exceptions
+
+When raising an exception, **include the actual data** that caused the failure. The error message is feedback to the developer — it should contain enough information to diagnose and fix the problem without a debugger.
+
+The pattern: **state what was expected, state what was received, and show the available options.**
+
+❌ Bad (error message gives no feedback):
+```python
+raise ValueError("Invalid worker mode")
+```
+
+✅ Good (expected + received + available):
+```python
+raise ValueError(
+    f"Unknown worker mode {mode!r}. "
+    f"Must be one of: {list(ExecutionMode)}."
+)
+```
+
+✅ Good (Pydantic/Typed already does this — leverage it):
+```python
+# Pydantic's ValidationError automatically includes:
+# - Which field failed
+# - What value was provided
+# - What type/constraint was expected
+# This is WHY we use @validate and Typed — they produce feedback-driven errors for free.
+```
+
+**This pattern connects to every other rule in this document:**
+- **Fail Fast** (below) is the timing corollary: crash at the earliest possible point.
+- **`@validate`** is the automated version: Pydantic produces feedback-driven `ValidationError` messages.
+- **Exhaustive dispatch with raising `else`** catches unhandled values at dispatch time.
+- **Never Hide Known Parameters in `**kwargs`** prevents silent `None` from `.get()`.
+- **Never Duplicate Caller-Supplied Values as Parameter Defaults** prevents dead-code defaults from masking broken call chains.
+- **Morphic `Typed` fields** replace `dict` access with validated attribute access — `.get()` is impossible on a Typed instance.
+- **No Silent Fallbacks** (in concurry-architecture.mdc) is the infrastructure-level application of this same principle.
+
+#### The Silent-Default Family (All Variants)
+
+`.get(key, default)` is the most common silent-default pattern, but it belongs to a family of related patterns that all share the same flaw: **they invent data when data is missing, instead of surfacing the absence as an error.** LLMs produce all of these reflexively. When you see any of them, apply the same decision test: "is the absence a valid state, or a bug?"
+
+| Silent-Default Pattern | What it hides | Loud alternative |
+|---|---|---|
+| `dict.get(key, default)` | Missing dict key → silently substituted | `dict[key]` (KeyError) or check-and-raise |
+| `getattr(obj, attr, default)` | Missing attribute → silently substituted | `obj.attr` (AttributeError) or check-and-raise |
+| `hasattr(obj, attr)` + branch | Missing attribute → silently takes the else path | `obj.attr` — if the attribute should exist, access it directly and let `AttributeError` surface |
+| `os.environ.get(key, default)` | Missing env var → silently substituted | `os.environ[key]` (KeyError) or check-and-raise with feedback |
+| `try: ... except (KeyError, AttributeError): return fallback` | Missing key/attr → silently swallowed and replaced | Let the exception propagate; catch only at application boundaries |
+| `kwargs.get("name", default)` | Known parameter hidden in `**kwargs` → silently `None` | Promote to explicit kwarg (see **Never Hide Known Parameters** below) |
+| `def f(x: float = 30.0)` when caller always passes `x` | Redundant default masks broken call chain → silently uses wrong value | Remove the default; make the parameter mandatory (see **Never Duplicate Caller-Supplied Values** below) |
+| `x if x is not None else 30.0` (inline magic number) | Inline fallback duplicates a config default → silently diverges when config changes | Make the parameter mandatory; no inline fallback needed |
+
+#### The `.get()` as Edge-Case Blanket Anti-Pattern (MOST DANGEROUS LLM-GENERATED VARIANT)
+
+**This is the deadliest form of `.get()` because the developer (or LLM) knows the edge case exists, acknowledges it in a comment, and then uses `.get()` to "handle" it — which silently handles every other case too, including cases that are bugs.**
+
+The pattern looks like this: a function receives a dict-like state object. At one specific call site (e.g., during initial pool creation before workers are started), the dict is genuinely empty — no runtime data exists yet. At every other call site (after pool startup, during normal operation), the dict must contain specific keys because initialization populated them. The LLM writes `.get("key", fallback)` and adds a comment saying "empty during init." The code works during init. It also "works" during normal operation when `"key"` is missing due to a bug — silently using the fallback instead of crashing. The pool runs with wrong configuration, and mysterious performance degradation appears.
+
+**Why LLMs produce this reflexively:** When an LLM encounters a `KeyError` during testing, its first instinct is to make the error go away. `.get(key, default)` makes the error go away at *every* call site, not just the one where the absence is valid. The LLM cannot distinguish "this key is absent because the pool hasn't started yet" from "this key is absent because a bug in worker initialization failed to populate it." It treats both cases identically — with a silent fallback — because `.get()` does not encode *why* the key might be absent.
+
+**The core principle:** When you know there is exactly one case where absence is valid, you must **name that case explicitly with a conditional check**. The check proves to the reader (and to future maintainers, and to the type checker, and to LLM agents reading the code) that you thought about *when* the absence is valid, not just *that* it might happen.
+
+❌ Bad (`.get()` blankets both the valid edge case AND every bug):
+```python
+def _dispatch_task(self, *, pool_state: Dict[str, Any], is_initialized: bool, ...) -> ...:
+    # Before pool start, no workers exist yet.
+    active_workers = pool_state.get("active_workers", [])
+    balancer_state = pool_state.get("balancer_state", {})
+```
+
+**What makes this catastrophic:** Before initialization, the absence is valid. After initialization, `"active_workers"` should always exist. If a bug in `_initialize_pool` fails to populate it, `.get("active_workers", [])` silently returns `[]`. The dispatcher sees zero workers, tasks go nowhere, and the pool appears to hang. Hours of debugging follow.
+
+✅ Good (explicit conditional — names the EXACT case where absence is valid):
+```python
+def _dispatch_task(self, *, pool_state: Dict[str, Any], is_initialized: bool, ...) -> ...:
+    if not is_initialized:
+        active_workers: List[WorkerProxy] = []
+        balancer_state: Dict[str, Any] = {}
+    else:
+        if "active_workers" not in pool_state:
+            raise KeyError(
+                f"pool_state missing 'active_workers' after initialization. "
+                f"pool_state keys: {list(pool_state.keys())}"
+            )
+        active_workers = pool_state["active_workers"]
+        balancer_state = pool_state["balancer_state"]
+```
+
+**The general rule:** When you encounter a `KeyError` and you know the absence is valid in one specific scenario:
+
+1. **Identify the exact condition** under which the absence is valid (e.g., `not is_initialized`, `pool.state == "starting"`).
+2. **Write an explicit conditional** that checks for that condition.
+3. **In the "valid absence" branch:** provide the appropriate default explicitly.
+4. **In the "invalid absence" branch:** crash loudly with a feedback-driven error message.
+5. **Never use `.get()`** to handle both cases at once. `.get()` does not encode *when* the absence is valid.
+
+**`getattr(obj, attr, default)` — the attribute version of `.get()`:**
+
+The same decision rule applies. If the object *should* have the attribute (because you control its class, or it was passed with a type annotation that guarantees the attribute), then `getattr` with a fallback is hiding a bug.
+
+❌ Bad (the attribute should exist — silently invents a fallback):
+```python
+timeout = getattr(config, "timeout", 30.0)
+model_name = getattr(worker, "model_name", type(worker).__name__)
+```
+
+✅ Good (direct access — crashes immediately if the attribute is missing):
+```python
+timeout = config.timeout
+model_name = worker.model_name
+```
+
+✅ Good (check-and-raise with feedback if you genuinely need to handle absence):
+```python
+if not hasattr(config, "timeout"):
+    raise AttributeError(
+        f"{type(config).__name__} has no 'timeout' attribute. "
+        f"Available attributes: {list(vars(config).keys())}. "
+        f"Ensure the config class defines 'timeout' as a field."
+    )
+timeout = config.timeout
+```
+
+**When `getattr` with a fallback IS acceptable:**
+- **Introspection/reflection** where you are genuinely probing an unknown object's capabilities (e.g., framework code that checks whether a plugin implements an optional method). This is rare in application code.
+- **`PrivateAttr` access** where Pydantic's `__getattr__` may not expose the attribute via normal attribute access in all contexts (e.g., `getattr(self, "_lock", None)` during `__getstate__` serialization). These are framework-level edge cases, not application logic.
+
+**`hasattr()` — the check-without-consequence pattern:**
+
+`hasattr(obj, attr)` is just `try: getattr(obj, attr); return True; except AttributeError: return False`. It silently swallows the `AttributeError`. When used to branch on whether an attribute exists, it creates two code paths — one where the attribute is present and one where it is not — without raising an error on the "not present" path. If the attribute *should* be present, this is a silent failure.
+
+❌ Bad (silently takes an alternate code path instead of catching the bug):
+```python
+if hasattr(config, "load_balancing"):
+    algorithm = config.load_balancing
+else:
+    algorithm = "round_robin"  # ← silent default, same as .get(key, default)
+```
+
+✅ Good (the attribute is expected — access it directly):
+```python
+algorithm = config.load_balancing  # AttributeError if missing → developer sees the bug immediately
+```
+
+**`os.environ.get()` — environment variable silent defaults:**
+
+❌ Bad:
+```python
+ray_address = os.environ.get("RAY_ADDRESS", "auto")  # Silently connects to wrong cluster
+```
+
+✅ Good:
+```python
+if "RAY_ADDRESS" not in os.environ:
+    raise EnvironmentError(
+        "RAY_ADDRESS not set. Export it before running: "
+        "export RAY_ADDRESS='ray://cluster-ip:10001'"
+    )
+ray_address = os.environ["RAY_ADDRESS"]
+```
 
 ### Type Hints
 - **Always include type hints** for all function parameters and return values
@@ -105,6 +328,69 @@ class WorkerPool(Typed):
 ```
 
 **If adding the import creates a circular dependency, that is a bug in the module structure.** Fix the structure (extract the shared type into a leaf module) instead of papering over it with `Any`.
+
+#### Scrutinize Every `Optional` and `Union` (CRITICAL)
+
+**`Optional` is the second most common way LLMs degrade your type system, after `Any`.** When an LLM declares a value as `Optional[X]`, it is saying "this can be `None`." That claim must be justified. LLMs add `Optional` reflexively as a defensive measure — it silences type errors by broadening the type instead of fixing the root cause. The result is an `Optional` cascade: once a function returns `Optional[X]`, every caller must handle `None`, which means either (a) cluttering every call site with `if result is None` guards, or (b) ignoring the `None` case, which blows up at runtime.
+
+**The rule is simple:** when you see `Optional[X]`, ask: **"Can this genuinely be `None` at runtime, and why?"** If the answer is "no" or "only during initialization before a lifecycle hook sets it," remove the `Optional` and fix the initialization so the value is always present after construction.
+
+**Never let the LLM broaden a type signature to fix a bug.** When debugging, LLMs frequently propose changing `X` to `Optional[X]` or `Union[X, Y]` to make a type error go away. This hides the bug instead of fixing it. The correct response is to trace *why* the value is `None` and fix the code path that produces it.
+
+**Use `@overload` with `Literal` when return type depends on input values.** When a function's return type varies based on a parameter (e.g., a `mode` string, a boolean flag), define `@overload` signatures so the type checker can narrow the return type at each call site. This eliminates unnecessary `Union` return types and removes the need for `isinstance` checks or `cast()` at call sites.
+
+##### Anti-Pattern: `ClassVar` Default + `Optional` Field + `pre_initialize` Fallback
+
+A particularly insidious form of unnecessary `Optional` occurs with `Typed + Registry` hierarchies: a base class declares a `ClassVar` with a default, an `Optional` instance field, and a `pre_initialize` hook that copies the `ClassVar` into the field when it is `None`. This makes the field `Optional` for no reason — the value is *always* set after construction, but the type system does not know that. Every consumer of the field must handle `None` even though `None` is impossible after initialization.
+
+The fix: make the instance field **mandatory (no default)** on the base class. Subclasses override it with their own default. This forces every concrete subclass to declare a value, and the type checker knows the field is never `None`.
+
+❌ Bad (ClassVar default + Optional field + pre_initialize fallback):
+```python
+class BaseHandler(Typed, Registry):
+    _default_timeout: ClassVar[float] = 30.0                # ClassVar: invisible to Pydantic
+    timeout: Optional[float] = None                         # Optional: pollutes every consumer
+
+    @classmethod
+    def pre_initialize(cls, data: Dict[str, Any]) -> None:
+        if data.get("timeout") is None:
+            data["timeout"] = cls._default_timeout          # Fallback: makes Optional "work"
+
+class HttpHandler(BaseHandler):
+    _default_timeout: ClassVar[float] = 10.0                # Overrides ClassVar, but still Optional
+```
+
+**Why this is bad:**
+
+1. `timeout` is typed `Optional[float]`, so every method that uses `self.timeout` must handle `None` — even though `pre_initialize` guarantees it is never `None` after construction. The type system does not see `pre_initialize`; it sees `Optional[float]`.
+2. The `ClassVar` `_default_timeout` is invisible to Pydantic serialization (`model_dump()` excludes ClassVars) and to IDE autocomplete on instances. It exists only to service the `pre_initialize` fallback.
+3. A new `BaseHandler` subclass that forgets to set `_default_timeout` silently inherits `30.0` from the base class. There is no error, no warning — just a silent default that may be wrong.
+
+✅ Good (mandatory field on base, subclass defaults):
+```python
+class BaseHandler(Typed, Registry):
+    timeout: float                                          # Mandatory: no default on base
+
+class HttpHandler(BaseHandler):
+    timeout: float = 10.0                                   # Subclass provides its default
+
+class GrpcHandler(BaseHandler):
+    timeout: float = 30.0                                   # Different subclass, different default
+
+class CustomHandler(BaseHandler):
+    timeout: float                                          # No default → caller MUST pass it
+    # CustomHandler()  → ValidationError: timeout is required
+    # CustomHandler(timeout=5.0)  → works
+```
+
+**Why this is better:**
+
+1. `timeout` is typed `float`, not `Optional[float]`. Every consumer knows it is always present. No `None` guards needed.
+2. No `ClassVar`, no `pre_initialize` fallback, no hidden indirection.
+3. A new subclass that forgets to set `timeout` **fails at construction time** — Pydantic raises `ValidationError: timeout is required`. This early failure is exactly what fail-fast demands.
+4. A subclass that intentionally has no default forces the caller to pass `timeout` explicitly, which is correct when the right value depends on context.
+
+**General principle:** When a `Typed + Registry` hierarchy has a field where different subclasses need different defaults, make the field **mandatory on the base class** and **override the default on each subclass**. Do NOT use `ClassVar` + `Optional` + `pre_initialize` — that pattern exists only to avoid making the field mandatory, and the cost is `Optional` pollution across the entire codebase.
 
 #### Type-Annotate All Intermediate Variables (CRITICAL)
 
@@ -344,6 +630,276 @@ Here, the `if` block enables an optional feature. There is no `else` because the
 - Include units where ambiguous: `timeout_seconds`, `max_retries`, `delay_ms`
 - Avoid abbreviations: `configuration` not `cfg`, `response` not `resp`, `message` not `msg`
 
+#### Never Rename Variables Just to Shorten Them (Namespace Pollution)
+
+**Never create a new local variable that is just a shorter or abbreviated alias for an existing parameter, attribute, or variable.** This is namespace pollution: it forces the reader to hold two names for the same value in their head, and the shorter name invariably loses the meaning that the original name carried.
+
+This pattern is one of the most damaging things an LLM can do to a codebase. The original variable was named carefully — `load_balancing_algorithm` tells you exactly what it is: the algorithm for load balancing. When the LLM renames it to `algorithm`, the reader now sees a generic word that could refer to *any* algorithm in a codebase that has multiple algorithm concepts (load balancing algorithm, rate limit algorithm, retry algorithm, polling algorithm). The reader must scroll back to the assignment `algorithm = load_balancing_algorithm` to figure out which algorithm it is. That scroll-and-remember cost is paid on every single read of the function, forever.
+
+**Why LLMs do this:** LLMs are trained on codebases where variable renaming is common for two reasons: (1) reducing line length (a cosmetic concern that tools like Black handle automatically), and (2) Python convention of abbreviating `self.long_attribute` to a local when accessed many times. Both reasons are wrong in this context. Line length is never a reason to sacrifice clarity. And accessing `self.long_attribute` directly is *better* than creating a local alias because it tells the reader *where* the value lives.
+
+**The rule is absolute:** if a variable already has a name, use that name. Do not create a second name for it.
+
+**Form 1: Renaming a parameter to a shorter local**
+
+❌ Bad (renames `load_balancing_algorithm` to `algorithm` — now reader must remember which algorithm):
+```python
+def create_balancer(self, *, load_balancing_algorithm: str, ...) -> LoadBalancer:
+    algorithm: str = load_balancing_algorithm
+    if algorithm not in ("round_robin", "least_loaded", "random"):
+        raise ValueError(f"Unknown algorithm={algorithm!r}")
+    if algorithm == "round_robin":
+        ...
+```
+
+✅ Good (use the original name — it is perfectly clear):
+```python
+def create_balancer(self, *, load_balancing_algorithm: str, ...) -> LoadBalancer:
+    if load_balancing_algorithm not in ("round_robin", "least_loaded", "random"):
+        raise ValueError(
+            f"Unknown load_balancing_algorithm={load_balancing_algorithm!r}. "
+            f"Must be 'round_robin', 'least_loaded', or 'random'."
+        )
+    if load_balancing_algorithm == "round_robin":
+        ...
+```
+
+**Form 2: Abbreviating a parameter to save characters**
+
+❌ Bad (`futs` and `wrks` are opaque abbreviations — reader must scroll to the assignment):
+```python
+def gather_results(self, *, futures: List[Future], workers: List[WorkerProxy], ...) -> ...:
+    futs: List[Future] = futures
+    wrks: List[WorkerProxy] = workers
+```
+
+✅ Good (keep the original names):
+```python
+def gather_results(self, *, futures: List[Future], workers: List[WorkerProxy], ...) -> ...:
+    # Use `futures` and `workers` directly — they already have perfect names.
+```
+
+If you genuinely need a new variable (e.g., because the value is transformed — filtered, sorted, resolved from `None`), give it a name that describes *what changed*, not a shorter version of the original. `completed_futures` tells you "these are the done ones." `futs` tells you nothing.
+
+**Form 3: Creating a local alias for `self.attribute` or `obj.attribute`**
+
+❌ Bad (creates a local `cfg` that aliases `global_config.defaults` — reader must remember what `cfg` is):
+```python
+cfg = global_config.defaults
+timeout = cfg.worker_timeout
+max_retries = cfg.num_retries
+```
+
+✅ Good (access the attribute path directly — it is self-documenting):
+```python
+timeout = global_config.defaults.worker_timeout
+max_retries = global_config.defaults.num_retries
+```
+
+✅ Also acceptable (when accessing many fields, a well-named local is justified — but name it descriptively):
+```python
+default_config: ResolvedDefaults = global_config.defaults
+timeout = default_config.worker_timeout
+max_retries = default_config.num_retries
+```
+
+The difference: `default_config` tells the reader exactly what it is. `cfg` is a three-letter abbreviation that could be anything.
+
+**Form 4: Chained aliasing — the most egregious variant**
+
+This is when the LLM creates multiple aliases in a chain, each one stripping more context from the name. The reader now has to hold THREE names in their head for what is a single two-level attribute access. This is the worst form of namespace pollution because each link in the chain makes the code harder to follow, not easier.
+
+❌ Bad (three variables for `worker_proxy.retry_config.max_retries` — completely unacceptable):
+```python
+retry_cfg: RetryConfig = worker_proxy.retry_config        # alias 1
+max_r: int = retry_cfg.max_retries                        # alias 2
+# ... later ...
+if attempts > max_r:                                      # uses alias 2
+```
+
+The reader sees `max_r` and must trace backward: `max_r` came from `retry_cfg.max_retries`, which came from `worker_proxy.retry_config.max_retries`. Three names, zero added value.
+
+✅ Good (use the original path — it is perfectly clear):
+```python
+if attempts > worker_proxy.retry_config.max_retries:
+    ...
+```
+
+No aliases. No mental bookkeeping. Every reference tells the reader where the value comes from.
+
+**When creating a new local variable IS appropriate:**
+- The value is **transformed**: filtered, sorted, resolved from `None`, cast to a different type. The new name should describe the transformation: `completed_futures`, `active_workers`, `filtered_results`.
+- The value is **a loop-mutation target**: `current_worker = initial_worker` where `current_worker` is reassigned during failover. The name `current_worker` conveys that it changes; `initial_worker` conveys that it does not.
+- The attribute path is **deeply nested** (3+ levels of indexing/attribute access) AND the expression is error-prone to retype. At 3+ levels, the expression becomes hard to read inline and easy to mistype.
+- **Loop variables and comprehension variables** are always fine — they are iteration bindings, not aliases.
+
+**The depth threshold — when an alias starts being useful:**
+
+Single-level access (`self.attribute`, `obj.field`, `dict["key"]`, `list[0]`) is never worth aliasing. It is short, self-documenting, and tells the reader *where* the value lives. Two-level access (`worker_proxy.retry_config`) is borderline but usually fine inline — the full path is still readable and the reader sees exactly which object the value comes from. At three or more levels of chained access, a local variable starts being justified because the expression is long enough to be error-prone when repeated:
+
+❌ Bad (single-level — just use the original):
+```python
+limits: List[Limit] = pool.limits
+# ... later ...
+for limit in limits:  # ← reader must scroll to see where limits came from
+```
+
+✅ Good (single-level — use the attribute path directly):
+```python
+for limit in pool.limits:  # ← reader sees the source immediately
+```
+
+❌ Bad (single-level alias of a parameter — pointless renaming):
+```python
+v: MyType = self.var_name
+idx: int = self.var_dict[0]
+val: str = self.var_dict["key"]
+```
+
+✅ Good (just reference them directly):
+```python
+# Use self.var_name, self.var_dict[0], self.var_dict["key"] inline.
+```
+
+✅ Good (3+ levels — a local IS justified because the expression is error-prone):
+```python
+retry_wait: float = self._proxy_map[worker_id].retry_config.wait_seconds
+```
+
+These deeply nested chains are hard to retype correctly and obscure when inlined in a larger expression. A descriptively named local is genuinely helpful here.
+
+#### Prefer Variable Reassignment for Same-Concept Transformations (CRITICAL)
+
+When a variable goes through a transformation but represents **the same conceptual entity** (same type, same purpose, just processed further), **reassign to the same variable name** rather than inventing a new name. A new name for the same concept forces the reader and the LLM agent to track two names for one thing, which increases cognitive load without adding information.
+
+**The decision rule:** ask **"After the transformation, is this conceptually the same entity?"**
+- **Yes** (same type, same purpose, just cleaned/filtered/enriched) → reassign to the same name
+- **No** (the type changes, or the new value represents a fundamentally different concept) → use a new, descriptive name
+
+✅ Good (reassignment — conceptual identity preserved):
+```python
+## Build worker proxies for all modes
+workers: List[WorkerProxy] = [self._create_proxy(i) for i in range(count)]
+
+## Filter to only healthy workers
+workers = [w for w in workers if w.is_healthy()]
+```
+
+`workers` is still "the workers" — they are just filtered now. The comprehension makes the transformation obvious. A new name like `healthy_workers` or `filtered_workers` adds a second binding that the reader (and the LLM) must track, for zero informational benefit when the old value is no longer needed.
+
+❌ Bad (new name for the same concept — now the reader tracks two names):
+```python
+workers: List[WorkerProxy] = [self._create_proxy(i) for i in range(count)]
+healthy_workers: List[WorkerProxy] = [w for w in workers if w.is_healthy()]
+```
+
+Now the reader sees both `workers` and `healthy_workers` in scope and must remember that `healthy_workers` is the one to use downstream. If a later edit accidentally uses `workers` instead, the code silently includes unhealthy workers. With reassignment, the old value is gone — there is only one name and it always refers to the latest version.
+
+✅ Good (new name — conceptual identity changes):
+```python
+raw_response: bytes = socket.recv(4096)
+parsed_message: Message = Message.from_bytes(raw_response)
+```
+
+`raw_response` is bytes from a socket. `parsed_message` is a `Message` — completely different type, completely different concept. A new name is essential here.
+
+**Conditional reassignment — DANGEROUS, avoid:**
+
+**Never conditionally reassign a variable** unless the variable is immediately consumed on the next line or in the very next statement. Conditional reassignment creates a variable whose value depends on a branch, which is hard to reason about and almost impossible for an LLM to track reliably.
+
+❌ Bad (conditional reassignment — which version does `futures` hold?):
+```python
+futures: List[Future] = submit_batch(tasks)
+if enable_timeout_filtering:
+    futures = filter_timed_out(futures)
+# ... 30 lines later ...
+# Reader must remember: did enable_timeout_filtering fire? What state is futures in?
+results = gather(futures)
+```
+
+✅ Good (separate names make the state explicit):
+```python
+futures: List[Future] = submit_batch(tasks)
+filtered_futures: List[Future] = (
+    filter_timed_out(futures) if enable_timeout_filtering else futures
+)
+results = gather(filtered_futures)
+```
+
+Here the conceptual identity genuinely changes: raw futures vs. filtered futures. The conditional makes them different things, so they get different names. After the assignment, the reader knows exactly which version `filtered_futures` holds, regardless of the `enable_timeout_filtering` flag.
+
+**Unconditional reassignment — SAFE, preferred:**
+
+When the reassignment is unconditional (always happens, no branches), use the same name:
+
+```python
+## Collect futures from all workers
+futures: List[Future] = [w.submit(task) for w in workers for task in tasks]
+
+## Deduplicate by task ID
+futures = deduplicate_futures(futures)
+
+## Sort by submission time for deterministic ordering
+futures = sorted(futures, key=lambda f: f.submitted_at)
+```
+
+Each step transforms `futures` unconditionally. The reader sees a clean pipeline. There is no ambiguity about which version of `futures` exists at any point — it is always the latest.
+
+#### Avoid Mutating Caller-Supplied Parameters (Prefer Comprehensions and Return Values)
+
+**Prefer returning new values over mutating parameters that were passed to you by a caller.** When a function receives a list, dict, or other mutable container from its caller, modifying that container in-place creates invisible action-at-a-distance: the caller's variable changes without any visible assignment on the caller's side. This is a common source of bugs, especially when LLM agents generate code that reads the caller and the callee independently without seeing the full picture.
+
+**Mutating your own local variables is fine.** This rule applies to parameters passed in from outside, not to variables you created within the function.
+
+**The decision rule:**
+- **Own local variable** (you created it in this function) → mutate freely, including `my_list[0] = "abcd"`, `.append()`, `.update()`, etc.
+- **Caller-supplied parameter** (passed as an argument) → prefer returning a new value. If in-place mutation is genuinely needed (performance-critical, very large data structure), document it in the docstring.
+
+**Prefer comprehensions over in-place mutation loops:**
+
+When building or transforming collections, list comprehensions, dict comprehensions, and generator expressions are preferred over loops that mutate a container element-by-element. Comprehensions make the intent clear in a single expression — the reader sees the full transformation at once rather than tracing through a loop body to understand what changes.
+
+This is not always possible (some transformations have complex conditional logic or side effects that do not fit a comprehension), but it should be the default.
+
+❌ Bad (mutates the caller's list in-place — caller does not expect this):
+```python
+def tag_futures(futures: List[Future], tag: str) -> None:
+    for i in range(len(futures)):
+        futures[i] = futures[i].with_tag(tag)  # ← caller's list silently modified
+```
+
+✅ Good (returns a new list — caller sees the transformation at the assignment):
+```python
+def tag_futures(futures: List[Future], tag: str) -> List[Future]:
+    return [future.with_tag(tag) for future in futures]
+
+# Caller:
+futures = tag_futures(futures, tag="priority")
+```
+
+The caller's reassignment (`futures = ...`) makes the transformation visible. Without it, the caller's `futures` would silently change after the function call — no assignment, no signal.
+
+❌ Bad (in-place loop mutation where a comprehension is cleaner):
+```python
+results: Dict[str, float] = {}
+for worker_id, timings in timing_dict.items():
+    results[worker_id] = sum(timings) / len(timings)
+```
+
+✅ Good (dict comprehension — intent is clear in one expression):
+```python
+results: Dict[str, float] = {
+    worker_id: sum(timings) / len(timings)
+    for worker_id, timings in timing_dict.items()
+}
+```
+
+**When in-place mutation of parameters IS acceptable:**
+
+- **Explicit accumulator pattern:** The function's entire purpose is to populate a container passed to it, and this is documented: `def populate_results(*, results: Dict[str, float], batch: Batch) -> None:`. The docstring should say "Mutates `results` in-place."
+- **Performance-critical code** with very large data structures where creating a copy would be prohibitively expensive.
+- **Framework hooks** where the API contract specifies mutation (e.g., Morphic's `pre_initialize(cls, data: dict)` which mutates `data` by design).
+
 #### String Formatting
 
 - **Always use f-strings** (Python 3.6+), not `.format()` or `%` formatting
@@ -489,9 +1045,81 @@ with optional_dependency("ray", error="ignore"):
 - Use `@pytest.mark.parametrize` to cover multiple scenarios from a single test function
 - Never catch and suppress test failures — fix the code or the test
 
+#### Never Test Imported Library Functionality (CRITICAL — LLM Anti-Pattern)
+
+**Tests must target YOUR code's behavior, not the behavior of imported libraries.** If a function works because a library (morphic, Pydantic, Ray, etc.) does its job correctly, you do not need a test that verifies the library works. The library's own test suite covers that. Your test suite covers YOUR logic.
+
+**Why LLMs produce this anti-pattern:** LLM coding assistants reflexively generate "smoke tests" that verify framework behavior rather than application behavior. When asked to "add tests for `@validate`," an LLM will write tests that pass a wrong type and assert `ValidationError` is raised. This tests that `morphic.validate` works — it does not test that your function computes the correct result, handles edge cases, or integrates correctly with the rest of the system. These tests provide zero value: they will never fail unless someone upgrades morphic to a broken version, which is not your test suite's job to catch.
+
+**The decision rule:** before writing a test, ask: **"If this test fails, does it mean MY code has a bug, or does it mean a LIBRARY has a bug?"** If the answer is "a library has a bug," do not write the test.
+
+| ❌ Tests that target library behavior (NEVER write these) | ✅ Tests that target YOUR behavior (ALWAYS write these) |
+|---|---|
+| `@validate` rejects wrong types with `ValidationError` | `wait()` returns done and not-done sets with correct futures in each |
+| `Typed` fields are immutable after construction | `gather()` preserves input order when given a list of futures |
+| `Registry.of("name")` resolves the correct subclass | `WorkerBuilder` raises `ValueError` for incompatible mode + limits combo |
+| `model_dump()` serializes all fields | Worker pool distributes tasks across workers via load balancer |
+| `@field_validator` runs during construction | `RetryConfig` retry loop stops after `max_retries` exhausted |
+| Pydantic coerces `"25"` to `int(25)` | `LimitSet.acquire()` blocks when capacity is exhausted |
+| `ray.wait()` returns ready and not-ready refs | `stop()` cancels pending futures when called during active submission |
+
+**Specific libraries this applies to in this codebase:**
+- `morphic.validate`, `morphic.Typed`, `morphic.Registry`, `morphic.MutableTyped` — assume they work
+- `pydantic.ValidationError`, `@field_validator`, `model_dump()`, `PrivateAttr` — assume they work
+- `ray`, `ray.wait()`, `ray.get()`, `ray.remote` — assume they work
+- `concurrent.futures`, `threading`, `multiprocessing` — assume they work
+- `pytest.raises`, `pytest.mark.parametrize`, pytest fixtures — assume they work
+
+**What you SHOULD test:** the logic YOUR code adds on top of these libraries. If `gather()` polls futures with a `PollingStrategy` and returns results in input order, test that the ordering is preserved and the polling terminates — not that `ray.wait()` returns the correct ObjectRefs or that `@validate` rejects a dict where a `List[Future]` is expected.
+
+#### Never Hardcode Typed Default Values in Tests (CRITICAL)
+
+**When testing a method that receives parameters from a `Typed` class's fields, use `ClassName.param_default_values` to supply defaults — never re-type the values manually.** `param_default_values` is a `@classproperty` on every Morphic `Typed` class that returns a `Dict[str, Any]` of all fields that have defaults, mapped to their default values.
+
+**Why this matters:**
+
+1. **Silent divergence.** When a class field default changes (e.g., `GlobalDefaults.worker_timeout` moves from `30.0` to `60.0`), every test that hardcodes `timeout=30.0` is now testing against a stale value. The test still passes — it passes the old default explicitly — so nobody discovers that the new default is not exercised in tests. The test provides false confidence.
+
+2. **Redundant maintenance burden.** A `Typed` class with 8 defaulted fields produces 8 magic numbers that must be synchronized between the class definition and every test that calls the method. When a field is renamed (e.g., `timeout` → `worker_timeout`), every test must be updated manually. With `param_default_values`, the rename propagates automatically.
+
+3. **Tests that hardcode defaults test nothing.** If a test passes `max_retries=3` and the class default is `max_retries=3`, the test is not verifying that the class default is correct — it is bypassing the class default entirely and substituting its own value. The test would pass even if the class default were changed to `max_retries=10`, because the test never reads the class default. This is a test that appears to cover a code path but actually covers a hardcoded constant.
+
+**The pattern:**
+
+```python
+# ❌ Bad: hardcoded defaults that duplicate RetryConfig class fields
+retry_config = RetryConfig(
+    num_retries=3,                # duplicates RetryConfig.num_retries
+    retry_algorithm="exponential", # duplicates RetryConfig.retry_algorithm
+    retry_wait=2.0,               # duplicates RetryConfig.retry_wait
+    retry_jitter=0.7,             # duplicates RetryConfig.retry_jitter
+)
+```
+
+```python
+# ✅ Good: splat the class defaults, override only what the test cares about
+retry_config = RetryConfig(
+    **RetryConfig.param_default_values,  # all defaults from the Typed class
+    num_retries=5,  # test-specific override
+)
+```
+
+**How `param_default_values` works:** It reads the Pydantic JSON schema and returns a dict of `{field_name: default_value}` for every field that has an explicit default. Fields without defaults (mandatory fields) are not included. This means `**RetryConfig.param_default_values` supplies exactly the fields that would be auto-filled if you constructed a `RetryConfig()` with no arguments — and nothing more.
+
+**When a test SHOULD hardcode a value:** When the test is specifically verifying behavior under a non-default value. For example, `test_fibonacci_backoff` should pass `retry_algorithm="fibonacci"` explicitly, because the test exists to verify Fibonacci behavior. The explicit value overrides the splatted default:
+
+```python
+# ✅ Good: test-specific override on top of class defaults
+retry_config = RetryConfig(
+    **RetryConfig.param_default_values,
+    retry_algorithm="fibonacci",  # explicitly overrides the default
+    num_retries=5,                # test needs exactly 5 retries
+)
+```
+
 ### Fail Fast
 
-Detect invalid state at the earliest possible point. Invalid inputs should raise exceptions at the function boundary where they enter, not deep inside nested calls where the traceback is useless.
+This is the timing corollary of the **Loud Failures Over Silent Defaults** principle above: detect invalid state at the *earliest possible point*. Invalid inputs should raise exceptions at the function boundary where they enter, not deep inside nested calls where the traceback is useless. A `.get(key, default)` that silently invents a value is the opposite of fail-fast — it lets the invalid state propagate silently until it causes mysterious behavior.
 
 - Validate arguments at the top of public methods before any work is done
 - Raise specific, descriptive exceptions immediately when preconditions are violated
@@ -659,13 +1287,109 @@ def execute(
 
 **Corollary — `**kwargs` in an abstract method signature:** When a base class defines `def process(self, ..., **kwargs)` and every subclass does `kwargs.get("timeout")`, the base class signature is wrong. Add `timeout: Optional[float] = None` to the base class and all subclasses. The `**kwargs` should only carry genuinely subclass-specific extensions that differ across implementations and cannot be enumerated on the base.
 
+### Never Duplicate Caller-Supplied Values as Parameter Defaults (CRITICAL)
+
+**When a parameter is always supplied by the caller, it MUST NOT have a default value on the receiving function.** A default on a parameter that the caller always passes is dead code that silently masks a broken call chain. If the caller stops passing the value (due to a refactoring bug, a missing context key, or a dict-splatting error), the function falls back to the hard-coded default instead of crashing. The developer never learns that the value they configured is not reaching the function.
+
+**This is the function-signature equivalent of `.get(key, default)`.** The `.get()` anti-pattern invents a fallback value when a dict key is missing. A redundant parameter default invents a fallback value when a caller forgets to pass an argument. Both hide the same bug: a value that should be present is absent, and the program continues with wrong data instead of crashing.
+
+**Why LLMs produce this pattern:** LLM coding assistants generate parameter defaults reflexively because they cannot see the call chain. When an LLM writes `def execute(self, *, timeout: float = 30.0, ...)`, it does not know that `timeout` is always passed from `global_config` at the call site. The LLM adds a default "just in case," which is exactly the defensive-coding instinct that produces `.get(key, default)` in dicts. The result is the same: a silent fallback that masks bugs.
+
+**The decision rule:** ask **"Does every caller always pass this argument?"**
+- **Yes** (the value comes from a config object, a builder, or an explicit call site) → **no default**. Remove it. If the caller ever fails to pass it, the function must crash with `TypeError: missing required keyword argument`.
+- **No** (some callers genuinely omit the argument, and `None`/a sentinel is a valid state) → a default is appropriate.
+
+**Three forms of this anti-pattern:**
+
+#### Form 1: Parameter default duplicates a config-supplied value (most dangerous)
+
+A config object or builder provides the value. A factory or initialization method reads the config and passes it to a component. The component also has a hard-coded default that duplicates the config's default. If the factory is refactored and stops passing the key, the component silently uses its own default instead of crashing.
+
+❌ Bad (component has redundant default that duplicates config value):
+```python
+class GlobalDefaults(MutableTyped):
+    worker_timeout: float = 30.0
+    max_queued_tasks: int = 100
+
+class ThreadWorkerProxy(WorkerProxy):
+    def __init__(
+        self,
+        *,
+        timeout: float = 30.0,              # ❌ Duplicates global_config default
+        max_queued_tasks: int = 100,         # ❌ Duplicates global_config default
+        ...
+    ):
+        ...
+```
+
+**Why this is dangerous:** If the builder is refactored and stops passing `timeout`, the proxy silently uses `30.0` instead of crashing. The developer changes the global config to `timeout=60.0`, runs the program, and the proxy silently ignores the change. No error, no warning. The config system appears broken, but the real bug is the redundant default hiding the missing argument.
+
+✅ Good (no defaults on always-supplied parameters — crash immediately if missing):
+```python
+class ThreadWorkerProxy(WorkerProxy):
+    def __init__(
+        self,
+        *,
+        timeout: float,              # No default — builder MUST pass it
+        max_queued_tasks: int,        # No default — builder MUST pass it
+        ...
+    ):
+        ...
+```
+
+Now if the builder stops passing `timeout`, construction fails immediately with `TypeError: __init__() missing required keyword argument: 'timeout'`. Thirty seconds to fix, not thirty hours to debug.
+
+#### Form 2: Inline magic number duplicates a config default (silent divergence)
+
+A method body contains a hard-coded fallback that duplicates a config-level default. If the config default changes, the inline fallback silently diverges.
+
+❌ Bad (inline magic number duplicates config default):
+```python
+def _create_worker(self, *, timeout: Optional[float] = None, ...) -> WorkerProxy:
+    resolved_timeout: float = timeout if timeout is not None else 30.0  # ❌ Magic 30.0
+```
+
+✅ Good (make the parameter mandatory — no fallback needed):
+```python
+def _create_worker(self, *, timeout: float, ...) -> WorkerProxy:
+    # No fallback. Caller must pass the value from global_config.
+```
+
+#### Form 3: Base class default propagated to all subclasses (interface-level silent default)
+
+A base class abstract method declares a parameter with a default. Every subclass inherits the default. The builder/factory always passes the value. The default exists only because the base class was written before the call chain was finalized, and nobody removed it.
+
+❌ Bad (base class default propagates to every subclass):
+```python
+class WorkerProxy(Typed, ABC):
+    @abstractmethod
+    def start(self, *, timeout: float = 30.0, ...) -> None: ...
+
+class ThreadWorkerProxy(WorkerProxy):
+    def start(self, *, timeout: float = 30.0, ...) -> None:  # ❌ Inherited default
+        ...
+```
+
+✅ Good (mandatory on base, no default on subclass):
+```python
+class WorkerProxy(Typed, ABC):
+    @abstractmethod
+    def start(self, *, timeout: float, ...) -> None: ...
+
+class ThreadWorkerProxy(WorkerProxy):
+    def start(self, *, timeout: float, ...) -> None:
+        ...
+```
+
+**The test for this pattern in code review:** For every parameter with a default value, ask: "Is there a code path where this default actually activates in production?" If the answer is "no, the caller always passes it," remove the default. If the answer is "only in tests," that is still "no" — fix the tests to pass the value explicitly. Tests that rely on silent defaults are tests that do not test the real call chain.
+
 ### Exception Handling
 
 - **Catch narrow, specific exceptions** (`ValueError`, `TypeError`, `TimeoutError`), never bare `except:` or `except Exception:`
 - **Raise low, catch high**: let lower-level functions raise; catch at application boundaries (CLI, web handler, top-level orchestrator)
 - **Never silently swallow exceptions**: `except: pass` hides bugs. If you must catch broadly, at minimum log the exception
 - **Use custom exception classes** for domain-specific errors (`WorkerStoppedError`, `LimitExceededError`) — callers can then catch precisely what they need
-- **Include context in error messages**: the message should contain enough information to diagnose the problem without a debugger
+- **Include context in error messages**: the message should contain enough information to diagnose the problem without a debugger. Follow the feedback-driven exception pattern from **Loud Failures Over Silent Defaults**: state what was expected, what was received, and what the available options are (e.g., `f"Unknown worker mode {mode!r}. Must be one of: {list(ExecutionMode)}."`).
 
 ❌ Bad:
 ```python
@@ -1011,6 +1735,34 @@ proxy = WorkerProxy.of(mode, ...)
 
 This works because each subclass registers itself via `aliases` (or its class name is auto-registered). The `of()` method handles case-insensitive matching, alias resolution, and hierarchy scoping automatically.
 
+#### `Base.of()` vs `Base.get_subclass()` — Instantiation vs Class Lookup
+
+The Registry provides two distinct lookup methods. Using the wrong one is a common and expensive mistake:
+
+| Method | Returns | Use when |
+|---|---|---|
+| `Base.of("key", **kwargs)` | An **instance** of the resolved subclass | You need a constructed object ready to use |
+| `Base.get_subclass("key")` | The **class itself** (not an instance) | You need the class to call classmethods, read ClassVars, or construct later with specific arguments |
+
+**The anti-pattern:** instantiating a subclass just to get its class reference. This is wasteful (construction may be expensive or require mandatory fields) and semantically wrong (the instance is immediately discarded).
+
+❌ Bad (instantiate then discard — wasteful and may fail):
+```python
+proxy_cls = WorkerProxy.of("thread").__class__   # ❌ Constructs a throwaway instance
+proxy_cls = type(WorkerProxy.of("thread"))        # ❌ Same problem, different syntax
+```
+
+These fail outright if the subclass has mandatory fields with no defaults.
+
+✅ Good (direct class lookup — no instantiation):
+```python
+proxy_cls: Type[WorkerProxy] = WorkerProxy.get_subclass("thread")
+```
+
+**Decision rule:** Ask **"Do I need an instance, or do I need the class?"**
+- Need to call instance methods or access instance fields → `Base.of("key", field=value)`
+- Need to call classmethods, read ClassVars, or construct later → `Base.get_subclass("key")`
+
 ### Anti-Pattern 5: Ignoring Typed's Validation for Constructor Inputs
 
 `Typed` automatically coerces compatible types (e.g., `"25"` → `int(25)`, `dict` → nested `Typed` subclass). Never add manual type-conversion code before constructing a Typed object.
@@ -1071,7 +1823,7 @@ retry_cfg = RetryConfig(timeout=30)  # Validated, typos caught
 
 ### (Optional) Anti-Pattern 7: Not Using `aliases` for Registry Subclasses
 
-Every `Registry` subclass is automatically registered under its class name. If you want additional lookup keys (e.g., `"thread"` for `ThreadWorkerProxy`), use `aliases` instead of relying on call sites to know the full class name.
+Every `Registry` subclass is automatically registered under its class name (case-insensitive). If you want additional lookup keys (e.g., `"thread"` for `ThreadWorkerProxy`), use `aliases` instead of relying on call sites to know the full class name.
 
 ❌ Bad (no aliases — call sites must know full class name):
 ```python
@@ -1091,7 +1843,126 @@ class ThreadWorkerProxy(WorkerProxy):
 proxy = WorkerProxy.of("thread")
 ```
 
-### Anti-Pattern 8: Plain Classes Where Typed Would Add Value
+#### `aliases` Style Rules
+
+**Do not include the lowercase class name in `aliases`.** The Registry automatically registers every subclass under a case-insensitive version of its class name. Including it in `aliases` is redundant noise that a reader must mentally deduplicate.
+
+❌ Bad (redundant lowercase class name):
+```python
+class ThreadWorkerProxy(WorkerProxy):
+    aliases: ClassVar[List[str]] = ["threadworkerproxy", "thread"]
+```
+
+✅ Good (only genuinely new aliases):
+```python
+class ThreadWorkerProxy(WorkerProxy):
+    aliases: ClassVar[List[str]] = ["thread"]
+```
+
+If the class has no aliases beyond its own name, omit `aliases` entirely.
+
+#### Registry Subclass Body Ordering
+
+Within a `Typed + Registry` subclass, declare members in the following order. This makes the class scannable: identity first, then class-level constants, then per-instance fields, then methods.
+
+1. **`aliases`** (if any) — immediately after the docstring, before all other attributes. This is the class's "identity card" in the Registry: a reader scanning the file sees what names resolve to this class before anything else.
+2. **Other `ClassVar` attributes** — class-level constants like `mode`, feature flags. Separated from `aliases` by a blank line.
+3. **Instance fields** — separated from ClassVars by a blank line. Fields with defaults first, then mandatory fields (no default).
+4. **Methods** — lifecycle hooks, public methods, private methods.
+
+❌ Bad (mixed ordering):
+```python
+class ThreadWorkerProxy(WorkerProxy):
+    """Thread-based worker proxy."""
+    timeout: float = 30.0                                           # Instance field first
+    mode: ClassVar[ExecutionMode] = ExecutionMode.THREAD            # ClassVar after instance field
+    aliases: ClassVar[List[str]] = ["thread"]                       # aliases buried
+```
+
+✅ Good (correct ordering):
+```python
+class ThreadWorkerProxy(WorkerProxy):
+    """Thread-based worker proxy."""
+    aliases: ClassVar[List[str]] = ["thread"]                       # 1. aliases first
+
+    mode: ClassVar[ExecutionMode] = ExecutionMode.THREAD            # 2. Other ClassVars
+
+    timeout: float = 30.0                                           # 3. Instance fields
+```
+
+### Anti-Pattern 8: `@classmethod` Returning a Fixed Constant
+
+A `@classmethod` that takes no arguments (other than `cls`) and always returns the same fixed value is a `ClassVar` in disguise. The method-call syntax (`cls.some_value()`) hides the fact that the value is static and forces every call site to use parentheses for no reason.
+
+**Code smell:** a base class `@classmethod` with `raise NotImplementedError()` and subclasses that return a literal.
+
+❌ Bad (classmethod returning a constant):
+```python
+class BaseHandler(Typed, Registry):
+    @classmethod
+    @abstractmethod
+    def max_batch_size(cls) -> int:
+        raise NotImplementedError()
+
+class HttpHandler(BaseHandler):
+    @classmethod
+    def max_batch_size(cls) -> int:
+        return 100
+
+# Call site — parentheses required:
+batch_size = handler_cls.max_batch_size()
+```
+
+✅ Good (ClassVar — value accessed like an attribute):
+```python
+class BaseHandler(Typed, Registry):
+    max_batch_size: ClassVar[int]  # No default → subclass must set it
+
+class HttpHandler(BaseHandler):
+    max_batch_size: ClassVar[int] = 100
+
+# Call site — no parentheses:
+batch_size = handler_cls.max_batch_size
+```
+
+**The migration path matters.** When a value starts as a `ClassVar` but later needs to become computed (dynamic), the correct migration is to `@classproperty` (from `morphic`), NOT to `@classmethod`. This is because `@classproperty` preserves the attribute-access syntax — **calling code does not change**.
+
+#### `@classproperty` for Computed Class-Level Attributes
+
+`morphic.classproperty` is the class-level equivalent of `@property`. It is accessed as `cls.attribute` (no parentheses), but runs a function under the hood. This makes it the ideal migration target when a `ClassVar` needs to become dynamic:
+
+**Migration: `ClassVar` → `@classproperty` (no call-site changes):**
+```python
+# BEFORE: ClassVar
+class BaseHandler(Typed, Registry):
+    max_batch_size: ClassVar[int]
+
+class HttpHandler(BaseHandler):
+    max_batch_size: ClassVar[int] = 100
+
+# AFTER: @classproperty — call sites unchanged
+from morphic import classproperty
+
+class BaseHandler(Typed, Registry):
+    @classproperty
+    def max_batch_size(cls) -> int:
+        return cls._base_batch_size * cls._scaling_factor
+
+# Call sites unchanged:
+batch_size = handler_cls.max_batch_size  # ← No parentheses, same as before
+```
+
+**When to use each:**
+
+| Pattern | When to use | Access syntax |
+|---|---|---|
+| `ClassVar` | Fixed constant, same for all instances of a subclass, never computed | `cls.value` |
+| `@classproperty` | Computed from other ClassVars or class-level state, may vary by subclass | `cls.value` (same as ClassVar) |
+| `@classmethod` | True method that takes arguments, performs side effects, or returns different values based on arguments | `cls.method(args)` |
+
+**Decision rule:** If the method takes no arguments beyond `cls` and always returns the same value for a given subclass, it is NOT a `@classmethod`. Use `ClassVar` if the value is a literal, or `@classproperty` if it is computed from other class-level attributes.
+
+### Anti-Pattern 9: Plain Classes Where Typed Would Add Value
 
 If a class primarily holds configuration (immutable after construction) plus some derived fields, prefer `Typed` over a plain class. You get free validation, serialization, immutability, and `model_dump()`.
 

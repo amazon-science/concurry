@@ -1,0 +1,368 @@
+---
+description: "Morphic Typed & Registry patterns — anti-patterns, aliases, ClassVar, classproperty, PrivateAttr."
+alwaysApply: true
+---
+# Morphic Typed & Registry Patterns
+
+Concurry's data model is built on `morphic.Typed` (immutable Pydantic BaseModel) and `morphic.Registry` (inheritance-based class registration with string-based factory lookup). Understanding these two base classes is essential to writing idiomatic Concurry code.
+
+## Quick Reference: What Typed Gives You for Free
+
+| Feature | How | Manual Code It Replaces |
+|---|---|---|
+| Immutability | `frozen=True` by default | No need for `__slots__`, `@dataclass(frozen=True)` |
+| Validation on construction | Pydantic field types | Manual `if not isinstance(...)` checks |
+| Type coercion | Automatic (`"25"` → `int(25)`) | Manual `int(x)` calls |
+| Serialization | `.model_dump()` → dict | Hand-written `.to_dict()` methods |
+| Factory method | `MyClass.of(...)` or `Base.of("subclass", ...)` | Manual `__init__` wiring |
+| Lifecycle hooks | `pre_initialize`, `pre_validate`, `post_initialize`, `post_validate` | `__init__` overrides with `object.__setattr__` |
+| Registry lookup | `Base.of("thread", ...)` | Manual if/elif chains or dict dispatches |
+| Nested model coercion | `dict` → `Typed` subclass automatically | Manual `MyModel(**d)` construction |
+
+## Anti-Pattern 1: Hand-Written `to_dict()` Methods
+
+`Typed` inherits Pydantic's `.model_dump()` which serializes all fields to a dict recursively. Never write a custom `to_dict()` on a `Typed` subclass.
+
+❌ Bad (hand-written serialization on a Typed subclass):
+```python
+class RetryConfig(Typed):
+    max_retries: int
+    wait_seconds: float
+    algorithm: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "max_retries": self.max_retries,
+            "wait_seconds": self.wait_seconds,
+            "algorithm": self.algorithm,
+        }
+```
+
+✅ Good (use the built-in):
+```python
+class RetryConfig(Typed):
+    max_retries: int
+    wait_seconds: float
+    algorithm: str
+
+# Call sites:
+config_dict = retry_config.model_dump()
+```
+
+**Exception:** If you need to *exclude* certain fields or rename keys for a specific serialization context, use `model_dump(include=..., exclude=...)` rather than writing a custom method.
+
+## Anti-Pattern 2: Using `object.__setattr__` to Mutate Typed Fields
+
+`Typed` is frozen (immutable). Calling `object.__setattr__(self, "field", value)` bypasses Pydantic validation and breaks the immutability contract. If you need to normalize a field during construction, use `model_post_init` (Pydantic's built-in hook) or Typed's `pre_initialize` lifecycle hook.
+
+❌ Bad (bypassing frozen with `object.__setattr__` for field normalization):
+```python
+class LimitPool(Typed):
+    load_balancing: Optional[str] = None
+
+    def post_initialize(self) -> None:
+        if self.load_balancing is None:
+            local_config = global_config.clone()
+            object.__setattr__(self, "load_balancing", local_config.defaults.limit_pool_load_balancing)
+```
+
+✅ Good (normalize in `pre_initialize` before Pydantic validates):
+```python
+class LimitPool(Typed):
+    load_balancing: str  # Always resolved after construction
+
+    @classmethod
+    def pre_initialize(cls, data: dict) -> None:
+        if data.get("load_balancing") is None:
+            local_config = global_config.clone()
+            data["load_balancing"] = local_config.defaults.limit_pool_load_balancing
+```
+
+**When `object.__setattr__` IS acceptable:**
+- On `MutableTyped` subclasses (which are not frozen) — e.g., `GlobalDefaults`, `PromptMOOConfig`
+- Setting `PrivateAttr` values in `post_initialize` (Pydantic explicitly supports this)
+- On non-Typed objects where you are stamping runtime metadata
+
+## Anti-Pattern 3: Mutable State as Typed Fields with `= None`
+
+`Typed` fields are frozen after construction. Storing mutable runtime state (queues, locks, processes, balancer instances) as regular fields and then assigning them in `post_initialize` via `object.__setattr__` works but is semantically wrong — it says "this is an immutable config field" when it is actually mutable runtime state. Use Pydantic's `PrivateAttr` for mutable internal state on frozen models.
+
+Concurry already does this correctly in most places — follow the existing pattern:
+
+✅ Good (from `ProcessWorkerProxy`):
+```python
+from pydantic import PrivateAttr
+
+class ProcessWorkerProxy(WorkerProxy):
+    _command_queue: Any = PrivateAttr()
+    _result_queue: Any = PrivateAttr()
+    _futures: dict = PrivateAttr()
+    _futures_lock: Any = PrivateAttr()
+    _process: Any = PrivateAttr()
+    _result_thread: Any = PrivateAttr()
+```
+
+✅ Good (from `LimitPool`):
+```python
+class LimitPool(Typed):
+    _balancer: Any = PrivateAttr()
+```
+
+**Rule of thumb:** If a field is set once at construction and never changes, it is a Typed field. If it is created/mutated during the object's lifetime (locks, queues, runtime handles, balancers), it must be a `PrivateAttr`.
+
+## Anti-Pattern 4: Manual Registry Dispatch Instead of `Registry.of()`
+
+The `Registry` pattern provides `Base.of("key", **kwargs)` which resolves the correct subclass by name/alias. Never write manual if/elif dispatch chains or dict-based lookups to select subclasses.
+
+❌ Bad (manual dispatch):
+```python
+if mode == "thread":
+    proxy = ThreadWorkerProxy(...)
+elif mode == "process":
+    proxy = ProcessWorkerProxy(...)
+elif mode == "ray":
+    proxy = RayWorkerProxy(...)
+else:
+    raise ValueError(f"Unknown mode: {mode}")
+```
+
+✅ Good (use Registry):
+```python
+proxy = WorkerProxy.of(mode, ...)
+```
+
+This works because each subclass registers itself via `aliases` (or its class name is auto-registered). The `of()` method handles case-insensitive matching, alias resolution, and hierarchy scoping automatically.
+
+### `Base.of()` vs `Base.get_subclass()` — Instantiation vs Class Lookup
+
+The Registry provides two distinct lookup methods. Using the wrong one is a common and expensive mistake:
+
+| Method | Returns | Use when |
+|---|---|---|
+| `Base.of("key", **kwargs)` | An **instance** of the resolved subclass | You need a constructed object ready to use |
+| `Base.get_subclass("key")` | The **class itself** (not an instance) | You need the class to call classmethods, read ClassVars, or construct later with specific arguments |
+
+**The anti-pattern:** instantiating a subclass just to get its class reference. This is wasteful (construction may be expensive or require mandatory fields) and semantically wrong (the instance is immediately discarded).
+
+❌ Bad (instantiate then discard — wasteful and may fail):
+```python
+proxy_cls = WorkerProxy.of("thread").__class__   # ❌ Constructs a throwaway instance
+proxy_cls = type(WorkerProxy.of("thread"))        # ❌ Same problem, different syntax
+```
+
+These fail outright if the subclass has mandatory fields with no defaults.
+
+✅ Good (direct class lookup — no instantiation):
+```python
+proxy_cls: Type[WorkerProxy] = WorkerProxy.get_subclass("thread")
+```
+
+**Decision rule:** Ask **"Do I need an instance, or do I need the class?"**
+- Need to call instance methods or access instance fields → `Base.of("key", field=value)`
+- Need to call classmethods, read ClassVars, or construct later → `Base.get_subclass("key")`
+
+## Anti-Pattern 5: Ignoring Typed's Validation for Constructor Inputs
+
+`Typed` automatically coerces compatible types (e.g., `"25"` → `int(25)`, `dict` → nested `Typed` subclass). Never add manual type-conversion code before constructing a Typed object.
+
+❌ Bad (manual coercion before Typed construction):
+```python
+timeout = float(config["timeout"])
+max_retries = int(config["max_retries"])
+retry_cfg = RetryConfig(timeout=timeout, max_retries=max_retries, ...)
+```
+
+✅ Good (let Typed/Pydantic handle coercion):
+```python
+retry_cfg = RetryConfig(timeout=config["timeout"], max_retries=config["max_retries"], ...)
+```
+
+Similarly, when passing a `dict` to a field typed as a `Typed` subclass, Pydantic automatically coerces the dict into the model:
+
+```python
+class Limit(Typed, ABC):
+    key: str
+    capacity: int
+
+class RateLimit(Limit):
+    window_seconds: float
+
+class LimitPool(Typed):
+    limits: List[Limit]
+
+# Pydantic coerces dicts into the appropriate Limit subclass:
+pool = LimitPool(limits=[
+    RateLimit(key="rpm", capacity=100, window_seconds=60),
+])
+```
+
+## Anti-Pattern 6: Using Bare `dict` for Configuration Bundles
+
+When passing structured configuration through multiple layers, avoid bare `Dict[str, Any]`. Define a `Typed` config class so typos and type errors are caught at construction time.
+
+❌ Bad (ad-hoc dict keys with no validation):
+```python
+worker_config = {
+    "timeout": 30,
+    "max_retires": 3,    # ← typo: "retires" instead of "retries"
+    "algorithm": "exponential",
+}
+```
+
+✅ Good (validated config class):
+```python
+class RetryConfig(Typed):
+    timeout: float
+    max_retries: int = 3
+    algorithm: str = "exponential"
+
+retry_cfg = RetryConfig(timeout=30)  # Validated, typos caught
+```
+
+## (Optional) Anti-Pattern 7: Not Using `aliases` for Registry Subclasses
+
+Every `Registry` subclass is automatically registered under its class name (case-insensitive). If you want additional lookup keys (e.g., `"thread"` for `ThreadWorkerProxy`), use `aliases` instead of relying on call sites to know the full class name.
+
+❌ Bad (no aliases — call sites must know full class name):
+```python
+class ThreadWorkerProxy(WorkerProxy):
+    pass
+
+# Call site must use exact class name:
+proxy = WorkerProxy.of("ThreadWorkerProxy")
+```
+
+✅ Good (aliases for convenient lookup):
+```python
+class ThreadWorkerProxy(WorkerProxy):
+    aliases = ["thread"]
+
+# Call site uses short name:
+proxy = WorkerProxy.of("thread")
+```
+
+### `aliases` Style Rules
+
+**Do not include the lowercase class name in `aliases`.** The Registry automatically registers every subclass under a case-insensitive version of its class name. Including it in `aliases` is redundant noise that a reader must mentally deduplicate.
+
+❌ Bad (redundant lowercase class name):
+```python
+class ThreadWorkerProxy(WorkerProxy):
+    aliases: ClassVar[List[str]] = ["threadworkerproxy", "thread"]
+```
+
+✅ Good (only genuinely new aliases):
+```python
+class ThreadWorkerProxy(WorkerProxy):
+    aliases: ClassVar[List[str]] = ["thread"]
+```
+
+If the class has no aliases beyond its own name, omit `aliases` entirely.
+
+### Registry Subclass Body Ordering
+
+Within a `Typed + Registry` subclass, declare members in the following order. This makes the class scannable: identity first, then class-level constants, then per-instance fields, then methods.
+
+1. **`aliases`** (if any) — immediately after the docstring, before all other attributes. This is the class's "identity card" in the Registry: a reader scanning the file sees what names resolve to this class before anything else.
+2. **Other `ClassVar` attributes** — class-level constants like `mode`, feature flags. Separated from `aliases` by a blank line.
+3. **Instance fields** — separated from ClassVars by a blank line. Fields with defaults first, then mandatory fields (no default).
+4. **Methods** — lifecycle hooks, public methods, private methods.
+
+❌ Bad (mixed ordering):
+```python
+class ThreadWorkerProxy(WorkerProxy):
+    """Thread-based worker proxy."""
+    timeout: float = 30.0                                           # Instance field first
+    mode: ClassVar[ExecutionMode] = ExecutionMode.THREAD            # ClassVar after instance field
+    aliases: ClassVar[List[str]] = ["thread"]                       # aliases buried
+```
+
+✅ Good (correct ordering):
+```python
+class ThreadWorkerProxy(WorkerProxy):
+    """Thread-based worker proxy."""
+    aliases: ClassVar[List[str]] = ["thread"]                       # 1. aliases first
+
+    mode: ClassVar[ExecutionMode] = ExecutionMode.THREAD            # 2. Other ClassVars
+
+    timeout: float = 30.0                                           # 3. Instance fields
+```
+
+## Anti-Pattern 8: `@classmethod` Returning a Fixed Constant
+
+A `@classmethod` that takes no arguments (other than `cls`) and always returns the same fixed value is a `ClassVar` in disguise. The method-call syntax (`cls.some_value()`) hides the fact that the value is static and forces every call site to use parentheses for no reason.
+
+**Code smell:** a base class `@classmethod` with `raise NotImplementedError()` and subclasses that return a literal.
+
+❌ Bad (classmethod returning a constant):
+```python
+class BaseHandler(Typed, Registry):
+    @classmethod
+    @abstractmethod
+    def max_batch_size(cls) -> int:
+        raise NotImplementedError()
+
+class HttpHandler(BaseHandler):
+    @classmethod
+    def max_batch_size(cls) -> int:
+        return 100
+
+# Call site — parentheses required:
+batch_size = handler_cls.max_batch_size()
+```
+
+✅ Good (ClassVar — value accessed like an attribute):
+```python
+class BaseHandler(Typed, Registry):
+    max_batch_size: ClassVar[int]  # No default → subclass must set it
+
+class HttpHandler(BaseHandler):
+    max_batch_size: ClassVar[int] = 100
+
+# Call site — no parentheses:
+batch_size = handler_cls.max_batch_size
+```
+
+**The migration path matters.** When a value starts as a `ClassVar` but later needs to become computed (dynamic), the correct migration is to `@classproperty` (from `morphic`), NOT to `@classmethod`. This is because `@classproperty` preserves the attribute-access syntax — **calling code does not change**.
+
+### `@classproperty` for Computed Class-Level Attributes
+
+`morphic.classproperty` is the class-level equivalent of `@property`. It is accessed as `cls.attribute` (no parentheses), but runs a function under the hood. This makes it the ideal migration target when a `ClassVar` needs to become dynamic:
+
+**Migration: `ClassVar` → `@classproperty` (no call-site changes):**
+```python
+# BEFORE: ClassVar
+class BaseHandler(Typed, Registry):
+    max_batch_size: ClassVar[int]
+
+class HttpHandler(BaseHandler):
+    max_batch_size: ClassVar[int] = 100
+
+# AFTER: @classproperty — call sites unchanged
+from morphic import classproperty
+
+class BaseHandler(Typed, Registry):
+    @classproperty
+    def max_batch_size(cls) -> int:
+        return cls._base_batch_size * cls._scaling_factor
+
+# Call sites unchanged:
+batch_size = handler_cls.max_batch_size  # ← No parentheses, same as before
+```
+
+**When to use each:**
+
+| Pattern | When to use | Access syntax |
+|---|---|---|
+| `ClassVar` | Fixed constant, same for all instances of a subclass, never computed | `cls.value` |
+| `@classproperty` | Computed from other ClassVars or class-level state, may vary by subclass | `cls.value` (same as ClassVar) |
+| `@classmethod` | True method that takes arguments, performs side effects, or returns different values based on arguments | `cls.method(args)` |
+
+**Decision rule:** If the method takes no arguments beyond `cls` and always returns the same value for a given subclass, it is NOT a `@classmethod`. Use `ClassVar` if the value is a literal, or `@classproperty` if it is computed from other class-level attributes.
+
+## Anti-Pattern 9: Plain Classes Where Typed Would Add Value
+
+If a class primarily holds configuration (immutable after construction) plus some derived fields, prefer `Typed` over a plain class. You get free validation, serialization, immutability, and `model_dump()`.
+
+**Judgment call:** Not every class needs to be `Typed`. Use `Typed` when you want immutable config + validation + serialization. Use plain classes (or `MutableTyped`) for stateful service objects where the overhead of frozen fields is not worth it. Concurry's `Worker` facade class is intentionally a plain class because it is a user-facing API with mutable lifecycle state; the internal `WorkerProxy` and `WorkerBuilder` correctly use `Typed`.
+

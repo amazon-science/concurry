@@ -1,0 +1,51 @@
+---
+description: "Mutable default arguments and context manager rules."
+alwaysApply: true
+---
+# Mutable Default Arguments and Context Managers
+
+## Mutable Default Arguments
+
+**Never use mutable objects as default argument values.** This is a classic Python trap: the default is shared across all calls, so mutations persist between invocations.
+
+❌ Bad:
+```python
+def submit_batch(self, tasks: List[Task] = []) -> List[Future]:
+    tasks.append(self._sentinel_task)  # ❌ Mutates the shared default!
+    return [self._submit(t) for t in tasks]
+```
+
+✅ Good:
+```python
+def submit_batch(self, tasks: Optional[List[Task]] = None) -> List[Future]:
+    if tasks is None:
+        tasks = []
+    tasks.append(self._sentinel_task)
+    return [self._submit(t) for t in tasks]
+```
+
+This applies to all mutable types: `list`, `dict`, `set`, `bytearray`, and any custom mutable class.
+
+## Context Managers
+
+Use `with` statements for any resource that must be released: files, locks, semaphores, connections, temporary directories. This is especially critical in a concurrency library where leaked resources cause deadlocks.
+
+- Always use `with` for locks: `with self._lock:`
+- Always use `with` for file I/O: `with open(path) as f:`
+- Implement `__enter__`/`__exit__` (or use `@contextmanager`) for custom resources that need cleanup
+- Prefer `contextlib.suppress(ExceptionType)` over `try/except: pass` when intentionally ignoring specific exceptions
+
+❌ Bad:
+```python
+self._lock.acquire()
+try:
+    self._shared_state.update(data)
+finally:
+    self._lock.release()
+```
+
+✅ Good:
+```python
+with self._lock:
+    self._shared_state.update(data)
+```

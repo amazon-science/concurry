@@ -1,0 +1,52 @@
+---
+description: "Exception handling and fail-fast rules for concurry."
+alwaysApply: true
+---
+# Exception Handling and Fail Fast
+
+## Fail Fast
+
+This is the timing corollary of the **Loud Failures Over Silent Defaults** principle above: detect invalid state at the *earliest possible point*. Invalid inputs should raise exceptions at the function boundary where they enter, not deep inside nested calls where the traceback is useless. A `.get(key, default)` that silently invents a value is the opposite of fail-fast — it lets the invalid state propagate silently until it causes mysterious behavior.
+
+- Validate arguments at the top of public methods before any work is done
+- Raise specific, descriptive exceptions immediately when preconditions are violated
+- Prefer raising over returning sentinel values (`None`, `-1`, `False`) for error conditions
+
+```python
+def submit(self, task: Task, priority: int) -> Future:
+    if task is None:
+        raise ValueError("task must not be None")
+    if priority < 0:
+        raise ValueError(f"priority must be non-negative, got {priority}")
+    if not self._is_running:
+        raise WorkerStoppedError(f"Cannot submit to stopped worker {self._id}")
+    return self._enqueue(task, priority)
+```
+
+## Exception Handling
+
+- **Catch narrow, specific exceptions** (`ValueError`, `TypeError`, `TimeoutError`), never bare `except:` or `except Exception:`
+- **Raise low, catch high**: let lower-level functions raise; catch at application boundaries (CLI, web handler, top-level orchestrator)
+- **Never silently swallow exceptions**: `except: pass` hides bugs. If you must catch broadly, at minimum log the exception
+- **Use custom exception classes** for domain-specific errors (`WorkerStoppedError`, `LimitExceededError`) — callers can then catch precisely what they need
+- **Include context in error messages**: the message should contain enough information to diagnose the problem without a debugger. Follow the feedback-driven exception pattern from **Loud Failures Over Silent Defaults**: state what was expected, what was received, and what the available options are (e.g., `f"Unknown worker mode {mode!r}. Must be one of: {list(ExecutionMode)}."`).
+
+❌ Bad:
+```python
+try:
+    result = worker.execute(task)
+except Exception:
+    pass
+```
+
+✅ Good:
+```python
+try:
+    result = worker.execute(task)
+except TimeoutError:
+    log.warning(f"Task {task.id} timed out after {timeout_seconds}s on worker {worker.id}")
+    raise
+except WorkerStoppedError:
+    log.error(f"Worker {worker.id} stopped unexpectedly during task {task.id}")
+    raise
+```

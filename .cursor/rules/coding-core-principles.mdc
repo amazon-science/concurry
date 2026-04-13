@@ -1,0 +1,33 @@
+---
+description: Core principles for editing code in concurry library — read-entire-functions rule and no-backward-compatibility policy.
+alwaysApply: true
+---
+# Core Principles
+
+## Always Read Entire Functions (LLM Agent Workflow — CRITICAL)
+
+**When reading or editing a function, ALWAYS retrieve and read the entire function body — from the `def` line to the last line of the function.** Never read only a fragment, a few lines around an edit point, or a single code block within a function.
+
+**Why this is non-negotiable:** Functions in this codebase use variable reassignment to reduce cognitive load (see **Prefer Variable Reassignment for Same-Concept Transformations** below). A variable like `futures` may be created as an empty list on line 5, populated in a loop on lines 8-15, and then *reassigned* through a transformation on line 17. If the agent reads only lines 17-25, it sees `futures` and has no idea whether it is the raw version or the transformed version. It will generate code based on wrong assumptions about the variable's state, producing bugs that are invisible at the edit site but catastrophic at runtime.
+
+This is the single most common source of LLM-generated bugs in this codebase: the agent reads a 10-line window, sees a variable name, assumes it knows what it contains, and writes code that worked for the *original* value but fails for the *reassigned* value.
+
+**The rules:**
+
+1. **Functions:** Always read the entire function. No exceptions. Even if the function is 150 lines, read all of it. You must understand the full lineage of every variable before making any edit.
+2. **Class methods:** Read the entire method, plus the class header (field declarations, `PrivateAttr` declarations, and `__init__`/lifecycle hooks) so you know the available instance state.
+3. **Classes as a whole:** Reading an entire class is not required (classes can be very large). But when editing a method, always read the complete method and the class-level declarations.
+4. **When searching for code to edit:** If a search result lands you in the middle of a function, expand your read to include the entire function before making any changes.
+
+## No Backward Compatibility
+
+This project has a single developer/consumer. Backward compatibility is overhead, not a feature.
+
+- **Never maintain backward compatibility** with deprecated patterns or old APIs
+- When making breaking changes, update all code and tests immediately
+- Remove deprecated code paths rather than maintaining them
+- Focus on the best current design, not historical compatibility
+- **Do NOT insert deprecation warnings**, shim layers, compatibility wrappers, or version-checking fallbacks
+- **Do NOT rename old functions** to `_legacy_*` or `_compat_*` — delete them outright
+
+LLMs trained on public codebases reflexively produce backward-compatibility scaffolding (deprecation decorators, `warnings.warn(...)`, adapter classes). This is the correct pattern for libraries with thousands of consumers; it is pure noise here.

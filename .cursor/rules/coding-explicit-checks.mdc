@@ -1,0 +1,63 @@
+---
+description: "Explicit checks for collection emptiness and None — deviates from PEP 8 intentionally."
+alwaysApply: true
+---
+# Explicit Checks
+
+## Collection Emptiness (DEVIATES FROM PEP 8 — INTENTIONAL)
+- **Never use `not x` to check if a collection is empty**
+- **Always use `len(x) == 0`** for emptiness checks
+- **Use `len(x) > 0`** for non-empty checks
+
+**Rationale:** This rule intentionally deviates from PEP 8 and the Google Python Style Guide, both of which recommend `if not seq:`. We enforce `len(x)` for three reasons:
+
+1. **`len()` signals container type.** `len(x)` only works on sized containers. `not x` works on anything with `__bool__`, including `False`, `0`, `None`, and `""`. Writing `len(x)` communicates "x is a collection" in a way that `not x` does not. `len(False)` raises `TypeError` — that is a *feature*, not a bug, because it catches type confusion at the call site.
+2. **Truthiness conflates distinct concepts.** `not x` is true for `None`, `0`, `False`, `""`, `[]`, `{}`, and `set()`. These are semantically different. In a concurrency library that handles diverse user-provided types across thread/process/ray boundaries, treating emptiness and falsiness as the same concept produces subtle bugs.
+3. **Uniform behavior across collection types.** NumPy arrays and Pandas DataFrames raise `ValueError` when cast to bool if they have more than one element. `len()` works uniformly across all sized containers.
+
+**Linter suppression:** Disable Pylint C1802 (`use-implicit-booleaness-not-len`) and Ruff PLC1802 for this project.
+
+❌ Bad:
+```python
+if not my_list:
+    pass
+if my_dict:
+    pass
+if not futures:
+    pass
+```
+
+✅ Good:
+```python
+if len(my_list) == 0:
+    pass
+if len(my_dict) > 0:
+    pass
+if len(futures) == 0:
+    pass
+```
+
+## None Checks
+- When checking whether a variable is `None`: **always use `is None` or `is not None`**
+- **Never use `not x` or `if x` as a proxy for None checking** — `0`, `""`, `[]`, and `False` are valid non-None values that would be incorrectly treated as None
+- This is PEP 8, Google Python Style Guide, and Flake8 E711/E712 — universally agreed upon
+
+**Why `is` not `==`:** `None` is a singleton. `is` tests object identity (is this the exact same object?), which is always correct. `==` tests equality, which can be overridden by `__eq__` methods and produce surprising results with custom objects.
+
+❌ Bad:
+```python
+if not value:      # ❌ Catches 0, "", [], False — not just None
+    pass
+if value:          # ❌ Misses 0, "", [], False as valid non-None
+    pass
+if value == None:  # ❌ Uses equality, not identity
+    pass
+```
+
+✅ Good:
+```python
+if value is None:
+    pass
+if value is not None:
+    pass
+```

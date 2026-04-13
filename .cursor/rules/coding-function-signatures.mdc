@@ -1,0 +1,142 @@
+---
+description: "Function signature rules — never hide known params in **kwargs, never duplicate caller-supplied defaults."
+alwaysApply: true
+---
+# Function Signature Rules
+
+## Never Hide Known Parameters in `**kwargs`
+
+**If you know a parameter's name at the time you write the function, it MUST be an explicit parameter with a type annotation.** Using `kwargs.get("some_name")` to extract a value that the function *always expects* is as bad as `.get(key, None)` — it silently returns `None` instead of raising, hides the interface from callers, and completely defeats type checking.
+
+This is not a style preference. It is a correctness issue:
+
+1. **`@validate` and `@field_validator` cannot see kwargs.** Morphic's `@validate` decorator and Pydantic validators use the function signature to enforce types at runtime. A parameter extracted via `kwargs.get()` is invisible to them — it arrives as an untyped `Any` inside a `dict`, bypassing every safety net.
+2. **Static type checkers are blind.** mypy, pyright, and IDE autocomplete cannot infer the type of `kwargs.get("timeout")`. The caller gets no autocomplete, no type errors, no hover documentation.
+3. **Silent `None` on missing keys.** `kwargs.get("timeout")` returns `None` when the caller forgets to pass `timeout`. The function proceeds with `None`, producing a confusing `TypeError` or wrong behavior ten lines later instead of a clear `TypeError: missing required argument` at the call boundary.
+4. **The function signature lies.** When you read `def submit(self, **kwargs)`, you have no idea what the function actually needs. You must read the implementation to discover that it does `kwargs.get("timeout")`, `kwargs.get("retry_config")`, etc. This is a hidden interface.
+
+❌ Bad (known parameters hidden in `**kwargs`):
+```python
+def execute(self, task: Task, **kwargs) -> Future:
+    timeout = kwargs.get("timeout")           # ❌ Hidden param, silent None
+    retry_config = kwargs.get("retry_config") # ❌ Hidden param, silent None
+    priority = kwargs.get("priority", 0)      # ❌ Hidden default
+
+    if timeout is not None:          # ❌ Now you need a None guard
+        self._set_timeout(timeout)
+```
+
+✅ Good (all known parameters are explicit):
+```python
+def execute(
+    self,
+    task: Task,
+    *,
+    timeout: Optional[float] = None,
+    retry_config: Optional[RetryConfig] = None,
+    priority: int = 0,
+    **kwargs,
+) -> Future:
+    if timeout is not None:
+        self._set_timeout(timeout)
+```
+
+**The rule is simple:** if you are writing `kwargs.get("some_name")` and `some_name` is a string literal you typed yourself, that parameter MUST be promoted to an explicit function parameter. `**kwargs` is for truly unknown, pass-through parameters (e.g., forwarding to a parent class or a third-party library). It is never a substitute for declaring your interface.
+
+**Corollary — `**kwargs` in an abstract method signature:** When a base class defines `def process(self, ..., **kwargs)` and every subclass does `kwargs.get("timeout")`, the base class signature is wrong. Add `timeout: Optional[float] = None` to the base class and all subclasses. The `**kwargs` should only carry genuinely subclass-specific extensions that differ across implementations and cannot be enumerated on the base.
+
+## Never Duplicate Caller-Supplied Values as Parameter Defaults (CRITICAL)
+
+**When a parameter is always supplied by the caller, it MUST NOT have a default value on the receiving function.** A default on a parameter that the caller always passes is dead code that silently masks a broken call chain. If the caller stops passing the value (due to a refactoring bug, a missing context key, or a dict-splatting error), the function falls back to the hard-coded default instead of crashing. The developer never learns that the value they configured is not reaching the function.
+
+**This is the function-signature equivalent of `.get(key, default)`.** The `.get()` anti-pattern invents a fallback value when a dict key is missing. A redundant parameter default invents a fallback value when a caller forgets to pass an argument. Both hide the same bug: a value that should be present is absent, and the program continues with wrong data instead of crashing.
+
+**Why LLMs produce this pattern:** LLM coding assistants generate parameter defaults reflexively because they cannot see the call chain. When an LLM writes `def execute(self, *, timeout: float = 30.0, ...)`, it does not know that `timeout` is always passed from `global_config` at the call site. The LLM adds a default "just in case," which is exactly the defensive-coding instinct that produces `.get(key, default)` in dicts. The result is the same: a silent fallback that masks bugs.
+
+**The decision rule:** ask **"Does every caller always pass this argument?"**
+- **Yes** (the value comes from a config object, a builder, or an explicit call site) → **no default**. Remove it. If the caller ever fails to pass it, the function must crash with `TypeError: missing required keyword argument`.
+- **No** (some callers genuinely omit the argument, and `None`/a sentinel is a valid state) → a default is appropriate.
+
+**Three forms of this anti-pattern:**
+
+### Form 1: Parameter default duplicates a config-supplied value (most dangerous)
+
+A config object or builder provides the value. A factory or initialization method reads the config and passes it to a component. The component also has a hard-coded default that duplicates the config's default. If the factory is refactored and stops passing the key, the component silently uses its own default instead of crashing.
+
+❌ Bad (component has redundant default that duplicates config value):
+```python
+class GlobalDefaults(MutableTyped):
+    worker_timeout: float = 30.0
+    max_queued_tasks: int = 100
+
+class ThreadWorkerProxy(WorkerProxy):
+    def __init__(
+        self,
+        *,
+        timeout: float = 30.0,              # ❌ Duplicates global_config default
+        max_queued_tasks: int = 100,         # ❌ Duplicates global_config default
+        ...
+    ):
+        ...
+```
+
+**Why this is dangerous:** If the builder is refactored and stops passing `timeout`, the proxy silently uses `30.0` instead of crashing. The developer changes the global config to `timeout=60.0`, runs the program, and the proxy silently ignores the change. No error, no warning. The config system appears broken, but the real bug is the redundant default hiding the missing argument.
+
+✅ Good (no defaults on always-supplied parameters — crash immediately if missing):
+```python
+class ThreadWorkerProxy(WorkerProxy):
+    def __init__(
+        self,
+        *,
+        timeout: float,              # No default — builder MUST pass it
+        max_queued_tasks: int,        # No default — builder MUST pass it
+        ...
+    ):
+        ...
+```
+
+Now if the builder stops passing `timeout`, construction fails immediately with `TypeError: __init__() missing required keyword argument: 'timeout'`. Thirty seconds to fix, not thirty hours to debug.
+
+### Form 2: Inline magic number duplicates a config default (silent divergence)
+
+A method body contains a hard-coded fallback that duplicates a config-level default. If the config default changes, the inline fallback silently diverges.
+
+❌ Bad (inline magic number duplicates config default):
+```python
+def _create_worker(self, *, timeout: Optional[float] = None, ...) -> WorkerProxy:
+    resolved_timeout: float = timeout if timeout is not None else 30.0  # ❌ Magic 30.0
+```
+
+✅ Good (make the parameter mandatory — no fallback needed):
+```python
+def _create_worker(self, *, timeout: float, ...) -> WorkerProxy:
+    # No fallback. Caller must pass the value from global_config.
+```
+
+### Form 3: Base class default propagated to all subclasses (interface-level silent default)
+
+A base class abstract method declares a parameter with a default. Every subclass inherits the default. The builder/factory always passes the value. The default exists only because the base class was written before the call chain was finalized, and nobody removed it.
+
+❌ Bad (base class default propagates to every subclass):
+```python
+class WorkerProxy(Typed, ABC):
+    @abstractmethod
+    def start(self, *, timeout: float = 30.0, ...) -> None: ...
+
+class ThreadWorkerProxy(WorkerProxy):
+    def start(self, *, timeout: float = 30.0, ...) -> None:  # ❌ Inherited default
+        ...
+```
+
+✅ Good (mandatory on base, no default on subclass):
+```python
+class WorkerProxy(Typed, ABC):
+    @abstractmethod
+    def start(self, *, timeout: float, ...) -> None: ...
+
+class ThreadWorkerProxy(WorkerProxy):
+    def start(self, *, timeout: float, ...) -> None:
+        ...
+```
+
+**The test for this pattern in code review:** For every parameter with a default value, ask: "Is there a code path where this default actually activates in production?" If the answer is "no, the caller always passes it," remove the default. If the answer is "only in tests," that is still "no" — fix the tests to pass the value explicitly. Tests that rely on silent defaults are tests that do not test the real call chain.

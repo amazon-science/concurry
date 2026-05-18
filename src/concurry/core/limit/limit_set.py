@@ -673,7 +673,7 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
                 state = self._rate_limit_state[key]
 
                 # Clean old history entries outside window
-                window_start = current_time - limit.window_seconds
+                window_start = current_time - limit.window
                 history = list(state["history"])
                 active_history = [(ts, amt) for ts, amt in history if ts >= window_start]
 
@@ -874,7 +874,7 @@ class MultiprocessSharedLimitSet(BaseLimitSet):
                 state = self._rate_limit_state[key]
 
                 # Clean old history entries outside window
-                window_start = current_time - limit.window_seconds
+                window_start = current_time - limit.window
                 history = list(state["history"])
 
                 # Keep only entries within window
@@ -1009,20 +1009,20 @@ try:
 
             Args:
                 limit_configs: Dict mapping limit keys to their config
-                    Config contains: {'type': 'call'|'rate'|'resource', 'capacity': int, 'window_seconds': float, ...}
+                    Config contains: {'type': 'call'|'rate'|'resource', 'capacity': int, 'window': float, ...}
             """
             for key, config in limit_configs.items():
                 if key not in self._limits:
                     limit_type = config.get("type", "call")
                     capacity = config.get("capacity", 0)
-                    window_seconds = config.get("window_seconds", 60.0)
+                    window = config.get("window", 60.0)
 
                     self._limits[key] = {
                         "current_usage": 0,
                         "history": [],
                         "type": limit_type,
                         "capacity": capacity,
-                        "window_seconds": window_seconds,
+                        "window": window,
                     }
 
                     if limit_type == "resource":
@@ -1031,7 +1031,7 @@ try:
                     elif limit_type in ("rate", "call"):
                         self._rate_limit_state[key] = {
                             "history": [],
-                            "window_seconds": window_seconds,
+                            "window": window,
                             "capacity": capacity,
                         }
 
@@ -1068,7 +1068,7 @@ try:
                 # Check rate/call limits
                 elif key in self._rate_limit_state:
                     state = self._rate_limit_state[key]
-                    window_start = current_time - state["window_seconds"]
+                    window_start = current_time - state["window"]
 
                     # Clean old history and calculate current usage
                     active_history = [(ts, amt) for ts, amt in state["history"] if ts >= window_start]
@@ -1161,7 +1161,7 @@ try:
                 # Clean up rate/call limit state history
                 elif key in self._rate_limit_state:
                     state = self._rate_limit_state[key]
-                    window_start = current_time - state["window_seconds"]
+                    window_start = current_time - state["window"]
 
                     # Keep only entries within window
                     state["history"] = [(ts, amt) for ts, amt in state["history"] if ts >= window_start]
@@ -1225,13 +1225,13 @@ class RaySharedLimitSet(BaseLimitSet):
                 limit_configs[limit.key] = {
                     "type": "call",
                     "capacity": limit.capacity,
-                    "window_seconds": limit.window_seconds,
+                    "window": limit.window,
                 }
             elif isinstance(limit, RateLimit):
                 limit_configs[limit.key] = {
                     "type": "rate",
                     "capacity": limit.capacity,
-                    "window_seconds": limit.window_seconds,
+                    "window": limit.window,
                 }
 
         ray.get(self._actor.register_limits.remote(limit_configs))

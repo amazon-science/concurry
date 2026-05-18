@@ -60,7 +60,7 @@ def task(
             ```python
             from concurry import task, RateLimit
 
-            limits = [RateLimit(key="api", capacity=100, window_seconds=60)]
+            limits = [RateLimit(key="api", capacity=100, window=60)]
 
             @task(mode="thread", limits=limits)
             def call_api(prompt, limits):  # limits param detected automatically

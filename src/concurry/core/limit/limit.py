@@ -19,15 +19,18 @@ Important:
 Example:
     Basic limit definition (used within LimitSet)::
 
-        from concurry import RateLimit, RateLimitAlgorithm, LimitSet
+        from concurry import RateLimit, RateLimitAlgorithm, RateWindow, LimitSet
 
-        # Define a rate limit
+        # Define a rate limit using the named-window API (preferred):
         limit = RateLimit(
             key="api_tokens",
-            window_seconds=60,
+            window=RateWindow.Minutely,         # or "minutely" / "per_minute"
             algorithm=RateLimitAlgorithm.TokenBucket,
-            capacity=1000
+            capacity=1000,
         )
+
+        # Or pass seconds directly:
+        limit = RateLimit(key="api_tokens", window=60, capacity=1000)
 
         # Use within a LimitSet (thread-safe)
         limits = LimitSet(limits=[limit])
@@ -38,14 +41,14 @@ Example:
 
 import logging
 from abc import ABC
-from typing import ClassVar, Dict, NoReturn, Union
+from typing import Any, ClassVar, Dict, NoReturn, Union
 
 from morphic import Typed
 from pydantic import confloat, conint
 
 from ...utils import _NO_ARG, _NO_ARG_TYPE
 from ..algorithms.rate_limiting import RateLimiter
-from ..constants import RateLimitAlgorithm
+from ..constants import RateLimitAlgorithm, RateWindow
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +74,7 @@ class Limit(Typed, ABC):
 
         ```python
         # Create limit definitions
-        limit = RateLimit(key="api", window_seconds=60, ...)
+        limit = RateLimit(key="api", window=60, ...)
 
         # Use within thread-safe LimitSet
         limit_set = LimitSet(limits=[limit])
@@ -152,7 +155,15 @@ class RateLimit(Limit):
 
     Attributes:
         key: Unique identifier for this limit (e.g., "input_tokens", "api_calls")
-        window_seconds: Time window in seconds over which the limit applies
+        window: Time window over which the limit applies, stored internally as
+            a positive ``float`` number of seconds. Constructor accepts (and
+            normalizes) any of:
+
+            - A :class:`RateWindow` member (e.g. ``RateWindow.Minutely``).
+            - A string alias for a ``RateWindow`` (e.g. ``"minutely"``,
+              ``"per_minute"``, ``"min"``).
+            - A positive ``int`` or ``float`` (treated as seconds verbatim).
+
         algorithm: Rate limiting algorithm (TokenBucket, LeakyBucket, SlidingWindow,
             FixedWindow, or GCRA). If None, uses value from
             global_config.defaults.rate_limit_algorithm
@@ -186,7 +197,7 @@ class RateLimit(Limit):
             # Define rate limit
             limit = RateLimit(
                 key="api_tokens",
-                window_seconds=60,
+                window=60,
                 algorithm=RateLimitAlgorithm.TokenBucket,
                 capacity=1000
             )
@@ -203,9 +214,64 @@ class RateLimit(Limit):
         - LimitSet: Thread-safe atomic multi-limit acquisition
     """
 
-    window_seconds: confloat(gt=0)
+    window: confloat(gt=0)
     algorithm: Union[RateLimitAlgorithm, _NO_ARG_TYPE] = _NO_ARG
     capacity: conint(gt=0)
+
+    @classmethod
+    def pre_initialize(cls, data: Dict[str, Any]) -> None:
+        """Normalize ``window`` to a positive ``float`` number of seconds.
+
+        Accepts (for the ``window`` field, or its convenience alias ``per``):
+
+        - A :class:`RateWindow` member (e.g. ``RateWindow.Minutely``).
+        - A string alias for a ``RateWindow`` (e.g. ``"minutely"``,
+          ``"per_minute"``). Coerced via ``RateWindow(value)``.
+        - A positive ``int`` or ``float`` (treated as seconds verbatim).
+
+        ``per`` is a readability alias: ``RateLimit(capacity=10, per="hour",
+        key="rph")`` is equivalent to ``RateLimit(capacity=10, window="hour",
+        key="rph")``. Passing both ``window`` and ``per`` raises ``ValueError``.
+
+        After this hook, ``data["window"]`` is always a ``float`` in seconds
+        (and ``data["per"]`` has been removed if it was provided). Pydantic's
+        ``confloat(gt=0)`` then validates it like any other field.
+        """
+        if not isinstance(data, dict):
+            return
+        # Resolve `per=` alias for `window=`.
+        if "per" in data:
+            per_value = data.pop("per")
+            if "window" in data and data["window"] is not None and per_value is not None:
+                raise ValueError("Pass either `window=` or `per=`, not both. They are aliases.")
+            if per_value is not None:
+                data["window"] = per_value
+        if "window" not in data or data["window"] is None:
+            return
+        window = data["window"]
+        if isinstance(window, RateWindow):
+            data["window"] = window.to_seconds()
+        elif isinstance(window, str):
+            try:
+                member = RateWindow(window)
+            except (KeyError, ValueError) as e:
+                raise ValueError(
+                    f"Unknown window alias {window!r}; expected one of "
+                    f"{[m.name for m in RateWindow]} or their aliases."
+                ) from e
+            data["window"] = member.to_seconds()
+        elif isinstance(window, bool):
+            # bool is a subclass of int; reject explicitly to avoid surprises.
+            raise ValueError(f"window must be a RateWindow / str / number, got bool: {window!r}")
+        elif isinstance(window, (int, float)):
+            if window <= 0:
+                raise ValueError(f"window (seconds) must be > 0, got {window!r}")
+            data["window"] = float(window)
+        else:
+            raise ValueError(
+                f"window must be a RateWindow, str alias, or positive number, "
+                f"got {type(window).__name__}: {window!r}"
+            )
 
     def post_initialize(self) -> NoReturn:
         """Initialize the rate limiter implementation."""
@@ -217,14 +283,14 @@ class RateLimit(Limit):
             object.__setattr__(self, "algorithm", local_config.defaults.rate_limit_algorithm)
 
         # Convert max_rate from capacity per window to per second
-        max_rate = self.capacity / self.window_seconds if self.window_seconds > 0 else 0
+        max_rate = self.capacity / self.window if self.window > 0 else 0
 
         # Use factory to create the appropriate limiter
         self._impl = RateLimiter(
             algorithm=self.algorithm,
             max_rate=max_rate,
             capacity=self.capacity,
-            window_seconds=self.window_seconds,
+            window_seconds=self.window,
         )
 
     def can_acquire(self, requested: int) -> bool:
@@ -265,9 +331,39 @@ class RateLimit(Limit):
         """Get current rate limit statistics."""
         stats = self._impl.get_stats()
         stats["key"] = self.key
-        stats["window_seconds"] = self.window_seconds
+        stats["window"] = self.window
         stats["capacity"] = self.capacity
         return stats
+
+    def params_signature(self) -> str:
+        """Deterministic short signature of this rate limit's distinguishing parameters.
+
+        Used by callers that need to derive a unique limit key from the
+        rate's content (rather than its current ``key`` field). The
+        signature combines ``capacity``, ``window`` (in seconds), and a short
+        algorithm tag — i.e., the fields that actually change runtime
+        behavior. Two ``RateLimit``\\s with identical params produce the
+        same signature; two with any difference produce different ones.
+
+        The format is ``"c{capacity}w{window_int_or_float}{algo}"``
+        where ``algo`` is the algorithm enum's first 3 letters in lowercase
+        (e.g., ``"gcr"`` for GCRA). Window seconds are formatted as int when
+        integral, else as a stripped float (``60`` not ``60.0``; ``0.5``).
+
+        Examples::
+
+            RateLimit(key="x", window=60, capacity=300).params_signature()
+            # 'c300w60gcr'  (assuming default GCRA algorithm)
+
+            RateLimit(key="y", window="daily", capacity=50_000,
+                      algorithm=RateLimitAlgorithm.TokenBucket).params_signature()
+            # 'c50000w86400tok'
+        """
+        ws = self.window
+        ws_str = str(int(ws)) if ws == int(ws) else str(ws).rstrip("0").rstrip(".")
+        algo = self.algorithm
+        algo_name = algo.name if hasattr(algo, "name") else str(algo)
+        return f"c{self.capacity}w{ws_str}{algo_name[:3].lower()}"
 
 
 class CallLimit(RateLimit):
@@ -290,7 +386,7 @@ class CallLimit(RateLimit):
 
     Attributes:
         key: Always "call_count" (fixed, cannot be changed)
-        window_seconds: Time window for call counting
+        window: Time window for call counting (see :class:`RateLimit` for accepted formats)
         algorithm: Rate limiting algorithm to use
         capacity: Maximum calls allowed per window
 
@@ -309,13 +405,13 @@ class CallLimit(RateLimit):
 
             limits = LimitSet(limits=[
                 CallLimit(
-                    window_seconds=60,
+                    window=60,
                     algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=100
                 ),
                 RateLimit(
                     key="tokens",
-                    window_seconds=60,
+                    window=60,
                     algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=1000
                 )
@@ -430,7 +526,7 @@ class ResourceLimit(Limit):
                 ResourceLimit(key="file_handles", capacity=20),
                 RateLimit(
                     key="api_tokens",
-                    window_seconds=60,
+                    window=60,
                     algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=1000
                 )

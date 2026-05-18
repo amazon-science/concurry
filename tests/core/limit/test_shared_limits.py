@@ -54,7 +54,7 @@ class TestBasicLimitEnforcement:
         w = Counter.options(
             mode=worker_mode,
             max_workers=1,  # Single worker to ensure count is consistent
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=20)],
+            limits=[CallLimit(window=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=20)],
         ).init(count=5)
 
         # Make 100 calls - should take ~5 seconds (100 calls / 20 per second)
@@ -109,9 +109,7 @@ class TestBasicLimitEnforcement:
             mode=worker_mode,
             max_workers=1,  # Single worker to ensure count is consistent
             limits=[
-                RateLimit(
-                    key="tokens", window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=50
-                )
+                RateLimit(key="tokens", window=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=50)
             ],
         ).init()
 
@@ -219,7 +217,7 @@ class TestSharedLimitSets:
 
         # Create shared LimitSet with small capacity
         shared_limits = LimitSet(
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)],
+            limits=[CallLimit(window=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)],
             shared=True,
             mode=worker_mode,
         )
@@ -351,7 +349,7 @@ class TestSharedLimitSets:
                     return 1
 
         # Pass list of limits - each worker gets its own LimitSet
-        limits_list = [CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)]
+        limits_list = [CallLimit(window=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)]
 
         # Create two workers - each will have separate limits
         w1 = Counter.options(mode="thread", max_workers=30, limits=limits_list).init()
@@ -517,10 +515,8 @@ class TestMixedLimitTypes:
             mode=worker_mode,
             max_workers=1,  # Single worker to ensure count is consistent
             limits=[
-                CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=5),
-                RateLimit(
-                    key="tokens", window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10
-                ),
+                CallLimit(window=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=5),
+                RateLimit(key="tokens", window=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10),
             ],
         ).init()
 
@@ -568,7 +564,7 @@ class TestMixedLimitTypes:
         w = APIWorker.options(
             mode="ray",
             max_workers=0,
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=5)],
+            limits=[CallLimit(window=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=5)],
         ).init()
 
         # Make 10 calls
@@ -614,10 +610,8 @@ class TestMixedLimitTypes:
             mode=worker_mode,
             max_workers=1,  # Single worker to ensure count is consistent
             limits=[
-                CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=20),
-                RateLimit(
-                    key="tokens", window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=50
-                ),
+                CallLimit(window=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=20),
+                RateLimit(key="tokens", window=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=50),
                 ResourceLimit(key="connections", capacity=2),
             ],
         ).init()
@@ -644,7 +638,7 @@ class TestLimitValidation:
 
         # Create InMemorySharedLimitSet (for sync/thread/asyncio)
         limits = LimitSet(
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)],
+            limits=[CallLimit(window=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)],
             shared=True,
             mode="sync",
         )
@@ -674,7 +668,7 @@ class TestLimitValidation:
                 )
                 return 1
 
-        limits_list = [CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)]
+        limits_list = [CallLimit(window=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)]
 
         # Thread worker should get InMemorySharedLimitSet wrapped in LimitPool
         w_thread = DummyWorker.options(mode="thread", max_workers=30, limits=limits_list).init()
@@ -710,7 +704,7 @@ class TestSharedLimitSetsWithConfig:
 
         # Create shared LimitSet with config
         shared_limits = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+            limits=[RateLimit(key="tokens", window=60, capacity=1000)],
             shared=True,
             mode=worker_mode,
             config={"region": "us-east-1", "account": "12345"},
@@ -750,7 +744,7 @@ class TestSharedLimitSetsWithConfig:
 
         # Create shared LimitSet with config for process mode
         shared_limits = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+            limits=[RateLimit(key="tokens", window=60, capacity=1000)],
             shared=True,
             mode="process",
             config={"region": "eu-west-1", "account": "67890"},
@@ -788,7 +782,7 @@ class TestSharedLimitSetsWithConfig:
 
         # Create shared LimitSet with config for Ray mode
         shared_limits = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+            limits=[RateLimit(key="tokens", window=60, capacity=1000)],
             shared=True,
             mode="ray",
             config={"region": "ap-southeast-1", "endpoint": "https://api.example.com"},
@@ -834,7 +828,7 @@ class TestSharedLimitSetsWithConfig:
 
         # Create shared LimitSet with config
         shared_limits = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=2000)],
+            limits=[RateLimit(key="tokens", window=60, capacity=2000)],
             shared=True,
             mode=worker_mode,
             config={"region": "us-west-2"},
@@ -876,7 +870,7 @@ class TestSharedLimitSetsWithConfig:
 
         # Create shared LimitSet with config
         shared_limits = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=10000)],
+            limits=[RateLimit(key="tokens", window=60, capacity=10000)],
             shared=True,
             mode="thread",
             config={"region": "us-east-1", "tier": "premium"},

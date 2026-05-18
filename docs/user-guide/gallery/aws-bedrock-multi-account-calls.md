@@ -108,14 +108,14 @@ for config in bedrock_configs:
         limits=[
             # Per-endpoint RPM (from config)
             CallLimit(
-                window_seconds=60,
+                window=60,
                 algorithm=RateLimitAlgorithm.SlidingWindow,
                 capacity=config["rpm"],
             ),
             # Per-endpoint token budget
             RateLimit(
                 key="total_tokens",
-                window_seconds=60,
+                window=60,
                 algorithm=RateLimitAlgorithm.TokenBucket,
                 capacity=50_000,
             ),

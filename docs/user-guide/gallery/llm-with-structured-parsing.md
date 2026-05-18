@@ -181,11 +181,11 @@ extractor = JsonExtractor.options(
     limits=LimitSet(
         limits=[
             # 500 calls/min (Provider Limit)
-            CallLimit(window_seconds=60, capacity=500),
+            CallLimit(window=60, capacity=500),
             # 10M input tokens/min (Cost Control)
-            RateLimit(key="input_tokens", window_seconds=60, capacity=10_000_000),
+            RateLimit(key="input_tokens", window=60, capacity=10_000_000),
             # 1M output tokens/min (Cost Control)
-            RateLimit(key="output_tokens", window_seconds=60, capacity=1_000_000),
+            RateLimit(key="output_tokens", window=60, capacity=1_000_000),
         ],
         mode="asyncio"
     ),

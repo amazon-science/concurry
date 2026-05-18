@@ -36,7 +36,7 @@ Quick Start:
         limits = LimitSet(limits=[
             RateLimit(
                 key="api_tokens",
-                window_seconds=60,
+                window=60,
                 algorithm=RateLimitAlgorithm.TokenBucket,
                 capacity=1000
             )
@@ -53,7 +53,7 @@ Quick Start:
         limits = LimitSet(limits=[
             RateLimit(
                 key="tokens",
-                window_seconds=60,
+                window=60,
                 algorithm=RateLimitAlgorithm.TokenBucket,
                 capacity=1000
             ),

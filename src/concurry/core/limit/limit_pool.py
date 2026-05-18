@@ -28,14 +28,14 @@ Example:
 
         # Create LimitSet for each region
         limitset_us_east = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+            limits=[RateLimit(key="tokens", window=60, capacity=1000)],
             shared=True,
             mode="thread",
             config={"region": "us-east-1", "endpoint": "https://api.us-east-1.example.com"}
         )
 
         limitset_us_west = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+            limits=[RateLimit(key="tokens", window=60, capacity=1000)],
             shared=True,
             mode="thread",
             config={"region": "us-west-2", "endpoint": "https://api.us-west-2.example.com"}

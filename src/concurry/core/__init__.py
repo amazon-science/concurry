@@ -5,6 +5,7 @@ from .constants import (
     LoadBalancingAlgorithm,
     PollingAlgorithm,
     RateLimitAlgorithm,
+    RateWindow,
     RetryAlgorithm,
     ReturnWhen,
 )
@@ -61,6 +62,7 @@ __all__ = [
     "LoadBalancingAlgorithm",
     "PollingAlgorithm",
     "RateLimitAlgorithm",
+    "RateWindow",
     "RetryAlgorithm",
     "ReturnWhen",
     # Retry functions

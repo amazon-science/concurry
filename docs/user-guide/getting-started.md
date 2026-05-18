@@ -142,7 +142,7 @@ from concurry import worker, RateLimit
 class APIWorker: ...
 
 pool = APIWorker.options(
-    limits=[RateLimit(key="api", capacity=5, window_seconds=1)]
+    limits=[RateLimit(key="api", capacity=5, window=1)]
 ).init()
 ```
 

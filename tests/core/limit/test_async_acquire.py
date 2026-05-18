@@ -29,7 +29,7 @@ class TestAsyncAcquireBasicCorrectness:
         4. Release acquisition
         """
         limit_set = InMemorySharedLimitSet(
-            limits=[CallLimit(window_seconds=60, capacity=10)],
+            limits=[CallLimit(window=60, capacity=10)],
             shared=True,
         )
         acq = await limit_set.async_acquire(requested={"call_count": 1})
@@ -49,7 +49,7 @@ class TestAsyncAcquireBasicCorrectness:
         4. Release all acquisitions
         """
         limit_set = InMemorySharedLimitSet(
-            limits=[CallLimit(window_seconds=60, capacity=10)],
+            limits=[CallLimit(window=60, capacity=10)],
             shared=True,
         )
         N = 5
@@ -78,7 +78,7 @@ class TestAsyncAcquireBasicCorrectness:
         4. Release all
         """
         limit_set = InMemorySharedLimitSet(
-            limits=[CallLimit(window_seconds=60, capacity=5)],
+            limits=[CallLimit(window=60, capacity=5)],
             shared=True,
         )
         N = 5
@@ -109,7 +109,7 @@ class TestAsyncAcquireBasicCorrectness:
         5. Release the first acquisition
         """
         limit_set = InMemorySharedLimitSet(
-            limits=[CallLimit(window_seconds=60, capacity=1)],
+            limits=[CallLimit(window=60, capacity=1)],
             shared=True,
         )
         acq1 = await limit_set.async_acquire(requested={"call_count": 1})
@@ -134,7 +134,7 @@ class TestAsyncAcquireBasicCorrectness:
             limits=[
                 RateLimit(
                     key="tokens",
-                    window_seconds=60,
+                    window=60,
                     algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=100,
                 )
@@ -294,7 +294,7 @@ class TestAsyncAcquireDeadlockPrevention:
             limits=[
                 RateLimit(
                     key="tokens",
-                    window_seconds=60,
+                    window=60,
                     algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=10,
                 )
@@ -434,7 +434,7 @@ class TestAsyncAcquireConcurrentCorrectness:
         """
         limit_set = InMemorySharedLimitSet(
             limits=[
-                CallLimit(window_seconds=60, capacity=10),
+                CallLimit(window=60, capacity=10),
                 ResourceLimit(key="connections", capacity=3),
             ],
             shared=True,
@@ -443,9 +443,7 @@ class TestAsyncAcquireConcurrentCorrectness:
         completed = []
 
         async def worker(i: int):
-            acq = await limit_set.async_acquire(
-                requested={"call_count": 1, "connections": 1}
-            )
+            acq = await limit_set.async_acquire(requested={"call_count": 1, "connections": 1})
             try:
                 await asyncio.sleep(0.1)
                 completed.append(i)
@@ -491,7 +489,7 @@ class TestAsyncAcquireLimitSetFactory:
         3. Verify successful
         """
         limits = LimitSet(
-            limits=[CallLimit(window_seconds=60, capacity=10)],
+            limits=[CallLimit(window=60, capacity=10)],
             shared=True,
             mode="asyncio",
         )
@@ -608,12 +606,12 @@ class TestAsyncAcquireLimitPool:
         from concurry.core.limit.limit_pool import LimitPool
 
         ls1 = InMemorySharedLimitSet(
-            limits=[CallLimit(window_seconds=60, capacity=10)],
+            limits=[CallLimit(window=60, capacity=10)],
             shared=True,
             config={"account": "a"},
         )
         ls2 = InMemorySharedLimitSet(
-            limits=[CallLimit(window_seconds=60, capacity=10)],
+            limits=[CallLimit(window=60, capacity=10)],
             shared=True,
             config={"account": "b"},
         )
@@ -727,7 +725,7 @@ class TestAsyncAcquireWorkerIntegration:
 
                 async with await self.limits.async_acquire(requested={"slots": 1}):
                     await asyncio.sleep(0.01)
-                    return x ** 2
+                    return x**2
 
         if worker_mode == "thread":
             w = AsyncLimitWorker.options(mode=worker_mode, max_workers=30, limits=limits).init()
@@ -842,8 +840,12 @@ class TestAsyncAcquireSharedLimitsAcrossWorkers:
             mode="process",
         )
 
-        w1 = AsyncResourceWorker.options(mode="process", max_workers=4, limits=shared_limits).init(worker_id=1)
-        w2 = AsyncResourceWorker.options(mode="process", max_workers=4, limits=shared_limits).init(worker_id=2)
+        w1 = AsyncResourceWorker.options(mode="process", max_workers=4, limits=shared_limits).init(
+            worker_id=1
+        )
+        w2 = AsyncResourceWorker.options(mode="process", max_workers=4, limits=shared_limits).init(
+            worker_id=2
+        )
 
         start_time = time.time()
         futures = []
@@ -989,12 +991,8 @@ class TestAsyncAcquireSharedCapacityEnforcement:
         results = [f.result(timeout=30) for f in futures]
         total_elapsed = time.time() - start_time
 
-        assert total_elapsed >= 1.5, (
-            f"Total {total_elapsed:.2f}s too fast. Expected >= 1.5s for 2 waves."
-        )
-        assert total_elapsed <= 8.0, (
-            f"Total {total_elapsed:.2f}s too slow, possible deadlock."
-        )
+        assert total_elapsed >= 1.5, f"Total {total_elapsed:.2f}s too fast. Expected >= 1.5s for 2 waves."
+        assert total_elapsed <= 8.0, f"Total {total_elapsed:.2f}s too slow, possible deadlock."
 
         events = []
         for i, r in enumerate(results):
@@ -1012,8 +1010,7 @@ class TestAsyncAcquireSharedCapacityEnforcement:
                 current_holdings.discard(worker_id)
 
         assert max_concurrent <= 2, (
-            f"Max concurrent {max_concurrent} exceeded capacity 2. "
-            f"Shared limit enforcement failed."
+            f"Max concurrent {max_concurrent} exceeded capacity 2. Shared limit enforcement failed."
         )
 
         w.stop()

@@ -628,7 +628,7 @@ class MyWorker(Worker, Typed):
 
 worker = MyWorker.options(
     mode="ray",
-    limits=[RateLimit(key="tokens", capacity=1000, window_seconds=1)]
+    limits=[RateLimit(key="tokens", capacity=1000, window=1)]
 ).init(name="test")
 ```
 

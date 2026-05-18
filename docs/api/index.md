@@ -141,7 +141,7 @@ from concurry import RateLimit
 
 worker = MyWorker.options(
     mode="thread",
-    limits=[RateLimit(key="requests", window_seconds=60, capacity=100)]
+    limits=[RateLimit(key="requests", window=60, capacity=100)]
 ).init()
 
 # Worker pool

@@ -37,6 +37,44 @@ class RateLimitAlgorithm(AutoEnum):
     GCRA = alias("Generic cell rate algorithm", "Generic cell rate")
 
 
+class RateWindow(AutoEnum):
+    """Named rate-limit windows. Use as a shorthand for ``window`` seconds.
+
+    Each member maps to a fixed number of seconds. Pass a member (or one of its
+    aliases like ``"minutely"`` / ``"min"`` / ``"per_minute"``) to
+    :class:`RateLimit` / :class:`CallLimit` via the ``window`` constructor
+    field.
+
+    Members:
+        Secondly: 1s window
+        Minutely: 60s window
+        Hourly: 3600s window
+        Daily: 86400s window (24h)
+        Weekly: 604800s window (7 days)
+
+    Why no ``Monthly``: months have varying lengths (28-31 days), so a "monthly"
+    window has no single correct value in seconds. Express monthly limits
+    explicitly in seconds (e.g. ``window=30 * 86400``) or in days
+    (``window=Daily``, capacity = 30x your daily cap).
+    """
+
+    Secondly = alias("second", "per_second", "sec")
+    Minutely = alias("minute", "per_minute", "min")
+    Hourly = alias("hour", "per_hour", "hr")
+    Daily = alias("day", "per_day")
+    Weekly = alias("week", "per_week", "wk")
+
+    def to_seconds(self) -> float:
+        """Convert the rate window to seconds."""
+        return {
+            RateWindow.Secondly: 1.0,
+            RateWindow.Minutely: 60.0,
+            RateWindow.Hourly: 3600.0,
+            RateWindow.Daily: 86400.0,
+            RateWindow.Weekly: 604800.0,
+        }[self]
+
+
 class RetryAlgorithm(AutoEnum):
     """Retry backoff strategies.
 

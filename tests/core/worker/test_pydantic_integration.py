@@ -1361,9 +1361,7 @@ class TestRayCompatibility:
 
         # Create a pool with shared rate limits
         limits = [
-            RateLimit(
-                key="api_calls", window_seconds=1, capacity=100, algorithm=RateLimitAlgorithm.TokenBucket
-            )
+            RateLimit(key="api_calls", window=1, capacity=100, algorithm=RateLimitAlgorithm.TokenBucket)
         ]
 
         pool = TypedWorkerWithValidation.options(
@@ -2261,9 +2259,7 @@ class TestLimitsWithTypedWorkers:
     def test_typed_worker_with_rate_limits(self, worker_mode):
         """Test Typed worker using rate limits in all modes including Ray."""
         limits = [
-            RateLimit(
-                key="api_tokens", window_seconds=1, capacity=1000, algorithm=RateLimitAlgorithm.TokenBucket
-            )
+            RateLimit(key="api_tokens", window=1, capacity=1000, algorithm=RateLimitAlgorithm.TokenBucket)
         ]
 
         worker = APIWorker.options(mode=worker_mode, limits=limits).init(name="API Service", api_key="secret")
@@ -2296,7 +2292,7 @@ class TestLimitsWithTypedWorkers:
                 # CallLimit is automatically acquired
                 return f"{self.name} processed: {data}"
 
-        limits = [CallLimit(window_seconds=60, capacity=100)]
+        limits = [CallLimit(window=60, capacity=100)]
 
         worker = RateLimitedWorker.options(mode=worker_mode, limits=limits).init(
             name="Processor", requests_per_minute=100
@@ -2322,9 +2318,7 @@ class TestLimitsWithPydanticWorkers:
                     acq.update(usage={"tokens": tokens})
                     return {"service": self.service_name, "tokens_used": tokens}
 
-        limits = [
-            RateLimit(key="tokens", window_seconds=1, capacity=5000, algorithm=RateLimitAlgorithm.TokenBucket)
-        ]
+        limits = [RateLimit(key="tokens", window=1, capacity=5000, algorithm=RateLimitAlgorithm.TokenBucket)]
 
         worker = TokenWorker.options(mode=worker_mode, limits=limits).init(
             service_name="LLM Service", max_tokens=5000
@@ -2360,9 +2354,7 @@ class TestWorkerPoolsWithTypedWorkers:
 
     def test_typed_worker_pool_with_limits(self):
         """Test typed worker pool with shared limits."""
-        limits = [
-            RateLimit(key="tokens", window_seconds=1, capacity=100, algorithm=RateLimitAlgorithm.TokenBucket)
-        ]
+        limits = [RateLimit(key="tokens", window=1, capacity=100, algorithm=RateLimitAlgorithm.TokenBucket)]
 
         pool = LimitedPoolWorker.options(mode="thread", max_workers=3, limits=limits).init(
             name="limited_pool"
@@ -2531,9 +2523,7 @@ class TestComplexValidationScenarios:
 
     def test_typed_worker_with_validated_methods_and_limits(self, worker_mode):
         """Test Typed worker with validate decorators and limits in all modes including Ray."""
-        limits = [
-            RateLimit(key="tokens", window_seconds=1, capacity=5000, algorithm=RateLimitAlgorithm.TokenBucket)
-        ]
+        limits = [RateLimit(key="tokens", window=1, capacity=5000, algorithm=RateLimitAlgorithm.TokenBucket)]
 
         worker = ComplexWorkerWithLimits.options(mode=worker_mode, limits=limits).init(
             name="complex", max_tokens=1000

@@ -560,9 +560,7 @@ class TestSubmissionQueueWithLimits:
             pytest.skip("Sync and AsyncIO modes bypass submission queue")
 
         limits = [
-            RateLimit(
-                key="api_calls", window_seconds=1.0, capacity=20, algorithm=RateLimitAlgorithm.TokenBucket
-            )
+            RateLimit(key="api_calls", window=1.0, capacity=20, algorithm=RateLimitAlgorithm.TokenBucket)
         ]
 
         class RateLimitedWorker(Worker):

@@ -699,7 +699,7 @@ class TestRateLimitingAlgorithms:
         w = Counter.options(
             mode=worker_mode,
             max_workers=1,  # Single worker to ensure count is consistent
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=20)],
+            limits=[CallLimit(window=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=20)],
         ).init()
 
         # Make 20 calls - all burst instantly (capacity=20)
@@ -734,7 +734,7 @@ class TestRateLimitingAlgorithms:
 
         w = Counter.options(
             mode="ray",
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=20)],
+            limits=[CallLimit(window=1.0, algorithm=RateLimitAlgorithm.TokenBucket, capacity=20)],
         ).init()
 
         start_time = time.time()
@@ -770,7 +770,7 @@ class TestRateLimitingAlgorithms:
         w = Counter.options(
             mode=worker_mode,
             max_workers=1,  # Single worker to ensure count is consistent
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.LeakyBucket, capacity=20)],
+            limits=[CallLimit(window=1.0, algorithm=RateLimitAlgorithm.LeakyBucket, capacity=20)],
         ).init()
 
         # Make 20 calls - queue holds 20, processes instantly
@@ -805,7 +805,7 @@ class TestRateLimitingAlgorithms:
 
         w = Counter.options(
             mode="ray",
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.LeakyBucket, capacity=20)],
+            limits=[CallLimit(window=1.0, algorithm=RateLimitAlgorithm.LeakyBucket, capacity=20)],
         ).init()
 
         start_time = time.time()
@@ -841,7 +841,7 @@ class TestRateLimitingAlgorithms:
         w = Counter.options(
             mode=worker_mode,
             max_workers=1,  # Single worker to ensure count is consistent
-            limits=[CallLimit(window_seconds=1.0, capacity=20)],  # Uses default SlidingWindow
+            limits=[CallLimit(window=1.0, capacity=20)],  # Uses default SlidingWindow
         ).init()
 
         # Make 20 calls - all fit in window instantly
@@ -876,7 +876,7 @@ class TestRateLimitingAlgorithms:
 
         w = Counter.options(
             mode="ray",
-            limits=[CallLimit(window_seconds=1.0, capacity=20)],  # Uses default SlidingWindow
+            limits=[CallLimit(window=1.0, capacity=20)],  # Uses default SlidingWindow
         ).init()
 
         start_time = time.time()
@@ -912,7 +912,7 @@ class TestRateLimitingAlgorithms:
         w = Counter.options(
             mode=worker_mode,
             max_workers=1,  # Single worker to ensure count is consistent
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.FixedWindow, capacity=20)],
+            limits=[CallLimit(window=1.0, algorithm=RateLimitAlgorithm.FixedWindow, capacity=20)],
         ).init()
 
         # Make 20 calls - all fit in current window instantly
@@ -947,7 +947,7 @@ class TestRateLimitingAlgorithms:
 
         w = Counter.options(
             mode="ray",
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.FixedWindow, capacity=20)],
+            limits=[CallLimit(window=1.0, algorithm=RateLimitAlgorithm.FixedWindow, capacity=20)],
         ).init()
 
         start_time = time.time()
@@ -984,7 +984,7 @@ class TestRateLimitingAlgorithms:
         w = Counter.options(
             mode=worker_mode,
             max_workers=1,  # Single worker to ensure count is consistent
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.GCRA, capacity=20)],
+            limits=[CallLimit(window=1.0, algorithm=RateLimitAlgorithm.GCRA, capacity=20)],
         ).init()
 
         # Make 20 calls - all burst instantly (capacity=20)
@@ -1019,7 +1019,7 @@ class TestRateLimitingAlgorithms:
 
         w = Counter.options(
             mode="ray",
-            limits=[CallLimit(window_seconds=1.0, algorithm=RateLimitAlgorithm.GCRA, capacity=20)],
+            limits=[CallLimit(window=1.0, algorithm=RateLimitAlgorithm.GCRA, capacity=20)],
         ).init()
 
         start_time = time.time()

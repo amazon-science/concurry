@@ -104,7 +104,7 @@ def Executor(
             limits = [
                 RateLimit(
                     key="api_calls",
-                    window_seconds=60,
+                    window=60,
                     algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=100
                 )

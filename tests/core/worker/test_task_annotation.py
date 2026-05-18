@@ -260,7 +260,7 @@ class TestTaskDecoratorLimitsForwarding:
         """Test that limits are forwarded when function has limits parameter."""
         from concurry import RateLimit
 
-        limits = [RateLimit(key="test", capacity=10, window_seconds=60)]
+        limits = [RateLimit(key="test", capacity=10, window=60)]
 
         @task(mode=ExecutionMode.Sync, limits=limits)
         def api_call(prompt, limits):
@@ -278,7 +278,7 @@ class TestTaskDecoratorLimitsForwarding:
         """Test that limits are not passed when function doesn't have limits parameter."""
         from concurry import CallLimit
 
-        limits = [CallLimit(window_seconds=60, capacity=10)]
+        limits = [CallLimit(window=60, capacity=10)]
 
         @task(mode=ExecutionMode.Sync, limits=limits)
         def simple_func(x):

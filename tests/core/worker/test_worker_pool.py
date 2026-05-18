@@ -353,7 +353,7 @@ class TestSharedLimitState:
         options = {
             "mode": pool_mode,
             "max_workers": 4,
-            "limits": [CallLimit(window_seconds=1.0, capacity=20)],
+            "limits": [CallLimit(window=1.0, capacity=20)],
         }
         if pool_mode == "ray":
             options["actor_options"] = {"num_cpus": 0.1}
@@ -407,7 +407,7 @@ class TestSharedLimitState:
         options = {
             "mode": pool_mode,
             "max_workers": 1,
-            "limits": [CallLimit(window_seconds=1.0, capacity=20)],
+            "limits": [CallLimit(window=1.0, capacity=20)],
         }
         if pool_mode == "ray":
             options["actor_options"] = {"num_cpus": 0.1}

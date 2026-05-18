@@ -21,10 +21,10 @@ class TestLimitSet:
         """Test creating a LimitSet."""
         limits = LimitSet(
             limits=[
-                CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.SlidingWindow, capacity=100),
+                CallLimit(window=60, algorithm=RateLimitAlgorithm.SlidingWindow, capacity=100),
                 RateLimit(
                     key="input_tokens",
-                    window_seconds=60,
+                    window=60,
                     algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=1000,
                 ),
@@ -42,13 +42,13 @@ class TestLimitSet:
                 limits=[
                     RateLimit(
                         key="tokens",
-                        window_seconds=60,
+                        window=60,
                         algorithm=RateLimitAlgorithm.TokenBucket,
                         capacity=100,
                     ),
                     RateLimit(
                         key="tokens",
-                        window_seconds=60,
+                        window=60,
                         algorithm=RateLimitAlgorithm.TokenBucket,
                         capacity=200,
                     ),
@@ -59,7 +59,7 @@ class TestLimitSet:
         """Test acquiring LimitSet with default values."""
         limits = LimitSet(
             limits=[
-                CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
+                CallLimit(window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
                 ResourceLimit(key="connections", capacity=10),
             ]
         )
@@ -76,7 +76,7 @@ class TestLimitSet:
             limits=[
                 RateLimit(
                     key="input_tokens",
-                    window_seconds=1,
+                    window=1,
                     algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=1000,
                 ),
@@ -97,7 +97,7 @@ class TestLimitSet:
             limits=[
                 RateLimit(
                     key="input_tokens",
-                    window_seconds=60,
+                    window=60,
                     algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=1000,
                 ),
@@ -134,7 +134,7 @@ class TestLimitSet:
             limits=[
                 RateLimit(
                     key="input_tokens",
-                    window_seconds=1,
+                    window=1,
                     algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=1000,
                 ),
@@ -161,13 +161,13 @@ class TestLimitSet:
             limits=[
                 RateLimit(
                     key="input_tokens",
-                    window_seconds=1,
+                    window=1,
                     algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=1000,
                 ),
                 RateLimit(
                     key="output_tokens",
-                    window_seconds=1,
+                    window=1,
                     algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=500,
                 ),
@@ -191,7 +191,7 @@ class TestLimitSet:
     def test_limit_set_no_update_needed_for_call_limit(self):
         """Test that CallLimits don't need explicit updates."""
         limits = LimitSet(
-            limits=[CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100)]
+            limits=[CallLimit(window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100)]
         )
 
         # Should not raise error even without update
@@ -202,10 +202,8 @@ class TestLimitSet:
         """Test update requirements with mixed limit types."""
         limits = LimitSet(
             limits=[
-                CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
-                RateLimit(
-                    key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000
-                ),
+                CallLimit(window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
+                RateLimit(key="tokens", window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000),
                 ResourceLimit(key="connections", capacity=10),
             ]
         )
@@ -234,9 +232,7 @@ class TestLimitSet:
         """Test getting stats from LimitSet."""
         limits = LimitSet(
             limits=[
-                RateLimit(
-                    key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000
-                ),
+                RateLimit(key="tokens", window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000),
                 ResourceLimit(key="connections", capacity=10),
             ]
         )
@@ -276,9 +272,7 @@ class TestLimitSet:
         """Test that updating after release raises error."""
         limits = LimitSet(
             limits=[
-                RateLimit(
-                    key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000
-                ),
+                RateLimit(key="tokens", window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000),
             ]
         )
 
@@ -293,9 +287,7 @@ class TestLimitSet:
         """Test nested acquisition pattern."""
         limits = LimitSet(
             limits=[
-                RateLimit(
-                    key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000
-                ),
+                RateLimit(key="tokens", window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000),
                 ResourceLimit(key="connections", capacity=10),
             ]
         )
@@ -315,11 +307,7 @@ class TestLimitSetSharedModes:
         """Test that LimitSet defaults to shared=False, mode='sync'."""
 
         limits = LimitSet(
-            limits=[
-                RateLimit(
-                    key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100
-                )
-            ]
+            limits=[RateLimit(key="tokens", window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100)]
         )
 
         # Default is shared=False, mode="sync" which creates InMemorySharedLimitSet
@@ -331,9 +319,7 @@ class TestLimitSetSharedModes:
         # Valid: shared=False, mode="sync"
         limits = LimitSet(
             limits=[
-                RateLimit(
-                    key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100
-                )
+                RateLimit(key="tokens", window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100)
             ],
             shared=False,
             mode="sync",
@@ -346,7 +332,7 @@ class TestLimitSetSharedModes:
                 limits=[
                     RateLimit(
                         key="tokens",
-                        window_seconds=1,
+                        window=1,
                         algorithm=RateLimitAlgorithm.TokenBucket,
                         capacity=100,
                     )
@@ -364,7 +350,7 @@ class TestLimitSetSharedModes:
                 limits=[
                     RateLimit(
                         key="tokens",
-                        window_seconds=1,
+                        window=1,
                         algorithm=RateLimitAlgorithm.TokenBucket,
                         capacity=100,
                     )
@@ -379,9 +365,7 @@ class TestLimitSetSharedModes:
 
         limits = LimitSet(
             limits=[
-                RateLimit(
-                    key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100
-                )
+                RateLimit(key="tokens", window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100)
             ],
             shared=True,
             mode="process",
@@ -395,7 +379,7 @@ class TestLimitSetSharedModes:
                 limits=[
                     RateLimit(
                         key="tokens",
-                        window_seconds=1,
+                        window=1,
                         algorithm=RateLimitAlgorithm.TokenBucket,
                         capacity=100,
                     )
@@ -433,7 +417,7 @@ class TestLimitSetSharedModes:
                 limits=[
                     RateLimit(
                         key="tokens",
-                        window_seconds=1,
+                        window=1,
                         algorithm=RateLimitAlgorithm.TokenBucket,
                         capacity=100,
                     ),
@@ -463,7 +447,7 @@ class TestUnknownLimitKeys:
             limits=[
                 RateLimit(
                     key="tokens",
-                    window_seconds=1,
+                    window=1,
                     algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=100,
                 ),
@@ -510,7 +494,7 @@ class TestUnknownLimitKeys:
             limits=[
                 RateLimit(
                     key="tokens",
-                    window_seconds=1,
+                    window=1,
                     algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=100,
                 ),
@@ -530,10 +514,10 @@ class TestUnknownLimitKeys:
         """Test partial acquisition with mix of known and unknown keys."""
         limits = LimitSet(
             limits=[
-                CallLimit(window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
+                CallLimit(window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
                 RateLimit(
                     key="tokens",
-                    window_seconds=1,
+                    window=1,
                     algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=1000,
                 ),
@@ -570,10 +554,10 @@ class TestUnknownLimitKeys:
         """Test that all unknown keys still acquires CallLimit/ResourceLimit."""
         limits = LimitSet(
             limits=[
-                CallLimit(window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
+                CallLimit(window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
                 RateLimit(
                     key="tokens",
-                    window_seconds=1,
+                    window=1,
                     algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=1000,
                 ),
@@ -610,13 +594,13 @@ class TestUnknownLimitKeys:
             limits=[
                 RateLimit(
                     key="input_tokens",
-                    window_seconds=1,
+                    window=1,
                     algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=1000,
                 ),
                 RateLimit(
                     key="output_tokens",
-                    window_seconds=1,
+                    window=1,
                     algorithm=RateLimitAlgorithm.TokenBucket,
                     capacity=500,
                 ),
@@ -645,7 +629,7 @@ class TestUnknownUpdateKeys:
 
     def test_update_unknown_key_warns_once(self, caplog):
         """Test that updating unknown key logs warning once per key."""
-        limits = LimitSet(limits=[RateLimit(key="tokens", window_seconds=1, capacity=1000)])
+        limits = LimitSet(limits=[RateLimit(key="tokens", window=1, capacity=1000)])
 
         with caplog.at_level(logging.WARNING):
             caplog.clear()
@@ -663,7 +647,7 @@ class TestUnknownUpdateKeys:
 
     def test_update_unknown_key_does_not_raise_error(self):
         """Test that updating unknown key does not raise an error."""
-        limits = LimitSet(limits=[RateLimit(key="tokens", window_seconds=1, capacity=1000)])
+        limits = LimitSet(limits=[RateLimit(key="tokens", window=1, capacity=1000)])
 
         # Should not raise ValueError
         with limits.acquire(requested={"tokens": 100}) as acq:
@@ -674,8 +658,8 @@ class TestUnknownUpdateKeys:
         """Test that updating mix of known and unknown keys works correctly."""
         limits = LimitSet(
             limits=[
-                RateLimit(key="input_tokens", window_seconds=1, capacity=1000),
-                RateLimit(key="output_tokens", window_seconds=1, capacity=500),
+                RateLimit(key="input_tokens", window=1, capacity=1000),
+                RateLimit(key="output_tokens", window=1, capacity=500),
             ]
         )
 
@@ -693,7 +677,7 @@ class TestUnknownUpdateKeys:
 
     def test_update_all_unknown_keys(self):
         """Test that updating only unknown keys doesn't break anything."""
-        limits = LimitSet(limits=[RateLimit(key="tokens", window_seconds=1, capacity=1000)])
+        limits = LimitSet(limits=[RateLimit(key="tokens", window=1, capacity=1000)])
 
         with limits.acquire(requested={"tokens": 100}) as acq:
             # Update with only unknown keys
@@ -705,8 +689,8 @@ class TestUnknownUpdateKeys:
         """Test that warning message lists available keys."""
         limits = LimitSet(
             limits=[
-                RateLimit(key="input_tokens", window_seconds=1, capacity=1000),
-                RateLimit(key="output_tokens", window_seconds=1, capacity=500),
+                RateLimit(key="input_tokens", window=1, capacity=1000),
+                RateLimit(key="output_tokens", window=1, capacity=500),
             ]
         )
 

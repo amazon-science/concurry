@@ -16,7 +16,7 @@ Usage:
     ```python
     from concurry import LimitSet, RateLimit
 
-    limits = LimitSet(limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)])
+    limits = LimitSet(limits=[RateLimit(key="tokens", window=60, capacity=1000)])
 
     with limits.acquire(requested={"tokens": 100}) as acq:
         result = operation()
@@ -168,7 +168,7 @@ class LimitSetAcquisition:
         Basic usage with update::
 
             limits = LimitSet(limits=[
-                RateLimit(key="tokens", window_seconds=60, capacity=1000)
+                RateLimit(key="tokens", window=60, capacity=1000)
             ])
 
             with limits.acquire(requested={"tokens": 100}) as acq:
@@ -180,8 +180,8 @@ class LimitSetAcquisition:
         Mixed limits::
 
             limits = LimitSet(limits=[
-                CallLimit(window_seconds=60, capacity=100),
-                RateLimit(key="tokens", window_seconds=60, capacity=1000),
+                CallLimit(window=60, capacity=100),
+                RateLimit(key="tokens", window=60, capacity=1000),
                 ResourceLimit(key="connections", capacity=10)
             ])
 

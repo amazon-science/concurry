@@ -178,8 +178,7 @@ def start_ray_server_and_wait(timeout: float = 30.0) -> None:
     start_ray_server()
     if not wait_for_ray_client_port(timeout=timeout):
         raise RuntimeError(
-            f"Ray server did not start accepting connections on port {RAY_CLIENT_PORT} "
-            f"within {timeout}s"
+            f"Ray server did not start accepting connections on port {RAY_CLIENT_PORT} within {timeout}s"
         )
 
 

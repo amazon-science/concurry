@@ -286,7 +286,7 @@ class TestEdgeCases:
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
 
-            @worker(limits=[CallLimit(window_seconds=1.0, capacity=10)])
+            @worker(limits=[CallLimit(window=1.0, capacity=10)])
             class WaitAndRun:
                 def __init__(self, val):
                     self.val = val

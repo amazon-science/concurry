@@ -17,17 +17,34 @@ class TestRateLimit:
     def test_rate_limit_creation(self):
         """Test creating a RateLimit."""
         limit = RateLimit(
-            key="test_tokens", window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100
+            key="test_tokens", window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100
         )
         assert limit.key == "test_tokens"
-        assert limit.window_seconds == 60
+        assert limit.window == 60
         assert limit.capacity == 100
+
+    def test_per_alias_for_window(self):
+        """``per=`` is an alias for ``window=`` and accepts the same values."""
+        # RateWindow alias string
+        r1 = RateLimit(key="rph", capacity=10, per="hour")
+        assert r1.window == 3600.0
+        # Numeric seconds via per
+        r2 = RateLimit(key="rps", capacity=5, per=1)
+        assert r2.window == 1.0
+        # Same as window=
+        r3 = RateLimit(key="rph", capacity=10, window="hour")
+        assert r3.window == r1.window
+
+    def test_per_and_window_together_raise(self):
+        """Passing both ``per=`` and ``window=`` raises a clear error."""
+        import pytest as _pt
+
+        with _pt.raises((ValueError, Exception), match="alias|both|window"):
+            RateLimit(key="x", capacity=10, per="hour", window="minute")
 
     def test_rate_limit_can_acquire(self):
         """Test can_acquire check (non-blocking, doesn't modify state)."""
-        limit = RateLimit(
-            key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10
-        )
+        limit = RateLimit(key="tokens", window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)
 
         # Initially should be able to acquire
         assert limit.can_acquire(5) is True
@@ -42,9 +59,7 @@ class TestRateLimit:
         validate_usage now warns instead of raising error when used > requested,
         since the spend has already occurred and cannot be undone.
         """
-        limit = RateLimit(
-            key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10
-        )
+        limit = RateLimit(key="tokens", window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)
 
         # Valid usage (used <= requested)
         limit.validate_usage(requested=10, used=8)  # Should not raise
@@ -58,15 +73,13 @@ class TestRateLimit:
 
     def test_rate_limit_get_stats(self):
         """Test getting statistics."""
-        limit = RateLimit(
-            key="tokens", window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100
-        )
+        limit = RateLimit(key="tokens", window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100)
 
         stats = limit.get_stats()
         assert "key" in stats
         assert stats["key"] == "tokens"
         assert "capacity" in stats
-        assert "window_seconds" in stats
+        assert "window" in stats
 
     def test_rate_limit_algorithms(self):
         """Test different rate limiting algorithms."""
@@ -79,16 +92,14 @@ class TestRateLimit:
         ]
 
         for algo in algorithms:
-            limit = RateLimit(key="tokens", window_seconds=1, algorithm=algo, capacity=10)
+            limit = RateLimit(key="tokens", window=1, algorithm=algo, capacity=10)
             assert limit.algorithm == algo
             # Should be able to check acquisition
             assert limit.can_acquire(5) is True
 
     def test_rate_limit_must_use_limitset(self):
         """Test that RateLimits must be used within LimitSet for acquisition."""
-        limit = RateLimit(
-            key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10
-        )
+        limit = RateLimit(key="tokens", window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)
 
         # Direct acquisition not supported
         with pytest.raises(AttributeError):
@@ -106,15 +117,15 @@ class TestCallLimit:
 
     def test_call_limit_creation(self):
         """Test creating a CallLimit."""
-        limit = CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.SlidingWindow, capacity=100)
+        limit = CallLimit(window=60, algorithm=RateLimitAlgorithm.SlidingWindow, capacity=100)
         # Key is automatically set to "call_count"
         assert limit.key == "call_count"
-        assert limit.window_seconds == 60
+        assert limit.window == 60
         assert limit.capacity == 100
 
     def test_call_limit_key_is_fixed(self):
         """Test that CallLimit key is always 'call_count'."""
-        limit = CallLimit(window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)
+        limit = CallLimit(window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)
         assert limit.key == "call_count"
 
     def test_call_limit_validate_usage(self):
@@ -123,7 +134,7 @@ class TestCallLimit:
         - Implicit (requested=1): usage must be 1
         - Explicit (requested>1): usage must be in range [0, requested]
         """
-        limit = CallLimit(window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)
+        limit = CallLimit(window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)
 
         # Implicit acquisition (requested=1): usage must be 1
         limit.validate_usage(requested=1, used=1)  # Should not raise
@@ -151,7 +162,7 @@ class TestCallLimit:
 
     def test_call_limit_with_limitset(self):
         """Test CallLimit usage within LimitSet."""
-        limit = CallLimit(window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=5)
+        limit = CallLimit(window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=5)
 
         limit_set = LimitSet(limits=[limit])
 
@@ -238,9 +249,7 @@ class TestLimitThreadSafety:
 
     def test_ratelimit_not_thread_safe(self):
         """Verify that RateLimit internal state is not thread-safe."""
-        limit = RateLimit(
-            key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100
-        )
+        limit = RateLimit(key="tokens", window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100)
 
         # Direct manipulation of internal state (not thread-safe)
         # This is just demonstrating that Limit doesn't protect its state
@@ -330,9 +339,7 @@ class TestLimitValidationEdgeCases:
         """
         limits = LimitSet(
             limits=[
-                RateLimit(
-                    key="tokens", window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000
-                )
+                RateLimit(key="tokens", window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000)
             ]
         )
 
@@ -351,7 +358,7 @@ class TestLimitValidationEdgeCases:
         call update() with usage matching the requested amount.
         """
         limits = LimitSet(
-            limits=[CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100)]
+            limits=[CallLimit(window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100)]
         )
 
         # Explicit request for 5 calls - MUST update with 5
@@ -368,7 +375,7 @@ class TestLimitValidationEdgeCases:
         update() should raise RuntimeError.
         """
         limits = LimitSet(
-            limits=[CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100)]
+            limits=[CallLimit(window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100)]
         )
 
         # Explicit request for 5 calls without update() should fail
@@ -383,7 +390,7 @@ class TestLimitValidationEdgeCases:
         specify any value in range [0, requested] to support error scenarios.
         """
         limits = LimitSet(
-            limits=[CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100)]
+            limits=[CallLimit(window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100)]
         )
 
         # Explicit request for 10 calls, update with partial completion
@@ -413,10 +420,8 @@ class TestLimitValidationEdgeCases:
         """
         limits = LimitSet(
             limits=[
-                CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
-                RateLimit(
-                    key="tokens", window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000
-                ),
+                CallLimit(window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
+                RateLimit(key="tokens", window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000),
             ]
         )
 
@@ -434,9 +439,7 @@ class TestLimitValidationEdgeCases:
         """
         limits = LimitSet(
             limits=[
-                RateLimit(
-                    key="tokens", window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000
-                )
+                RateLimit(key="tokens", window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000)
             ]
         )
 
@@ -447,7 +450,7 @@ class TestLimitValidationEdgeCases:
     def test_requested_exceeds_capacity_call_limit(self):
         """Test that CallLimit request exceeding capacity raises ValueError immediately."""
         limits = LimitSet(
-            limits=[CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)]
+            limits=[CallLimit(window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)]
         )
 
         # Request more than capacity
@@ -466,9 +469,7 @@ class TestLimitValidationEdgeCases:
         """Test that exceeding capacity on one limit fails entire acquisition."""
         limits = LimitSet(
             limits=[
-                RateLimit(
-                    key="tokens", window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000
-                ),
+                RateLimit(key="tokens", window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000),
                 ResourceLimit(key="connections", capacity=5),
             ]
         )
@@ -481,9 +482,7 @@ class TestLimitValidationEdgeCases:
         """Test that requesting exactly the capacity succeeds (edge case)."""
         limits = LimitSet(
             limits=[
-                RateLimit(
-                    key="tokens", window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000
-                ),
+                RateLimit(key="tokens", window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000),
                 ResourceLimit(key="connections", capacity=5),
             ]
         )
@@ -498,7 +497,7 @@ class TestLimitValidationEdgeCases:
     def test_multiple_explicit_call_limit_requests(self):
         """Test multiple explicit CallLimit acquisitions with different amounts."""
         limits = LimitSet(
-            limits=[CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100)]
+            limits=[CallLimit(window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100)]
         )
 
         # First acquisition: request 3
@@ -518,10 +517,8 @@ class TestLimitValidationEdgeCases:
         """Test RateLimit usage exceeding requested with mixed limit types."""
         limits = LimitSet(
             limits=[
-                CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
-                RateLimit(
-                    key="tokens", window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000
-                ),
+                CallLimit(window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
+                RateLimit(key="tokens", window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000),
                 ResourceLimit(key="connections", capacity=5),
             ]
         )

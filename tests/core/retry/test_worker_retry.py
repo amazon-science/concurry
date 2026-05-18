@@ -537,7 +537,7 @@ class TestRetryWithLimits:
         limits = [
             RateLimit(
                 key="api_calls",
-                window_seconds=1,
+                window=1,
                 algorithm=RateLimitAlgorithm.TokenBucket,
                 capacity=10,
             )
@@ -573,7 +573,7 @@ class TestRetryWithLimits:
     def test_retry_with_call_limit(self, worker_mode):
         """Test retry with call limits."""
         # CallLimit has a fixed key "call_count", don't pass custom key
-        limits = [CallLimit(window_seconds=60, capacity=10, algorithm=RateLimitAlgorithm.TokenBucket)]
+        limits = [CallLimit(window=60, capacity=10, algorithm=RateLimitAlgorithm.TokenBucket)]
 
         class CallLimitedWorker(Worker):
             def __init__(self):
@@ -1948,8 +1948,8 @@ class TestRetryUntilWithTypedBaseModel:
 
         limits = LimitSet(
             limits=[
-                CallLimit(window_seconds=60, capacity=100),
-                RateLimit(key="tokens", window_seconds=60, capacity=1000),
+                CallLimit(window=60, capacity=100),
+                RateLimit(key="tokens", window=60, capacity=1000),
             ],
             shared=True,
             mode=worker_mode,

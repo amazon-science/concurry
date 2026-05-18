@@ -26,6 +26,7 @@ from .core import (
     PollingAlgorithm,
     RateLimit,
     RateLimitAlgorithm,
+    RateWindow,
     ResourceLimit,
     RetryAlgorithm,
     RetryConfig,
@@ -80,6 +81,7 @@ __all__ = [
     "FIRST_EXCEPTION",
     # Algorithms
     "RateLimitAlgorithm",
+    "RateWindow",
     "RetryAlgorithm",
     # Limit types
     "Limit",

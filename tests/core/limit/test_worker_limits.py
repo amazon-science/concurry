@@ -36,7 +36,7 @@ class TestWorkerLimits:
         """
         # Pass list of Limits - each worker will create its own private LimitSet
         limits = [
-            RateLimit(key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
+            RateLimit(key="tokens", window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
             ResourceLimit(key="connections", capacity=5),
         ]
 
@@ -67,7 +67,7 @@ class TestWorkerLimits:
         """
         # Pass list of Limits - each worker will create its own private LimitSet
         limits = [
-            RateLimit(key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
+            RateLimit(key="tokens", window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
         ]
 
         class TokenWorker(Worker):
@@ -125,16 +125,16 @@ class TestWorkerLimits:
         """Test worker using mixed limit types."""
         # Pass list of Limits - each worker will create its own private LimitSet
         limits = [
-            CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
+            CallLimit(window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
             RateLimit(
                 key="input_tokens",
-                window_seconds=1,
+                window=1,
                 algorithm=RateLimitAlgorithm.TokenBucket,
                 capacity=1000,
             ),
             RateLimit(
                 key="output_tokens",
-                window_seconds=1,
+                window=1,
                 algorithm=RateLimitAlgorithm.TokenBucket,
                 capacity=500,
             ),
@@ -172,9 +172,7 @@ class TestWorkerLimits:
         """Test worker with properly nested limit acquisition."""
         # Pass list of Limits - each worker will create its own private LimitSet
         limits = [
-            RateLimit(
-                key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000
-            ),
+            RateLimit(key="tokens", window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000),
             ResourceLimit(key="connections", capacity=2),
         ]
 
@@ -213,10 +211,8 @@ class TestWorkerLimits:
     def test_worker_get_limit_by_key(self, worker_mode):
         """Test worker accessing individual limits by key."""
         limits = [
-            CallLimit(window_seconds=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
-            RateLimit(
-                key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000
-            ),
+            CallLimit(window=60, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
+            RateLimit(key="tokens", window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=1000),
             ResourceLimit(key="connections", capacity=5),
         ]
 
@@ -278,7 +274,7 @@ class TestWorkerSharedLimits:
     def test_worker_with_shared_limits_list_conversion(self):
         """Test that passing list of Limits creates private LimitSet."""
         limits_list = [
-            RateLimit(key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
+            RateLimit(key="tokens", window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100),
             ResourceLimit(key="connections", capacity=5),
         ]
 
@@ -297,9 +293,7 @@ class TestWorkerSharedLimits:
         """Test workers sharing a LimitSet in thread mode."""
         shared_limits = LimitSet(
             limits=[
-                RateLimit(
-                    key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100
-                )
+                RateLimit(key="tokens", window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100)
             ],
             shared=True,
             mode="thread",
@@ -354,9 +348,7 @@ class TestWorkerSharedLimits:
         # Create thread-mode shared LimitSet
         thread_limits = LimitSet(
             limits=[
-                RateLimit(
-                    key="tokens", window_seconds=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100
-                )
+                RateLimit(key="tokens", window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=100)
             ],
             shared=True,
             mode="thread",
@@ -452,7 +444,7 @@ class TestWorkerLimitsWithConfig:
         """Test that worker can access config from LimitSet via acquisition."""
         config = {"region": "us-east-1", "account_id": "12345"}
         limitset = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+            limits=[RateLimit(key="tokens", window=60, capacity=1000)],
             shared=True,
             mode=worker_mode,
             config=config,
@@ -480,7 +472,7 @@ class TestWorkerLimitsWithConfig:
         """Test that modifying acq.config doesn't affect the LimitSet's config."""
         original_config = {"region": "us-east-1"}
         limitset = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+            limits=[RateLimit(key="tokens", window=60, capacity=1000)],
             shared=True,
             mode=worker_mode,
             config=original_config,
@@ -510,8 +502,8 @@ class TestWorkerLimitsWithConfig:
         config = {"environment": "production", "service": "api"}
         limitset = LimitSet(
             limits=[
-                CallLimit(window_seconds=60, capacity=100),
-                RateLimit(key="tokens", window_seconds=60, capacity=1000),
+                CallLimit(window=60, capacity=100),
+                RateLimit(key="tokens", window=60, capacity=1000),
                 ResourceLimit(key="connections", capacity=10),
             ],
             shared=True,
@@ -541,7 +533,7 @@ class TestWorkerLimitsWithConfig:
         config = {"region": "ap-southeast-1"}
         limitset = LimitSet(
             limits=[
-                RateLimit(key="tokens", window_seconds=60, capacity=1000),
+                RateLimit(key="tokens", window=60, capacity=1000),
                 ResourceLimit(key="connections", capacity=10),
             ],
             shared=True,
@@ -573,7 +565,7 @@ class TestWorkerLimitsWithConfig:
     def test_worker_without_config_defaults_to_empty_dict(self, worker_mode):
         """Test that LimitSet without config defaults to empty dict."""
         limitset = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+            limits=[RateLimit(key="tokens", window=60, capacity=1000)],
             shared=True,
             mode=worker_mode,
         )
@@ -615,7 +607,7 @@ class TestLimitPoolWorkerIntegration:
         # Create LimitSets with configs for the appropriate mode
         limitsets = [
             LimitSet(
-                limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+                limits=[RateLimit(key="tokens", window=60, capacity=1000)],
                 shared=True,
                 mode=worker_mode,
                 config={"region": f"region-{i}"},
@@ -664,7 +656,7 @@ class TestLimitPoolWorkerIntegration:
         # Create list of LimitSets with appropriate mode
         limitsets = [
             LimitSet(
-                limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+                limits=[RateLimit(key="tokens", window=60, capacity=1000)],
                 shared=True,
                 mode=worker_mode,
                 config={"region": f"region-{i}"},
@@ -706,7 +698,7 @@ class TestLimitPoolWorkerIntegration:
         # Create LimitSets with appropriate mode
         limitsets = [
             LimitSet(
-                limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+                limits=[RateLimit(key="tokens", window=60, capacity=1000)],
                 shared=True,
                 mode=worker_mode,
                 config={"region": f"region-{i}"},
@@ -750,7 +742,7 @@ class TestLimitPoolWorkerIntegration:
 
         # Create shared LimitSet with small capacity to test enforcement
         limitset = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=10, capacity=100)],
+            limits=[RateLimit(key="tokens", window=10, capacity=100)],
             shared=True,
             mode=worker_mode,
         )
@@ -787,7 +779,7 @@ class TestLimitPoolWorkerIntegration:
         # Create 3 LimitSets with different regions
         limitsets = [
             LimitSet(
-                limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+                limits=[RateLimit(key="tokens", window=60, capacity=1000)],
                 shared=True,
                 mode=worker_mode,
                 config={"region": f"region-{i}"},
@@ -834,7 +826,7 @@ class TestLimitPoolWorkerIntegration:
         # Create LimitSets
         limitsets = [
             LimitSet(
-                limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+                limits=[RateLimit(key="tokens", window=60, capacity=1000)],
                 shared=True,
                 mode=mode,
                 config={"region": f"region-{i}"},
@@ -870,7 +862,7 @@ class TestLimitPoolWorkerIntegration:
         # Create multiple LimitSets
         limitsets = [
             LimitSet(
-                limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+                limits=[RateLimit(key="tokens", window=60, capacity=1000)],
                 shared=True,
                 mode=worker_mode,
                 config={"region": f"region-{i}"},
@@ -917,7 +909,7 @@ class TestLimitPoolWorkerIntegration:
         # Create 2 shared LimitSets with LIMITED capacity
         limitsets = [
             LimitSet(
-                limits=[RateLimit(key="tokens", window_seconds=5, capacity=100)],
+                limits=[RateLimit(key="tokens", window=5, capacity=100)],
                 shared=True,
                 mode=worker_mode,
                 config={"limitset_index": i},
@@ -961,7 +953,7 @@ class TestLimitPoolWorkerIntegration:
         # Create LimitSets with detailed config
         limitsets = [
             LimitSet(
-                limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+                limits=[RateLimit(key="tokens", window=60, capacity=1000)],
                 shared=True,
                 mode=mode,
                 config={"region": f"us-east-{i + 1}", "account": f"account-{i + 1}"},

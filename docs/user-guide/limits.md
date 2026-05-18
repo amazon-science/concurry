@@ -46,9 +46,9 @@ from concurry import worker, RateLimit, LimitSet
 limits = LimitSet(
     limits=[
         # 500 requests / 60 seconds
-        RateLimit(key="requests", capacity=500, window_seconds=60),
+        RateLimit(key="requests", capacity=500, window=60),
         # 10,000 tokens / 60 seconds
-        RateLimit(key="tokens", capacity=10000, window_seconds=60)
+        RateLimit(key="tokens", capacity=10000, window=60)
     ],
     shared=True,   # Share this across all workers in the pool!
     mode="thread"  # Match your worker mode
@@ -106,12 +106,12 @@ from concurry import worker, LimitPool
 
 # Define independent limits for each region
 us_east = LimitSet(
-    limits=[RateLimit(key="tpm", capacity=1000, window_seconds=60)],
+    limits=[RateLimit(key="tpm", capacity=1000, window=60)],
     config={"region": "us-east-1"}  # Metadata attached to the limit
 )
 
 eu_west = LimitSet(
-    limits=[RateLimit(key="tpm", capacity=1000, window_seconds=60)],
+    limits=[RateLimit(key="tpm", capacity=1000, window=60)],
     config={"region": "eu-west-1"}
     )
 

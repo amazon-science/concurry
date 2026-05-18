@@ -129,7 +129,7 @@ Time-based rate limiting with multiple algorithms.
 ```python
 class RateLimit(Limit):
     key: str
-    window_seconds: float
+    window: float  # In seconds. Constructor accepts RateWindow / str alias / number; normalized to float seconds.
     capacity: int
     algorithm: RateLimitAlgorithm  # TokenBucket, GCRA, SlidingWindow, etc.
     _impl: BaseRateLimiter  # Algorithm implementation (NOT thread-safe!)
@@ -310,8 +310,8 @@ class BaseLimitSet(ABC):
 **Example:**
 ```python
 limits = LimitSet(limits=[
-    CallLimit(window_seconds=60, capacity=100),
-    RateLimit(key="tokens", window_seconds=60, capacity=1000),
+    CallLimit(window=60, capacity=100),
+    RateLimit(key="tokens", window=60, capacity=1000),
     ResourceLimit(key="connections", capacity=10)
 ])
 
@@ -333,7 +333,7 @@ After building the requested amounts, `_build_requested_amounts()` calls `_valid
 ```python
 # Raises ValueError immediately if requested > capacity
 limits = LimitSet(limits=[
-    RateLimit(key="tokens", window_seconds=60, capacity=1000)
+    RateLimit(key="tokens", window=60, capacity=1000)
 ])
 
 # This would block forever without validation
@@ -370,7 +370,7 @@ When a requested key doesn't exist in the LimitSet, it's skipped with a warning 
 **Behavior:**
 ```python
 limits = LimitSet(limits=[
-    RateLimit(key="tokens", window_seconds=60, capacity=1000)
+    RateLimit(key="tokens", window=60, capacity=1000)
 ])
 
 # Unknown keys are filtered out with warning (logged once per key)
@@ -1592,7 +1592,7 @@ async with await self.limits.async_acquire(requested=usage) as acq:
 
 ```python
 # ❌ WRONG - Race condition!
-limit = RateLimit(key="tokens", window_seconds=60, capacity=1000)
+limit = RateLimit(key="tokens", window=60, capacity=1000)
 
 def worker():
     if limit.can_acquire(100):  # NOT thread-safe!
@@ -1642,7 +1642,7 @@ limits.acquire(requested={"tokens": 1500})  # Capacity is 1000 - can never fulfi
 
 ```python
 limits = LimitSet(limits=[
-    RateLimit(key="tokens", window_seconds=60, capacity=1000)
+    RateLimit(key="tokens", window=60, capacity=1000)
 ])
 
 # ✅ Works now - unknown key skipped with warning
@@ -1754,8 +1754,8 @@ with empty_limitset.acquire():
 
 ```python
 limits = LimitSet(limits=[
-    CallLimit(window_seconds=60, capacity=100),
-    RateLimit(key="tokens", window_seconds=60, capacity=1000)
+    CallLimit(window=60, capacity=100),
+    RateLimit(key="tokens", window=60, capacity=1000)
 ])
 
 # Requesting only "tokens"

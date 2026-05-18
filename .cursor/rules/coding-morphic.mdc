@@ -185,14 +185,14 @@ class Limit(Typed, ABC):
     capacity: int
 
 class RateLimit(Limit):
-    window_seconds: float
+    window: float
 
 class LimitPool(Typed):
     limits: List[Limit]
 
 # Pydantic coerces dicts into the appropriate Limit subclass:
 pool = LimitPool(limits=[
-    RateLimit(key="rpm", capacity=100, window_seconds=60),
+    RateLimit(key="rpm", capacity=100, window=60),
 ])
 ```
 

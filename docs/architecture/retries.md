@@ -948,7 +948,7 @@ future = worker.submit(my_function, arg1, arg2)
 worker = APIWorker.options(
     mode="thread",
     num_retries={"*": 0, "call_api": 5},
-    limits=[RateLimit(key="api_calls", window_seconds=60, capacity=100)]
+    limits=[RateLimit(key="api_calls", window=60, capacity=100)]
 ).init()
 
 # Limits released between retry attempts for each method

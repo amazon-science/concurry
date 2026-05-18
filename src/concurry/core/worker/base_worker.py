@@ -2031,10 +2031,10 @@ class Worker:
 
         # Define limits
         limits = LimitSet(limits=[
-            CallLimit(window_seconds=60, capacity=100),  # 100 calls/min
+            CallLimit(window=60, capacity=100),  # 100 calls/min
             RateLimit(
                 key="api_tokens",
-                window_seconds=60,
+                window=60,
                 algorithm=RateLimitAlgorithm.TokenBucket,
                 capacity=1000
             ),
@@ -2061,7 +2061,7 @@ class Worker:
 
         # Option 2: Private limits per worker
         limit_defs = [
-            RateLimit(key="tokens", window_seconds=60, capacity=1000)
+            RateLimit(key="tokens", window=60, capacity=1000)
         ]
         worker = APIWorker.options(mode="thread", limits=limit_defs).init("key")
         # This worker has its own private 1000 token/min pool

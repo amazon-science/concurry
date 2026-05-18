@@ -180,7 +180,7 @@ from concurry import worker, gather, CallLimit
     mode="thread",
     max_workers=20,
     # Limit to 100 calls per minute across ALL 20 threads
-    limits=[CallLimit(window_seconds=60, capacity=100)]
+    limits=[CallLimit(window=60, capacity=100)]
 )
 class APIWorker:
     def fetch(self, url: str):

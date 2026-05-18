@@ -20,12 +20,8 @@ class TestLimitPoolCreation:
 
     def test_limitpool_creation(self):
         """Test basic LimitPool creation."""
-        ls1 = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=100)], shared=True, mode="sync"
-        )
-        ls2 = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=100)], shared=True, mode="sync"
-        )
+        ls1 = LimitSet(limits=[RateLimit(key="tokens", window=60, capacity=100)], shared=True, mode="sync")
+        ls2 = LimitSet(limits=[RateLimit(key="tokens", window=60, capacity=100)], shared=True, mode="sync")
         pool = LimitPool(
             limit_sets=[ls1, ls2], load_balancing=LoadBalancingAlgorithm.RoundRobin, worker_index=0
         )
@@ -35,9 +31,7 @@ class TestLimitPoolCreation:
 
     def test_limitpool_with_single_limitset(self):
         """Test LimitPool with single LimitSet."""
-        ls = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=100)], shared=True, mode="sync"
-        )
+        ls = LimitSet(limits=[RateLimit(key="tokens", window=60, capacity=100)], shared=True, mode="sync")
         pool = LimitPool(limit_sets=[ls], load_balancing=LoadBalancingAlgorithm.Random)
         assert len(pool.limit_sets) == 1
 
@@ -48,9 +42,7 @@ class TestLimitPoolCreation:
 
     def test_limitpool_unsupported_algorithm_raises_error(self):
         """Test that unsupported load balancing algorithm raises ValueError."""
-        ls = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=100)], shared=True, mode="sync"
-        )
+        ls = LimitSet(limits=[RateLimit(key="tokens", window=60, capacity=100)], shared=True, mode="sync")
         # LimitPool only supports Random and RoundRobin, not LeastActiveLoad
         with pytest.raises(ValueError, match="Unsupported load balancing algorithm"):
             LimitPool(limit_sets=[ls], load_balancing=LoadBalancingAlgorithm.LeastActiveLoad)
@@ -58,9 +50,7 @@ class TestLimitPoolCreation:
     def test_limitpool_immutability(self):
         """Test that LimitPool is immutable (Typed subclass)."""
 
-        ls = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=100)], shared=True, mode="sync"
-        )
+        ls = LimitSet(limits=[RateLimit(key="tokens", window=60, capacity=100)], shared=True, mode="sync")
         pool = LimitPool(limit_sets=[ls], load_balancing=LoadBalancingAlgorithm.RoundRobin)
 
         # Try to modify public attributes (should fail due to frozen=True)
@@ -78,7 +68,7 @@ class TestLimitPoolLoadBalancing:
         """Test round-robin selection cycles through LimitSets."""
         limitsets = [
             LimitSet(
-                limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+                limits=[RateLimit(key="tokens", window=60, capacity=1000)],
                 shared=True,
                 mode="sync",
                 config={"index": i},
@@ -106,7 +96,7 @@ class TestLimitPoolLoadBalancing:
         """Test round-robin with different worker offsets."""
         limitsets = [
             LimitSet(
-                limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+                limits=[RateLimit(key="tokens", window=60, capacity=1000)],
                 shared=True,
                 mode="sync",
                 config={"index": i},
@@ -149,7 +139,7 @@ class TestLimitPoolLoadBalancing:
         """Test random selection distributes across LimitSets."""
         limitsets = [
             LimitSet(
-                limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+                limits=[RateLimit(key="tokens", window=60, capacity=1000)],
                 shared=True,
                 mode="sync",
                 config={"index": i},
@@ -173,9 +163,7 @@ class TestLimitPoolLoadBalancing:
 
     def test_limitpool_balancer_stats(self):
         """Test that balancer statistics are tracked."""
-        ls = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)], shared=True, mode="sync"
-        )
+        ls = LimitSet(limits=[RateLimit(key="tokens", window=60, capacity=1000)], shared=True, mode="sync")
         pool = LimitPool(limit_sets=[ls], load_balancing=LoadBalancingAlgorithm.RoundRobin, worker_index=5)
 
         # Make some acquisitions
@@ -197,7 +185,7 @@ class TestLimitPoolAcquisition:
     def test_limitpool_acquire_delegates_to_limitset(self):
         """Test that acquire() properly delegates to selected LimitSet."""
         limitset = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+            limits=[RateLimit(key="tokens", window=60, capacity=1000)],
             shared=True,
             mode="sync",
             config={"region": "us-east-1"},
@@ -212,9 +200,7 @@ class TestLimitPoolAcquisition:
 
     def test_limitpool_try_acquire(self):
         """Test non-blocking try_acquire()."""
-        limitset = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=1, capacity=10)], shared=True, mode="sync"
-        )
+        limitset = LimitSet(limits=[RateLimit(key="tokens", window=1, capacity=10)], shared=True, mode="sync")
         pool = LimitPool(limit_sets=[limitset], load_balancing=LoadBalancingAlgorithm.RoundRobin)
 
         # First try_acquire should succeed
@@ -241,7 +227,7 @@ class TestLimitPoolAcquisition:
     def test_limitpool_acquire_with_timeout(self):
         """Test acquire() with timeout."""
         limitset = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=10, capacity=10)], shared=True, mode="sync"
+            limits=[RateLimit(key="tokens", window=10, capacity=10)], shared=True, mode="sync"
         )
         pool = LimitPool(limit_sets=[limitset], load_balancing=LoadBalancingAlgorithm.RoundRobin)
 
@@ -263,7 +249,7 @@ class TestLimitPoolStats:
         """Test get_stats() returns comprehensive statistics."""
         limitsets = [
             LimitSet(
-                limits=[RateLimit(key="tokens", window_seconds=60, capacity=100 * (i + 1))],
+                limits=[RateLimit(key="tokens", window=60, capacity=100 * (i + 1))],
                 shared=True,
                 mode="sync",
             )
@@ -299,7 +285,7 @@ class TestLimitPoolGetItem:
         """Test accessing LimitSet by integer index."""
         limitsets = [
             LimitSet(
-                limits=[RateLimit(key="tokens", window_seconds=60, capacity=100 * (i + 1))],
+                limits=[RateLimit(key="tokens", window=60, capacity=100 * (i + 1))],
                 shared=True,
                 mode="sync",
             )
@@ -321,8 +307,8 @@ class TestLimitPoolGetItem:
         """Test chained access: pool[index][key] to get Limit."""
         limitset = LimitSet(
             limits=[
-                CallLimit(window_seconds=60, capacity=100),
-                RateLimit(key="tokens", window_seconds=60, capacity=1000),
+                CallLimit(window=60, capacity=100),
+                RateLimit(key="tokens", window=60, capacity=1000),
             ],
             shared=True,
             mode="sync",
@@ -340,7 +326,7 @@ class TestLimitPoolGetItem:
     def test_limitpool_getitem_string_key_raises_error(self):
         """Test that string key access raises TypeError with helpful message."""
         limitset = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=100)], shared=True, mode="sync"
+            limits=[RateLimit(key="tokens", window=60, capacity=100)], shared=True, mode="sync"
         )
 
         pool = LimitPool(limit_sets=[limitset], load_balancing=LoadBalancingAlgorithm.RoundRobin)
@@ -352,7 +338,7 @@ class TestLimitPoolGetItem:
     def test_limitpool_getitem_out_of_range(self):
         """Test that out-of-range index raises IndexError."""
         limitset = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=100)], shared=True, mode="sync"
+            limits=[RateLimit(key="tokens", window=60, capacity=100)], shared=True, mode="sync"
         )
 
         pool = LimitPool(limit_sets=[limitset], load_balancing=LoadBalancingAlgorithm.RoundRobin)
@@ -369,9 +355,7 @@ class TestLimitPoolWithSharedLimitSets:
         """Test that multiple workers can share LimitSets via LimitPool."""
         # Create shared LimitSets
         limitsets = [
-            LimitSet(
-                limits=[RateLimit(key="tokens", window_seconds=60, capacity=100)], shared=True, mode="sync"
-            )
+            LimitSet(limits=[RateLimit(key="tokens", window=60, capacity=100)], shared=True, mode="sync")
             for _ in range(2)
         ]
 
@@ -403,7 +387,7 @@ class TestLimitPoolWithDifferentLimitKeys:
         """Test that LimitPool works when LimitSets have different limit keys."""
         # LimitSet 1 has "tokens" limit
         ls1 = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)],
+            limits=[RateLimit(key="tokens", window=60, capacity=1000)],
             shared=True,
             mode="sync",
             config={"service": "service-a"},
@@ -411,7 +395,7 @@ class TestLimitPoolWithDifferentLimitKeys:
 
         # LimitSet 2 has "requests" limit (different key)
         ls2 = LimitSet(
-            limits=[RateLimit(key="requests", window_seconds=60, capacity=100)],
+            limits=[RateLimit(key="requests", window=60, capacity=100)],
             shared=True,
             mode="sync",
             config={"service": "service-b"},
@@ -432,14 +416,10 @@ class TestLimitPoolWithDifferentLimitKeys:
     def test_limitpool_cannot_use_string_key_with_different_keys(self):
         """Test that string key access is not supported (different keys in LimitSets)."""
         # LimitSet 1 has "tokens" limit
-        ls1 = LimitSet(
-            limits=[RateLimit(key="tokens", window_seconds=60, capacity=1000)], shared=True, mode="sync"
-        )
+        ls1 = LimitSet(limits=[RateLimit(key="tokens", window=60, capacity=1000)], shared=True, mode="sync")
 
         # LimitSet 2 has "requests" limit (different key)
-        ls2 = LimitSet(
-            limits=[RateLimit(key="requests", window_seconds=60, capacity=100)], shared=True, mode="sync"
-        )
+        ls2 = LimitSet(limits=[RateLimit(key="requests", window=60, capacity=100)], shared=True, mode="sync")
 
         pool = LimitPool(limit_sets=[ls1, ls2], load_balancing=LoadBalancingAlgorithm.RoundRobin)
 
@@ -470,8 +450,8 @@ class TestLimitPoolEdgeCases:
         """Test LimitPool with LimitSets containing different limit types."""
         ls1 = LimitSet(
             limits=[
-                CallLimit(window_seconds=60, capacity=100),
-                RateLimit(key="tokens", window_seconds=60, capacity=1000),
+                CallLimit(window=60, capacity=100),
+                RateLimit(key="tokens", window=60, capacity=1000),
             ],
             shared=True,
             mode="sync",
@@ -502,7 +482,7 @@ class TestLimitPoolEdgeCases:
         num_limitsets = 50
         limitsets = [
             LimitSet(
-                limits=[RateLimit(key="tokens", window_seconds=60, capacity=100)],
+                limits=[RateLimit(key="tokens", window=60, capacity=100)],
                 shared=True,
                 mode="sync",
                 config={"index": i},

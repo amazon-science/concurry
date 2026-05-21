@@ -35,6 +35,79 @@ class TestRateLimit:
         r3 = RateLimit(key="rph", capacity=10, window="hour")
         assert r3.window == r1.window
 
+    @pytest.mark.parametrize(
+        "alias,expected_seconds",
+        [
+            # Secondly aliases
+            ("second", 1.0),
+            ("seconds", 1.0),
+            ("sec", 1.0),
+            ("secs", 1.0),
+            ("per_second", 1.0),
+            ("per_seconds", 1.0),
+            ("per_sec", 1.0),
+            ("per_secs", 1.0),
+            # Minutely aliases
+            ("minute", 60.0),
+            ("minutes", 60.0),
+            ("min", 60.0),
+            ("mins", 60.0),
+            ("per_minute", 60.0),
+            ("per_minutes", 60.0),
+            ("per_min", 60.0),
+            ("per_mins", 60.0),
+            # Hourly aliases
+            ("hour", 3600.0),
+            ("hours", 3600.0),
+            ("hr", 3600.0),
+            ("hrs", 3600.0),
+            ("per_hour", 3600.0),
+            ("per_hours", 3600.0),
+            ("per_hr", 3600.0),
+            ("per_hrs", 3600.0),
+            # Daily aliases
+            ("day", 86400.0),
+            ("days", 86400.0),
+            ("per_day", 86400.0),
+            ("per_days", 86400.0),
+            # Weekly aliases
+            ("week", 604800.0),
+            ("weeks", 604800.0),
+            ("wk", 604800.0),
+            ("wks", 604800.0),
+            ("per_week", 604800.0),
+            ("per_weeks", 604800.0),
+            ("per_wk", 604800.0),
+            ("per_wks", 604800.0),
+            # Member names (canonical) work too
+            ("Secondly", 1.0),
+            ("Minutely", 60.0),
+            ("Hourly", 3600.0),
+            ("Daily", 86400.0),
+            ("Weekly", 604800.0),
+        ],
+    )
+    def test_window_string_aliases(self, alias: str, expected_seconds: float) -> None:
+        """``RateLimit(window=<alias>)`` resolves every supported alias to the
+        same number of seconds. AutoEnum is case-insensitive so callers can
+        also pass uppercase / mixed-case forms; this is exercised separately."""
+        rl = RateLimit(key="x", capacity=10, window=alias)
+        assert rl.window == expected_seconds
+
+    def test_window_aliases_case_insensitive(self) -> None:
+        """AutoEnum aliases match case-insensitively, so callers can pass
+        ``"MIN"``, ``"Min"``, or ``"PER_HOUR"`` interchangeably."""
+        for variant in ("MIN", "Min", "Mins", "MINS"):
+            assert RateLimit(key="x", capacity=10, window=variant).window == 60.0
+        for variant in ("PER_HOUR", "Per_Hour", "PER_HRS"):
+            assert RateLimit(key="x", capacity=10, window=variant).window == 3600.0
+
+    def test_per_kwarg_with_alias(self) -> None:
+        """``per=`` accepts the same alias set as ``window=``."""
+        for alias, expected in [("min", 60.0), ("hrs", 3600.0), ("per_day", 86400.0), ("wk", 604800.0)]:
+            rl = RateLimit(key="x", capacity=10, per=alias)
+            assert rl.window == expected
+
     def test_per_and_window_together_raise(self):
         """Passing both ``per=`` and ``window=`` raises a clear error."""
         import pytest as _pt

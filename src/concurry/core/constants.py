@@ -40,10 +40,11 @@ class RateLimitAlgorithm(AutoEnum):
 class RateWindow(AutoEnum):
     """Named rate-limit windows. Use as a shorthand for ``window`` seconds.
 
-    Each member maps to a fixed number of seconds. Pass a member (or one of its
-    aliases like ``"minutely"`` / ``"min"`` / ``"per_minute"``) to
-    :class:`RateLimit` / :class:`CallLimit` via the ``window`` constructor
-    field.
+    Each member maps to a fixed number of seconds. Pass a member or one of its
+    aliases (singular ``"minute"``, plural ``"minutes"``, abbreviation ``"min"``,
+    abbreviated plural ``"mins"``, or any ``"per_..."``-prefixed form like
+    ``"per_minute"`` / ``"per_mins"``) to :class:`RateLimit` / :class:`CallLimit`
+    via the ``window`` constructor field. Aliases are case-insensitive.
 
     Members:
         Secondly: 1s window
@@ -58,11 +59,55 @@ class RateWindow(AutoEnum):
     (``window=Daily``, capacity = 30x your daily cap).
     """
 
-    Secondly = alias("second", "per_second", "sec")
-    Minutely = alias("minute", "per_minute", "min")
-    Hourly = alias("hour", "per_hour", "hr")
-    Daily = alias("day", "per_day")
-    Weekly = alias("week", "per_week", "wk")
+    Secondly = alias(
+        # canonical singular & plural
+        "second",
+        "seconds",
+        # short forms
+        "sec",
+        "secs",
+        # per_-prefixed
+        "per_second",
+        "per_seconds",
+        "per_sec",
+        "per_secs",
+    )
+    Minutely = alias(
+        "minute",
+        "minutes",
+        "min",
+        "mins",
+        "per_minute",
+        "per_minutes",
+        "per_min",
+        "per_mins",
+    )
+    Hourly = alias(
+        "hour",
+        "hours",
+        "hr",
+        "hrs",
+        "per_hour",
+        "per_hours",
+        "per_hr",
+        "per_hrs",
+    )
+    Daily = alias(
+        "day",
+        "days",
+        "per_day",
+        "per_days",
+    )
+    Weekly = alias(
+        "week",
+        "weeks",
+        "wk",
+        "wks",
+        "per_week",
+        "per_weeks",
+        "per_wk",
+        "per_wks",
+    )
 
     def to_seconds(self) -> float:
         """Convert the rate window to seconds."""

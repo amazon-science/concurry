@@ -42,6 +42,38 @@ class TestRateLimit:
         with _pt.raises((ValueError, Exception), match="alias|both|window"):
             RateLimit(key="x", capacity=10, per="hour", window="minute")
 
+    def test_window_seconds_deprecated_alias(self):
+        """``window_seconds=`` is a deprecated alias for ``window=``.
+
+        Using it should still work (mapping the value to ``window``) but
+        must emit a ``DeprecationWarning``.
+        """
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            r = RateLimit(key="legacy", capacity=10, window_seconds=60)
+        assert r.window == 60.0
+        # Exactly one DeprecationWarning about window_seconds.
+        deprecations = [
+            w
+            for w in caught
+            if issubclass(w.category, DeprecationWarning) and "window_seconds" in str(w.message)
+        ]
+        assert len(deprecations) == 1, (
+            f"Expected one DeprecationWarning, got: {[str(w.message) for w in caught]}"
+        )
+
+    def test_window_seconds_and_window_together_raise(self):
+        """Passing both ``window_seconds=`` and ``window=`` raises a clear error."""
+        with pytest.raises(ValueError, match="window_seconds"):
+            RateLimit(key="x", capacity=10, window=60, window_seconds=120)
+
+    def test_window_seconds_and_per_together_raise(self):
+        """Passing both ``window_seconds=`` and ``per=`` raises a clear error."""
+        with pytest.raises(ValueError, match="window_seconds"):
+            RateLimit(key="x", capacity=10, per="hour", window_seconds=60)
+
     def test_rate_limit_can_acquire(self):
         """Test can_acquire check (non-blocking, doesn't modify state)."""
         limit = RateLimit(key="tokens", window=1, algorithm=RateLimitAlgorithm.TokenBucket, capacity=10)

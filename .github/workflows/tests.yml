@@ -61,6 +61,16 @@ jobs:
         timeout-minutes: 50
         env:
           CI: true
+          # Ray's UV runtime-env hook (added in recent Ray versions) does a
+          # `copy.deepcopy(runtime_env)` on the dict we pass to `ray.init`.
+          # Our test conftest's runtime_env contains imported module objects
+          # (`{"py_modules": [concurry, morphic, tests]}`), and module
+          # objects aren't pickleable, so the deepcopy crashes the connection
+          # with `TypeError: cannot pickle 'module' object`. We're not
+          # actually using `uv run` to launch the driver here (we install
+          # via `uv pip` and run the driver with plain `pytest`), so this
+          # hook is unnecessary. Disable it.
+          RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
         run: |
           ulimit -n 65535
           cd concurry

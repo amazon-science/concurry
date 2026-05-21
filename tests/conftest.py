@@ -17,6 +17,18 @@ import subprocess
 import sys
 import time
 
+# Disable Ray's UV runtime-env hook BEFORE importing ray. Recent Ray versions
+# (~2.55+) deepcopy any `runtime_env` dict passed to `ray.init`; our test
+# conftest passes `{"py_modules": [concurry, morphic, tests]}` (live module
+# objects), and `copy.deepcopy(module_obj)` raises
+# `TypeError: cannot pickle 'module' object`. The hook only matters when the
+# driver is launched via `uv run` (it auto-propagates the uv environment to
+# workers). We aren't using `uv run` to launch pytest, so the hook is
+# unnecessary. The env var is read at module import time inside Ray, so we
+# must set it BEFORE the first `import ray`. Use setdefault so a user can
+# still opt back in by exporting `RAY_ENABLE_UV_RUN_RUNTIME_ENV=1`.
+os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
+
 import morphic
 import pytest
 

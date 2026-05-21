@@ -40,11 +40,12 @@ Example:
 """
 
 import logging
+import math
 from abc import ABC
 from typing import Any, ClassVar, Dict, NoReturn, Union
 
 from morphic import Typed
-from pydantic import confloat, conint
+from pydantic import confloat
 
 from ...utils import _NO_ARG, _NO_ARG_TYPE
 from ..algorithms.rate_limiting import RateLimiter
@@ -98,13 +99,15 @@ class Limit(Typed, ABC):
 
     key: str  # Unique identifier within a LimitSet
 
-    def can_acquire(self, requested: int) -> bool:
+    def can_acquire(self, requested: Union[int, float]) -> bool:
         """Check if the limit can accommodate the requested amount.
 
         This is a non-blocking check that doesn't modify state. NOT thread-safe.
 
         Args:
-            requested: Amount to check
+            requested: Amount to check. ``int`` for counting limits;
+                ``int`` or ``float`` for limits whose capacity is
+                continuous-valued (TokenBucket / GCRA only).
 
         Returns:
             True if the requested amount can be acquired
@@ -115,7 +118,7 @@ class Limit(Typed, ABC):
         """
         raise NotImplementedError("Subclasses must implement can_acquire")
 
-    def validate_usage(self, requested: int, used: int) -> None:
+    def validate_usage(self, requested: Union[int, float], used: Union[int, float]) -> None:
         """Validate that usage is valid for this limit type.
 
         Args:
@@ -216,7 +219,7 @@ class RateLimit(Limit):
 
     window: confloat(gt=0)
     algorithm: Union[RateLimitAlgorithm, _NO_ARG_TYPE] = _NO_ARG
-    capacity: conint(gt=0)
+    capacity: confloat(gt=0)
 
     @classmethod
     def pre_initialize(cls, data: Dict[str, Any]) -> None:
@@ -233,12 +236,45 @@ class RateLimit(Limit):
         key="rph")`` is equivalent to ``RateLimit(capacity=10, window="hour",
         key="rph")``. Passing both ``window`` and ``per`` raises ``ValueError``.
 
+        ``window_seconds`` is accepted as a **deprecated** alias for ``window``
+        (it was the historical field name before ``window`` became canonical).
+        Using it emits a ``DeprecationWarning`` and the value is mapped to
+        ``window``. Passing both ``window`` and ``window_seconds`` (or both
+        ``per`` and ``window_seconds``) raises ``ValueError``. The alias may
+        be removed in a future release.
+
         After this hook, ``data["window"]`` is always a ``float`` in seconds
-        (and ``data["per"]`` has been removed if it was provided). Pydantic's
-        ``confloat(gt=0)`` then validates it like any other field.
+        (and ``data["per"]`` / ``data["window_seconds"]`` have been removed if
+        they were provided). Pydantic's ``confloat(gt=0)`` then validates it
+        like any other field.
         """
         if not isinstance(data, dict):
             return
+        # Resolve `window_seconds=` deprecated alias for `window=`.
+        if "window_seconds" in data:
+            ws_value = data.pop("window_seconds")
+            if ws_value is not None:
+                if "window" in data and data["window"] is not None:
+                    raise ValueError(
+                        "Pass either `window=` or `window_seconds=`, not both. "
+                        "`window_seconds` is a deprecated alias for `window`."
+                    )
+                if "per" in data and data["per"] is not None:
+                    raise ValueError(
+                        "Pass either `per=` or `window_seconds=`, not both. "
+                        "`window_seconds` is a deprecated alias for `window` "
+                        "(of which `per` is also an alias)."
+                    )
+                import warnings
+
+                warnings.warn(
+                    "`window_seconds=` is deprecated; use `window=` instead. "
+                    "`window` accepts the same numeric seconds value, plus "
+                    "RateWindow members and string aliases like 'minutely'.",
+                    DeprecationWarning,
+                    stacklevel=3,
+                )
+                data["window"] = ws_value
         # Resolve `per=` alias for `window=`.
         if "per" in data:
             per_value = data.pop("per")
@@ -293,7 +329,7 @@ class RateLimit(Limit):
             window_seconds=self.window,
         )
 
-    def can_acquire(self, requested: int) -> bool:
+    def can_acquire(self, requested: Union[int, float]) -> bool:
         """Check if tokens can be acquired without consuming them.
 
         Warning:
@@ -301,7 +337,7 @@ class RateLimit(Limit):
         """
         return self._impl.can_acquire(tokens=requested)
 
-    def validate_usage(self, requested: int, used: int) -> None:
+    def validate_usage(self, requested: Union[int, float], used: Union[int, float]) -> None:
         """Validate usage and warn if it exceeds requested.
 
         Args:
@@ -345,10 +381,12 @@ class RateLimit(Limit):
         behavior. Two ``RateLimit``\\s with identical params produce the
         same signature; two with any difference produce different ones.
 
-        The format is ``"c{capacity}w{window_int_or_float}{algo}"``
+        The format is ``"c{capacity_int_or_float}w{window_int_or_float}{algo}"``
         where ``algo`` is the algorithm enum's first 3 letters in lowercase
-        (e.g., ``"gcr"`` for GCRA). Window seconds are formatted as int when
-        integral, else as a stripped float (``60`` not ``60.0``; ``0.5``).
+        (e.g., ``"gcr"`` for GCRA). Both ``capacity`` and ``window`` are
+        formatted as int when integral, else as a stripped float (``60``
+        not ``60.0``; ``0.5``). ``inf`` capacity (representing an
+        unbounded limit) serializes as ``"inf"``.
 
         Examples::
 
@@ -358,12 +396,24 @@ class RateLimit(Limit):
             RateLimit(key="y", window="daily", capacity=50_000,
                       algorithm=RateLimitAlgorithm.TokenBucket).params_signature()
             # 'c50000w86400tok'
+
+            RateLimit(key="z", window=60, capacity=0.0001).params_signature()
+            # 'c0.0001w60gcr'
         """
         ws = self.window
         ws_str = str(int(ws)) if ws == int(ws) else str(ws).rstrip("0").rstrip(".")
+        cap = self.capacity
+        if math.isinf(cap):
+            cap_str = "inf"
+        elif cap == int(cap):
+            cap_str = str(int(cap))
+        else:
+            # ``repr`` is more deterministic than ``str`` for floats across
+            # Python versions and avoids losing trailing precision.
+            cap_str = repr(cap)
         algo = self.algorithm
         algo_name = algo.name if hasattr(algo, "name") else str(algo)
-        return f"c{self.capacity}w{ws_str}{algo_name[:3].lower()}"
+        return f"c{cap_str}w{ws_str}{algo_name[:3].lower()}"
 
 
 class CallLimit(RateLimit):

@@ -1,14 +1,45 @@
 """Rate limiting algorithms for resource protection."""
 
+import math
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Deque, List, Optional
+from typing import Deque, List, Optional, Union
 
 from morphic import MutableTyped, Registry
 from pydantic import ConfigDict, PrivateAttr
 
 from ..constants import RateLimitAlgorithm
+
+
+def _require_integer_tokens(tokens: Union[int, float], algorithm_name: str) -> int:
+    """Validate that ``tokens`` is integer-valued and return it as an ``int``.
+
+    LeakyBucket and SlidingWindow track discrete records (queue slots,
+    timestamp entries). Fractional ``tokens`` is meaningless for them.
+    Raise a clear ``ValueError`` pointing the caller to TokenBucket / GCRA
+    if they need fractional acquires (e.g., for non-integer-valued
+    quantities like fractional resource units).
+    """
+    if isinstance(tokens, bool):
+        # Subclass of int, but conceptually wrong for token counts.
+        raise ValueError(f"{algorithm_name} requires an integer token count; got bool: {tokens!r}.")
+    if isinstance(tokens, int):
+        return tokens
+    if isinstance(tokens, float):
+        if math.isnan(tokens) or math.isinf(tokens):
+            raise ValueError(f"{algorithm_name} requires a finite integer token count; got {tokens!r}.")
+        if tokens != int(tokens):
+            raise ValueError(
+                f"{algorithm_name} requires an integer token count; got "
+                f"fractional value {tokens!r}. Use TokenBucket or GCRA "
+                f"for fractional-unit limits."
+            )
+        return int(tokens)
+    raise ValueError(
+        f"{algorithm_name} requires int or integer-valued float tokens; "
+        f"got {type(tokens).__name__}: {tokens!r}."
+    )
 
 
 class _BaseRateLimiter(Registry, MutableTyped, ABC):
@@ -23,11 +54,13 @@ class _BaseRateLimiter(Registry, MutableTyped, ABC):
     model_config = ConfigDict(extra="ignore")
 
     @abstractmethod
-    def acquire(self, tokens: int = 1, timeout: Optional[float] = None) -> bool:
+    def acquire(self, tokens: Union[int, float] = 1, timeout: Optional[float] = None) -> bool:
         """Acquire tokens from the rate limiter.
 
         Args:
-            tokens: Number of tokens to acquire
+            tokens: Number of tokens to acquire. ``int`` for the
+                discrete-counting algorithms (LeakyBucket, SlidingWindow,
+                FixedWindow); ``int`` or ``float`` for TokenBucket and GCRA.
             timeout: Maximum time to wait for tokens
 
         Returns:
@@ -36,11 +69,11 @@ class _BaseRateLimiter(Registry, MutableTyped, ABC):
         pass
 
     @abstractmethod
-    def try_acquire(self, tokens: int = 1) -> bool:
+    def try_acquire(self, tokens: Union[int, float] = 1) -> bool:
         """Try to acquire tokens without blocking.
 
         Args:
-            tokens: Number of tokens to acquire
+            tokens: Number of tokens to acquire (see :meth:`acquire`).
 
         Returns:
             True if tokens were acquired immediately
@@ -48,14 +81,14 @@ class _BaseRateLimiter(Registry, MutableTyped, ABC):
         pass
 
     @abstractmethod
-    def can_acquire(self, tokens: int = 1) -> bool:
+    def can_acquire(self, tokens: Union[int, float] = 1) -> bool:
         """Check if tokens can be acquired without consuming them.
 
         This is a non-consuming check used by LimitSet to validate
         that all limits can be satisfied before atomically acquiring them.
 
         Args:
-            tokens: Number of tokens to check
+            tokens: Number of tokens to check (see :meth:`acquire`).
 
         Returns:
             True if tokens could be acquired
@@ -72,14 +105,14 @@ class _BaseRateLimiter(Registry, MutableTyped, ABC):
         pass
 
     @abstractmethod
-    def refund(self, tokens: int) -> None:
+    def refund(self, tokens: Union[int, float]) -> None:
         """Refund tokens back to the limiter.
 
         This is used when actual usage is less than requested.
         Not all algorithms support refunding.
 
         Args:
-            tokens: Number of tokens to refund
+            tokens: Number of tokens to refund (see :meth:`acquire`).
         """
         pass
 
@@ -98,7 +131,7 @@ class _TokenBucketLimiter(_BaseRateLimiter):
     aliases = ["token_bucket", "token", RateLimitAlgorithm.TokenBucket]
 
     max_rate: float
-    capacity: int
+    capacity: Union[int, float]
 
     _tokens: float = PrivateAttr()
     _last_update: float = PrivateAttr()
@@ -197,7 +230,7 @@ class _LeakyBucketLimiter(_BaseRateLimiter):
     aliases = ["leaky_bucket", "leaky", RateLimitAlgorithm.LeakyBucket]
 
     max_rate: float
-    capacity: int
+    capacity: Union[int, float]
 
     _queue: Deque[float] = PrivateAttr()
     _last_leak: float = PrivateAttr()
@@ -220,13 +253,23 @@ class _LeakyBucketLimiter(_BaseRateLimiter):
 
         self._last_leak = now
 
-    def can_acquire(self, tokens: int = 1) -> bool:
-        """Check if tokens can be acquired without consuming them."""
+    def can_acquire(self, tokens: Union[int, float] = 1) -> bool:
+        """Check if tokens can be acquired without consuming them.
+
+        LeakyBucket counts discrete queue records; ``tokens`` must be an
+        integer (or integer-valued float). Fractional values raise
+        ``ValueError``.
+        """
+        tokens = _require_integer_tokens(tokens, "LeakyBucket")
         self._leak()
         return len(self._queue) + tokens <= self.capacity
 
-    def try_acquire(self, tokens: int = 1) -> bool:
-        """Try to add to the queue."""
+    def try_acquire(self, tokens: Union[int, float] = 1) -> bool:
+        """Try to add to the queue.
+
+        ``tokens`` must be an integer (see :func:`can_acquire`).
+        """
+        tokens = _require_integer_tokens(tokens, "LeakyBucket")
         self._leak()
 
         if len(self._queue) + tokens <= self.capacity:
@@ -315,13 +358,23 @@ class _SlidingWindowLimiter(_BaseRateLimiter):
         cutoff_time = time.time() - self.window_seconds
         self._requests = [ts for ts in self._requests if ts > cutoff_time]
 
-    def can_acquire(self, tokens: int = 1) -> bool:
-        """Check if tokens can be acquired without consuming them."""
+    def can_acquire(self, tokens: Union[int, float] = 1) -> bool:
+        """Check if tokens can be acquired without consuming them.
+
+        SlidingWindow counts discrete request timestamps; ``tokens`` must
+        be an integer (or integer-valued float). Fractional values raise
+        ``ValueError``.
+        """
+        tokens = _require_integer_tokens(tokens, "SlidingWindow")
         self._cleanup_old_requests()
         return len(self._requests) + tokens <= self.max_rate
 
-    def try_acquire(self, tokens: int = 1) -> bool:
-        """Try to acquire without blocking."""
+    def try_acquire(self, tokens: Union[int, float] = 1) -> bool:
+        """Try to acquire without blocking.
+
+        ``tokens`` must be an integer (see :func:`can_acquire`).
+        """
+        tokens = _require_integer_tokens(tokens, "SlidingWindow")
         self._cleanup_old_requests()
 
         if len(self._requests) + tokens <= self.max_rate:
@@ -506,19 +559,32 @@ class _GCRALimiter(_BaseRateLimiter):
     aliases = ["gcra", RateLimitAlgorithm.GCRA]
 
     max_rate: float
-    capacity: int
+    capacity: Union[int, float]
 
     _emission_interval: float = PrivateAttr()
     _tau: float = PrivateAttr()
     _tat: float = PrivateAttr(default=0.0)
 
     def post_initialize(self) -> None:
-        """Initialize private attributes after validation."""
-        # Time between requests (emission interval)
-        self._emission_interval = 1.0 / self.max_rate if self.max_rate > 0 else 0
+        """Initialize private attributes after validation.
 
-        # Maximum burst time (tau)
-        self._tau = self.capacity * self._emission_interval
+        Special-case ``capacity = inf`` (which represents an unbounded
+        limit — every acquire trivially succeeds): the natural
+        ``capacity * emission_interval`` product is ``inf * 0.0 = NaN``
+        for infinite-rate inputs, which would make every comparison
+        False and block acquire forever. We skip the math and flag the
+        limiter as unbounded.
+        """
+        if math.isinf(self.capacity) or math.isinf(self.max_rate):
+            # Unbounded: every acquire trivially succeeds.
+            self._emission_interval = 0.0
+            self._tau = math.inf
+        else:
+            # Time between requests (emission interval)
+            self._emission_interval = 1.0 / self.max_rate if self.max_rate > 0 else 0
+
+            # Maximum burst time (tau)
+            self._tau = self.capacity * self._emission_interval
 
         # Theoretical Arrival Time - tracks when next request should arrive
         self._tat = 0.0
@@ -612,7 +678,7 @@ class _GCRALimiter(_BaseRateLimiter):
 def RateLimiter(
     algorithm: RateLimitAlgorithm,
     max_rate: float,
-    capacity: int,
+    capacity: Union[int, float],
     window_seconds: Optional[float] = None,
 ) -> _BaseRateLimiter:
     """Factory function to create the appropriate rate limiter using Registry pattern.

@@ -12,7 +12,7 @@
   <a href="https://github.com/amazon-science/concurry/actions"><img src="https://img.shields.io/github/actions/workflow/status/amazon-science/concurry/tests.yml?branch=main" alt="Build Status"></a>
 </p>
 
-## **Parallelism made simple, both for humans and AI agents.**
+## **Scaling made stupid. Built for humans and AI agents.**
 
 Concurry is a unified, delightful concurrency library for Python. It replaces the fragmented landscape of `threading`, `multiprocessing`, `asyncio`, and `Ray` with a single, elegant API. Write your code once, and run it on a single thread, multiple cores, or a distributed cluster—without changing a line of business logic.
 
